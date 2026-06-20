@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.runner import TaskSignals
 from core.workflows.common.timeline_sync import sync_cleanup_paths as _common_sync_cleanup_paths
 from core.workflows.encode.domain import (
@@ -58,7 +59,7 @@ def build_single_pass(
     cmd.extend(callbacks.ffmpeg_progress_args())
     cmd.extend(_hardware_input_args_domain(video, callbacks=callbacks.codec_domain_callbacks()))
     for src in all_sources:
-        cmd.extend(["-i", str(src)])
+        append_ffmpeg_input_args(cmd, src)
     metadata_inputs = callbacks.materialize_container_metadata_inputs(
         config,
         source_idx=source_idx,
@@ -122,7 +123,7 @@ def build_two_pass(
         c.extend(callbacks.ffmpeg_progress_args())
         c.extend(_hardware_input_args_domain(video, callbacks=callbacks.codec_domain_callbacks()))
         for src in all_sources:
-            c.extend(["-i", str(src)])
+            append_ffmpeg_input_args(c, src)
         if vf:
             c.extend(["-vf", vf])
         c.extend(callbacks.ffmpeg_thread_args(None))
@@ -220,7 +221,7 @@ def build_runtime_single_pass_with_sync(
     cmd.extend(callbacks.ffmpeg_progress_args())
     cmd.extend(_hardware_input_args_domain(video, callbacks=callbacks.codec_domain_callbacks()))
     for src in all_sources:
-        cmd.extend(["-i", str(src)])
+        append_ffmpeg_input_args(cmd, src)
     callbacks.append_sync_inputs(cmd, sync_inputs)
 
     metadata_inputs = callbacks.materialize_container_metadata_inputs(
@@ -307,7 +308,7 @@ def build_runtime_two_pass_with_sync(
         c.extend(callbacks.ffmpeg_progress_args())
         c.extend(_hardware_input_args_domain(video, callbacks=callbacks.codec_domain_callbacks()))
         for src in all_sources:
-            c.extend(["-i", str(src)])
+            append_ffmpeg_input_args(c, src)
         if include_sync_inputs:
             callbacks.append_sync_inputs(c, sync_inputs)
         if vf:

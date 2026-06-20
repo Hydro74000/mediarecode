@@ -559,9 +559,9 @@
     "fra": "{name} est déjà dans la liste.",
     "eng": "{name} is already in the list."
   },
-  "Inspection de {name}…": {
-    "fra": "Inspection de {name}…",
-    "eng": "Inspecting {name}..."
+  "Inspection de {name} (ffprobe + mediainfo)…": {
+    "fra": "Inspection de {name} (ffprobe + mediainfo)…",
+    "eng": "Inspecting {name} (ffprobe + mediainfo)..."
   },
   "Erreur inattendue : {exc}": {
     "fra": "Erreur inattendue : {exc}",

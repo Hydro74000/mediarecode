@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.subprocess_utils import subprocess_text_kwargs
 
 from core.runner import TaskCancelledError, TaskSignals
@@ -214,13 +215,14 @@ class MetadataInjectRunner:
                         # « max 2 fichiers vidéo en parallèle ».
                         annexb_for_convert = tmp / "source_annexb.hevc"
                         signals.progress.emit("Extraction HEVC annexB pour conversion DoVi…")
-                        _run([
-                            cb.ffmpeg_bin, "-nostdin", "-y",
-                            "-i", str(selected_video_source),
+                        annexb_cmd = [cb.ffmpeg_bin, "-nostdin", "-y"]
+                        append_ffmpeg_input_args(annexb_cmd, selected_video_source)
+                        annexb_cmd.extend([
                             "-map", f"0:{int(selected_video_stream)}", "-c", "copy",
                             "-bsf:v", "hevc_mp4toannexb",
                             "-f", "hevc", str(annexb_for_convert),
                         ])
+                        _run(annexb_cmd)
                         _check()
                         signals.progress.emit(
                             f"Conversion {p7_router_decision.sub_profile.label} → P8.1…"
@@ -355,13 +357,14 @@ class MetadataInjectRunner:
                 if needs_annexb and (video.copy_dv or video.copy_hdr10plus):
                     annexb_src = _alloc("source.hevc", src_size_est)
                     signals.progress.emit("Extraction HEVC annexB pour outillage DoVi/HDR10+…")
-                    _run([
-                        cb.ffmpeg_bin, "-nostdin", "-y",
-                        "-i", str(meta_src),
+                    annexb_cmd = [cb.ffmpeg_bin, "-nostdin", "-y"]
+                    append_ffmpeg_input_args(annexb_cmd, meta_src)
+                    annexb_cmd.extend([
                         "-map", "0:v:0", "-c", "copy",
                         "-bsf:v", "hevc_mp4toannexb",
                         "-f", "hevc", str(annexb_src),
                     ])
+                    _run(annexb_cmd)
                     _check()
                     meta_input = annexb_src
                 else:
@@ -698,11 +701,10 @@ class MetadataInjectRunner:
                     *cb.ffmpeg_progress_args(),
                     "-i",
                     str(current_video_input),
-                    "-i",
-                    str(config.source),
                 ]
+                append_ffmpeg_input_args(recon_cmd, config.source)
                 for sp in extra_sources:
-                    recon_cmd.extend(["-i", str(sp)])
+                    append_ffmpeg_input_args(recon_cmd, sp)
 
                 sync_remap, sync_inputs, live_sync_session, strict_interleave = cb.prepare_multisource_sync(
                     config=config,

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.config import AppConfig
+from core.bluray import discover_titles, find_disc_root
 from core.extractor import TrackExtractor
 from core.file_types import is_accepted
 from core.i18n import apply_translations, translate_text
@@ -272,7 +273,7 @@ class RemuxPanel(QWidget):
 
         content_layout.addWidget(_section_label("FICHIERS SOURCES"))
         self._file_list = _FileListWidget()
-        self._file_list.add_requested.connect(self._on_add_files)
+        self._file_list.add_requested.connect(self._route_dropped_paths)
         self._file_list.remove_requested.connect(self._on_remove_file)
         content_layout.addWidget(self._file_list)
 
@@ -464,6 +465,9 @@ class RemuxPanel(QWidget):
         source_paths: list[str] = []
         attachment_paths: list[str] = []
 
+        if find_disc_root(folder) is not None:
+            return source_paths, attachment_paths
+
         for child in sorted(folder.rglob("*")):
             if not child.is_file():
                 continue
@@ -475,6 +479,37 @@ class RemuxPanel(QWidget):
 
         return source_paths, attachment_paths
 
+    def _select_bluray_playlist(self, folder: Path) -> str | None:
+        titles = discover_titles(folder, min_duration_s=60.0)
+        if not titles:
+            return None
+        items: list[str] = []
+        by_label: dict[str, Path] = {}
+        for title in titles[:50]:
+            hours = int(title.duration_s // 3600)
+            minutes = int((title.duration_s % 3600) // 60)
+            seconds = int(title.duration_s % 60)
+            label = (
+                f"{title.label}  —  {hours:02d}:{minutes:02d}:{seconds:02d}"
+                f"  —  {len(title.segments)} segment(s)"
+            )
+            items.append(label)
+            by_label[label] = title.playlist_path
+        if len(items) == 1:
+            return str(by_label[items[0]])
+        selected, ok = QInputDialog.getItem(
+            self,
+            translate_text("Sélectionner une playlist Blu-ray"),
+            translate_text("Playlist :"),
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        playlist = by_label.get(selected)
+        return str(playlist) if playlist is not None else None
+
     def _route_dropped_paths(self, paths: list[str]) -> None:
         source_paths: list[str] = []
         attachment_paths: list[str] = []
@@ -484,6 +519,14 @@ class RemuxPanel(QWidget):
         for path_str in paths:
             path = Path(path_str)
             if path.is_dir():
+                bluray_playlist = self._select_bluray_playlist(path)
+                if bluray_playlist:
+                    if bluray_playlist not in seen_sources:
+                        source_paths.append(bluray_playlist)
+                        seen_sources.add(bluray_playlist)
+                    continue
+                if find_disc_root(path) is not None:
+                    continue
                 folder_sources, folder_attachments = self._collect_folder_drop_paths(path)
                 for folder_source in folder_sources:
                     if folder_source not in seen_sources:

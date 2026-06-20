@@ -328,11 +328,12 @@ def tracks_from_file_info(info: FileInfo, file_id: str = "") -> list[TrackEntry]
         disp_flags["orig_flag_forced"] = s.forced
         disp_flags["flag_default"]      = s.default
         disp_flags["orig_flag_default"] = s.default
+        display_info = f"{s.element_count} éléments" if s.element_count else ""
         entries.append(TrackEntry(
             mkv_tid=s.index,
             track_type="subtitle",
             codec=s.codec.upper(),
-            display_info="",
+            display_info=display_info,
             language=s.language or "",
             title=s.title or "",
             orig_language=s.language or "",

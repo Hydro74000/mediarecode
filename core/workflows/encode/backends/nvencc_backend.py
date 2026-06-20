@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
+from core.bluray import is_bluray_playlist
 from core.runner import TaskSignals
 from core.workflows.encode.backends.ffmpeg_backend import FfmpegEncodeBackend
 from core.workflows.encode.backends.models import (
@@ -80,6 +81,11 @@ class NvenccEncodeBackend(EncodeBackend):
             errors.append("NVEncC ne supporte pas le mode taille cible (2 passes) dans cette version.")
         if video.inject_hdr_meta and video.codec == "nvencc_h264":
             errors.append("NVEncC H.264 ne supporte pas les métadonnées HDR statiques.")
+        if (video.copy_dv or video.copy_hdr10plus) and is_bluray_playlist(video.source_path or config.source):
+            errors.append(
+                "NVEncC ne peut pas copier DoVi/HDR10+ dynamiques depuis une playlist Blu-ray ; "
+                "utilisez le backend FFmpeg pour cette source."
+            )
         if (video.copy_dv or video.copy_hdr10plus) and not nvencc_supports_dynamic_hdr(video.codec):
             errors.append("Le codec NVEncC sélectionné ne supporte pas DoVi/HDR10+.")
         if (video.copy_dv or video.copy_hdr10plus) and nvencc_requires_ffmpeg_filter_pipe(video):

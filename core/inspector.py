@@ -30,6 +30,12 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
+from core.bluray import (
+    BluRayTitle,
+    ffprobe_input_args,
+    is_bluray_playlist,
+    title_for_playlist,
+)
 from core.lang_tags import Rfc5646LanguageTags
 from core.subprocess_utils import subprocess_text_kwargs
 
@@ -250,6 +256,7 @@ class SubtitleTrack:
     title:    str | None
     forced:   bool = False
     default:  bool = False
+    element_count: int | None = None
     raw:      dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -315,6 +322,11 @@ class FileInfo:
     tag_count:    int               = 0      # nombre de balises globales (via ffprobe format.tags)
     hdr_type:     HDRType           = HDRType.NONE  # du flux vidéo principal
     title:        str               = ""     # titre de segment (balise Title du conteneur)
+    source_kind:  str               = "file" # "file" | "bluray"
+    source_label: str               = ""     # libellé source synthétique (ex. 00418.mpls)
+    bluray_playlist_id: int | None  = None
+    bluray_segments: list[str]      = field(default_factory=list)
+    mediainfo_json: dict[str, Any] | None = field(default=None, repr=False)
     #: Balises MKV globales du conteneur (clés en MAJUSCULES, hors TITLE).
     #: Inclut les tags standard et propriétaires (ex. _PROGRAM_LABEL).
     #: Peuplé depuis ffprobe format.tags lors de l'inspection.
@@ -438,22 +450,40 @@ class FileInspector:
             self._emit_verbose(f"Inspection impossible : fichier introuvable ({path})")
             raise InspectionError(path, "fichier introuvable")
 
+        bluray_title = title_for_playlist(path) if is_bluray_playlist(path) else None
         raw = self._run_ffprobe(path)
         info = self._parse_ffprobe(path, raw)
+        mediainfo_path = path
+        if bluray_title is not None:
+            info.source_kind = "bluray"
+            info.source_label = bluray_title.label
+            info.bluray_playlist_id = bluray_title.playlist_id
+            info.bluray_segments = [segment.path.name for segment in bluray_title.segments]
+            if bluray_title.duration_s > 0:
+                info.duration_s = bluray_title.duration_s
+            title_size = bluray_title.size_bytes
+            if title_size > 0:
+                info.size_bytes = title_size
+            if bluray_title.segments:
+                mediainfo_path = bluray_title.segments[0].path
+            self._apply_bluray_stream_languages(info, bluray_title)
 
         # ── Enrichissement mediainfo (un seul appel JSON couvrant frame_count,
         #    HDR_Format, HDR_Format_Compatibility, profil DoVi). Remplace les
         #    3 appels --Inform séparés et accélère la phase HDR.
-        mi_data = self._run_mediainfo_json(path)
+        mi_data = self._run_mediainfo_json(mediainfo_path)
+        info.mediainfo_json = mi_data
         mi_video = self._mediainfo_video_track(mi_data) if mi_data else None
+        if mi_data is not None:
+            self._merge_track_counts_from_mediainfo(info, mi_data)
 
         # Frame count (issu de mediainfo JSON quand disponible, sinon fallback
         # legacy --Inform=FrameCount pour rester compatible avec très vieux mediainfo).
-        if mi_video is not None:
+        if bluray_title is None and mi_video is not None:
             fc = mi_video.get("FrameCount")
             if isinstance(fc, str) and fc.isdigit():
                 info.frame_count = int(fc)
-        if info.frame_count is None:
+        if bluray_title is None and info.frame_count is None:
             try:
                 info.frame_count = self.get_frame_count(path)
             except Exception:
@@ -511,6 +541,31 @@ class FileInspector:
             f"Chap={chapter_count} HDR={hdr_label} Frames={frame_count}"
         )
         return info
+
+    @staticmethod
+    def _stream_pid_from_raw(raw: dict[str, Any]) -> int | None:
+        value = raw.get("id")
+        if value in (None, ""):
+            return None
+        try:
+            return int(str(value), 0)
+        except (TypeError, ValueError):
+            return None
+
+    def _apply_bluray_stream_languages(self, info: FileInfo, title: BluRayTitle) -> None:
+        by_pid = title.stream_by_pid
+        if not by_pid:
+            return
+        for track in [*info.audio_tracks, *info.subtitle_tracks]:
+            if (track.language or "").strip():
+                continue
+            pid = self._stream_pid_from_raw(track.raw)
+            if pid is None:
+                continue
+            stream = by_pid.get(pid)
+            if stream is None or not stream.language:
+                continue
+            track.language = stream.language
 
     def get_frame_count(self, path: Path) -> int | None:
         """
@@ -658,8 +713,8 @@ class FileInspector:
             "-show_streams",
             "-show_format",
             "-show_chapters",
-            str(path),
         ]
+        cmd.extend(ffprobe_input_args(path))
         self._emit_command(cmd)
         try:
             result = subprocess.run(
@@ -711,8 +766,8 @@ class FileInspector:
             "-read_intervals", f"%+#{max(1, int(max_frames))}",
             "-show_frames",
             "-show_entries", "frame_side_data=side_data_type",
-            str(path),
         ]
+        cmd.extend(ffprobe_input_args(path))
         self._emit_command(cmd)
         try:
             result = subprocess.run(
@@ -839,19 +894,102 @@ class FileInspector:
         if result.returncode != 0:
             return None
         try:
-            return json.loads(result.stdout or "{}")
+            payload = json.loads(result.stdout or "{}")
         except json.JSONDecodeError as exc:
             self._emit_verbose(f"mediainfo JSON invalide : {exc}")
             return None
+        if not isinstance(payload, dict):
+            self._emit_verbose("mediainfo JSON invalide : racine non objet.")
+            return None
+        return payload
 
     @staticmethod
-    def _mediainfo_video_track(mi_data: dict[str, Any]) -> dict[str, Any] | None:
-        """Retourne le 1er track ``@type=Video`` du JSON mediainfo, ou None."""
-        media = mi_data.get("media") or {}
-        for track in media.get("track") or []:
-            if isinstance(track, dict) and track.get("@type") == "Video":
+    def _mediainfo_typed_tracks(mi_data: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
+        """
+        Retourne ``(track, type)`` en supportant le schéma natif mediainfo
+        (``media.track[].@type``, ex. "Video") et un schéma alternatif
+        observé chez certains wrappers tiers (``streams[].kind``, ex. "VIDEO").
+        """
+        media = mi_data.get("media")
+        if isinstance(media, dict):
+            return [
+                (track, str(track.get("@type") or ""))
+                for track in media.get("track") or []
+                if isinstance(track, dict)
+            ]
+        streams = mi_data.get("streams")
+        if isinstance(streams, list):
+            return [
+                (track, str(track.get("kind") or "").capitalize())
+                for track in streams
+                if isinstance(track, dict)
+            ]
+        return []
+
+    @classmethod
+    def _mediainfo_video_track(cls, mi_data: dict[str, Any]) -> dict[str, Any] | None:
+        """Retourne le 1er track de type Video du JSON mediainfo, ou None."""
+        for track, track_type in cls._mediainfo_typed_tracks(mi_data):
+            if track_type == "Video":
                 return track
         return None
+
+    @classmethod
+    def _mediainfo_tracks(cls, mi_data: dict[str, Any], track_type: str) -> list[dict[str, Any]]:
+        return [
+            track
+            for track, t in cls._mediainfo_typed_tracks(mi_data)
+            if t == track_type
+        ]
+
+    @staticmethod
+    def _mediainfo_int_field(track: dict[str, Any], candidates: set[str]) -> int | None:
+        for key, value in track.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized_key not in candidates:
+                continue
+            value_int = _int_or_none_relaxed(value)
+            if value_int is not None and value_int > 0:
+                return value_int
+        return None
+
+    @classmethod
+    def _mediainfo_video_bitrate(cls, track: dict[str, Any]) -> int | None:
+        return cls._mediainfo_int_field(
+            track,
+            {
+                "bitrate",
+                "bitratenominal",
+                "nominalbitrate",
+                "encodedbitrate",
+            },
+        )
+
+    @classmethod
+    def _mediainfo_subtitle_element_count(cls, track: dict[str, Any]) -> int | None:
+        return cls._mediainfo_int_field(
+            track,
+            {
+                "elementcount",
+                "countofelements",
+                "numberofelements",
+                "framecount",
+                "numberofframes",
+            },
+        )
+
+    def _merge_track_counts_from_mediainfo(self, info: FileInfo, mi_data: dict[str, Any]) -> None:
+        video_tracks = self._mediainfo_tracks(mi_data, "Video")
+        for video, mi_track in zip(info.video_tracks, video_tracks, strict=False):
+            bitrate = self._mediainfo_video_bitrate(mi_track)
+            if bitrate is not None:
+                video.bit_rate = bitrate
+
+        text_tracks = self._mediainfo_tracks(mi_data, "Text")
+        for subtitle, mi_track in zip(info.subtitle_tracks, text_tracks, strict=False):
+            element_count = self._mediainfo_subtitle_element_count(mi_track)
+            if element_count is not None:
+                subtitle.element_count = element_count
 
     @staticmethod
     def _hdr_flags_from_mi_video(mi_video: dict[str, Any]) -> tuple[bool, bool, bool]:
@@ -1046,6 +1184,7 @@ class FileInspector:
             title    = tags.get("title"),
             forced   = bool(disposition.get("forced", 0)),
             default  = bool(disposition.get("default", 0)),
+            element_count = _subtitle_element_count_from_stream(s),
             raw      = s,
         )
 
@@ -1119,6 +1258,48 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _int_or_none_relaxed(value: Any) -> int | None:
+    direct = _int_or_none(value)
+    if direct is not None:
+        return direct
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = (
+        text.replace(" ", "")
+        .replace("\u00a0", "")
+        .replace("\u202f", "")
+        .replace("_", "")
+    )
+    if compact.isdigit():
+        return int(compact)
+    return None
+
+
+def _subtitle_element_count_from_stream(stream: dict[str, Any]) -> int | None:
+    for key in ("nb_read_frames", "nb_read_packets", "nb_frames"):
+        value = _int_or_none_relaxed(stream.get(key))
+        if value is not None and value > 0:
+            return value
+
+    tags = stream.get("tags") or {}
+    if isinstance(tags, dict):
+        for key, value in tags.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized_key not in {
+                "numberofframes",
+                "framecount",
+                "elementcount",
+                "countofelements",
+                "numberofelements",
+            }:
+                continue
+            value_int = _int_or_none_relaxed(value)
+            if value_int is not None and value_int > 0:
+                return value_int
+    return None
 
 
 # =============================================================================

@@ -882,6 +882,41 @@ class TestEncodePanelDynamicHdrDefaults:
         assert config.video.static_hdr_metadata_analysis_request == "precise"
         panel.close()
 
+    def test_static_hdr_prefill_reuses_initial_mediainfo_json(self, qt_app, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.HDR10)
+        entry = _video_entry(0)
+        entry.entry_id = "video-hdr"
+        info = _file_info(_PATH_A, [video], hdr_type=HDRType.HDR10)
+        info.mediainfo_json = {
+            "media": {
+                "track": [
+                    {
+                        "@type": "Video",
+                        "MasteringDisplay_ColorPrimaries": "BT.2020",
+                        "MasteringDisplay_Luminance_Min": "0.0001",
+                        "MasteringDisplay_Luminance_Max": "1000",
+                        "MaxCLL": "1000 cd/m2",
+                        "MaxFALL": "400 cd/m2",
+                    }
+                ]
+            }
+        }
+
+        def fail_subprocess_run(*_args, **_kwargs):
+            raise AssertionError("mediainfo should be reused from FileInfo, not relaunched")
+
+        monkeypatch.setattr("ui.panels.encode_panel.panel.subprocess.run", fail_subprocess_run)
+
+        panel.set_video_tracks([(info, entry, _COLOR)])
+
+        state = panel._video_settings_by_entry_id["video-hdr"]
+        assert state["master_display"] == "G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1)"
+        assert state["max_cll"] == "1000,400"
+        assert panel._master_display.text() == state["master_display"]
+        assert panel._max_cll.text() == "1000,400"
+        panel.close()
+
     def test_manual_hdr_values_cancel_scheduled_workflow_analysis(self, qt_app):
         panel = EncodePanel(AppConfig())
         video = _video_track(0, HDRType.DOLBY_VISION)

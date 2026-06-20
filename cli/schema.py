@@ -147,6 +147,7 @@ def build_cli_json_schema() -> dict[str, Any]:
                         "required": ["path"],
                         "properties": {
                             "path": {"type": "string"},
+                            "playlist": {"type": "integer"},
                             "attachments": {
                                 "oneOf": [
                                     {"type": "boolean"},

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from core.bluray import append_ffmpeg_input_args
 from core.subprocess_utils import subprocess_text_kwargs
 
 
@@ -113,26 +114,25 @@ class StaticHdrEstimateService:
             converted = tmp_dir / "source_p8.hevc"
 
             self._emit(progress_cb, "Analyse HDR10 estimée : extraction HEVC P5…")
-            self._run_capture(
-                [
-                    self._ffmpeg,
-                    "-hide_banner",
-                    "-nostdin",
-                    "-y",
-                    "-i",
-                    str(source),
-                    "-map",
-                    f"0:{int(stream_index)}",
-                    "-c",
-                    "copy",
-                    "-bsf:v",
-                    "hevc_mp4toannexb",
-                    "-f",
-                    "hevc",
-                    str(annexb),
-                ],
-                cancel_cb=cancel_cb,
-            )
+            extract_cmd = [
+                self._ffmpeg,
+                "-hide_banner",
+                "-nostdin",
+                "-y",
+            ]
+            append_ffmpeg_input_args(extract_cmd, source)
+            extract_cmd.extend([
+                "-map",
+                f"0:{int(stream_index)}",
+                "-c",
+                "copy",
+                "-bsf:v",
+                "hevc_mp4toannexb",
+                "-f",
+                "hevc",
+                str(annexb),
+            ])
+            self._run_capture(extract_cmd, cancel_cb=cancel_cb)
 
             self._emit(progress_cb, "Analyse HDR10 estimée : conversion P5 → P8…")
             self._run_capture(

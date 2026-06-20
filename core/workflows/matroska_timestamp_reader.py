@@ -20,6 +20,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.bluray import ffprobe_input_args
 from core.subprocess_utils import subprocess_text_kwargs
 
 
@@ -66,15 +67,16 @@ class MatroskaTimestampReader:
         Lève RuntimeError si ffprobe est indisponible ou si aucun packet
         vidéo n'a été trouvé.
         """
+        cmd = [
+            self._ffprobe, "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time,duration_time",
+            "-of", "json",
+        ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
-                [
-                    self._ffprobe, "-v", "error",
-                    "-select_streams", "v:0",
-                    "-show_entries", "packet=pts_time,duration_time",
-                    "-of", "json",
-                    str(source),
-                ],
+                cmd,
                 capture_output=True,
                 check=False,
                 **subprocess_text_kwargs(),

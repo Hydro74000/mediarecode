@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.runner import TaskSignals
 from core.workflows.common.timeline_sync import (
     append_strict_interleave_mux_flags as _common_append_strict_interleave_mux_flags,
@@ -56,9 +57,11 @@ def append_offset_aux_inputs(
         input_idx = input_by_key.get(input_key)
         if input_idx is None:
             if int(spec.offset_ms) > 0:
-                cmd.extend(["-itsoffset", _offset_seconds_plan(spec.offset_ms), "-i", str(spec.input_path)])
+                cmd.extend(["-itsoffset", _offset_seconds_plan(spec.offset_ms)])
+                append_ffmpeg_input_args(cmd, spec.input_path)
             else:
-                cmd.extend(["-ss", _offset_seconds_plan(spec.offset_ms), "-i", str(spec.input_path)])
+                cmd.extend(["-ss", _offset_seconds_plan(spec.offset_ms)])
+                append_ffmpeg_input_args(cmd, spec.input_path)
             input_idx = next_input_index
             input_by_key[input_key] = input_idx
             next_input_index += 1

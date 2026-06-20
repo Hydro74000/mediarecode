@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from core.bluray import ffprobe_input_args
 from core.config import AppConfig
 from core.inspector import FileInfo, HDRType, VideoTrack
 from core.i18n import apply_translations, set_current_language, translate_text
@@ -726,7 +727,7 @@ class EncodePanel(QWidget):
             else None
         )
         if settings is None and selected_video:
-            self._prefill_hdr_meta(selected_video.raw, info.path)
+            self._prefill_hdr_meta(selected_video.raw, info.path, info.mediainfo_json)
 
         pass  # Fichier de sortie géré par RemuxPanel
 
@@ -1558,18 +1559,33 @@ class EncodePanel(QWidget):
 
         return wrap
 
-    def _prefill_hdr_meta(self, raw: dict, source_path: Path | None = None) -> None:
+    def _prefill_hdr_meta(
+        self,
+        raw: dict,
+        source_path: Path | None = None,
+        mediainfo_json: dict | None = None,
+    ) -> None:
         """Pré-remplit master_display et max_cll (mediainfo > ffprobe)."""
-        master_display, max_cll = self._extract_hdr_meta_fields(raw, source_path)
+        master_display, max_cll = self._extract_hdr_meta_fields(
+            raw,
+            source_path,
+            mediainfo_json=mediainfo_json,
+        )
         self._master_display.setText(master_display)
         self._max_cll.setText(max_cll)
 
     def _extract_hdr_meta_fields(
-        self, raw: dict, source_path: Path | None = None,
+        self,
+        raw: dict,
+        source_path: Path | None = None,
+        *,
+        mediainfo_json: dict | None = None,
     ) -> tuple[str, str]:
         # 1. Priorité mediainfo (parse de tous les SEI HEVC d'un coup).
         master_display, max_cll = "", ""
-        if source_path is not None:
+        if mediainfo_json is not None:
+            master_display, max_cll = self._extract_hdr_meta_from_mediainfo_json(mediainfo_json)
+        elif source_path is not None:
             master_display, max_cll = self._extract_hdr_meta_from_mediainfo(source_path)
         if master_display and max_cll:
             return master_display, max_cll
@@ -1603,11 +1619,18 @@ class EncodePanel(QWidget):
         luminance au format ``num/10000`` — exactement les unités ffmpeg/x265.
         Retourne ``("", "")`` si ffprobe absent ou si le SEI n'est pas présent.
         """
+        cmd = [
+            self._config.tool_ffprobe,
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_frames",
+            "-read_intervals", "%+#1",
+            "-print_format", "json",
+        ]
+        cmd.extend(ffprobe_input_args(source_path))
         try:
             result = subprocess.run(
-                [self._config.tool_ffprobe, "-v", "error", "-select_streams", "v:0",
-                 "-show_frames", "-read_intervals", "%+#1",
-                 "-print_format", "json", str(source_path)],
+                cmd,
                 capture_output=True, check=False, timeout=20, text=True,
             )
         except (FileNotFoundError, OSError):
@@ -1680,6 +1703,13 @@ class EncodePanel(QWidget):
             data = json.loads(result.stdout or "{}")
         except json.JSONDecodeError:
             return "", ""
+        return self._extract_hdr_meta_from_mediainfo_json(data)
+
+    def _extract_hdr_meta_from_mediainfo_json(
+        self,
+        data: dict,
+    ) -> tuple[str, str]:
+        """Renvoie (master_display, max_cll) depuis un JSON MediaInfo déjà chargé."""
         media = data.get("media") or {}
         mi_video = next(
             (t for t in (media.get("track") or []) if isinstance(t, dict) and t.get("@type") == "Video"),
@@ -1709,9 +1739,21 @@ class EncodePanel(QWidget):
             )
 
         max_cll = ""
+        def _first_int(value: object) -> int:
+            match = re.search(r"\d+(?:[ \u00a0\u202f_]\d{3})*", str(value or ""))
+            if match is None:
+                return 0
+            return int(
+                match.group(0)
+                .replace(" ", "")
+                .replace("\u00a0", "")
+                .replace("\u202f", "")
+                .replace("_", "")
+            )
+
         try:
-            max_content = int(re.sub(r"[^\d]", "", str(mi_video.get("MaxCLL") or "")) or 0)
-            max_average = int(re.sub(r"[^\d]", "", str(mi_video.get("MaxFALL") or "")) or 0)
+            max_content = _first_int(mi_video.get("MaxCLL"))
+            max_average = _first_int(mi_video.get("MaxFALL"))
         except (TypeError, ValueError):
             max_content = max_average = 0
         if max_content > 0:
@@ -3095,7 +3137,11 @@ class EncodePanel(QWidget):
         source_hdr = self._hdr_type_for_entry(info, track)
         source_video = self._video_track_for_entry(info, track)
         raw = source_video.raw if source_video is not None else {}
-        master_display, max_cll = self._extract_hdr_meta_fields(raw, info.path)
+        master_display, max_cll = self._extract_hdr_meta_fields(
+            raw,
+            info.path,
+            mediainfo_json=info.mediainfo_json,
+        )
         bit_depth = self._video_source_bit_depth(info, track)
         default_10bit = bit_depth >= 10 or self._source_has_dv(source_hdr) or self._source_has_hdr10plus(source_hdr)
         # Source HDR (HDR10/HDR10+/DV) → injection HDR statique activée par

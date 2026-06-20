@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args, is_bluray_playlist
 from core.runner import TaskCancelledError, TaskSignals
 from core.subprocess_utils import (
     decode_subprocess_output,
@@ -90,14 +91,15 @@ class NvenccAssetPreparationService:
             cb.log("INFO", f"Routage DV : {decision.reason}")
             if decision.conversion_needed:
                 annexb_for_convert = work_dir / "source_annexb.hevc"
-                run_cmd([
-                    cb.ffmpeg_bin, "-nostdin", "-y",
-                    "-i", str(effective_source),
+                annexb_cmd = [cb.ffmpeg_bin, "-nostdin", "-y"]
+                append_ffmpeg_input_args(annexb_cmd, effective_source)
+                annexb_cmd.extend([
                     "-map", f"0:{int(effective_stream_index)}",
                     "-c", "copy",
                     "-bsf:v", "hevc_mp4toannexb",
                     "-f", "hevc", str(annexb_for_convert),
-                ], "ffmpeg-dv-annexb")
+                ])
+                run_cmd(annexb_cmd, "ffmpeg-dv-annexb")
                 _track(annexb_for_convert)
                 converted = p7_router.execute_conversion(
                     source=annexb_for_convert,
@@ -127,14 +129,15 @@ class NvenccAssetPreparationService:
         meta_input = effective_source
         if effective_source.suffix.lower() not in raw_hevc_ext and effective_source.suffix.lower() != ".mkv":
             meta_input = work_dir / "source_meta.hevc"
-            run_cmd([
-                cb.ffmpeg_bin, "-nostdin", "-y",
-                "-i", str(effective_source),
+            meta_cmd = [cb.ffmpeg_bin, "-nostdin", "-y"]
+            append_ffmpeg_input_args(meta_cmd, effective_source)
+            meta_cmd.extend([
                 "-map", f"0:{int(effective_stream_index)}",
                 "-c", "copy",
                 "-bsf:v", "hevc_mp4toannexb",
                 "-f", "hevc", str(meta_input),
-            ], "ffmpeg-hdr-annexb")
+            ])
+            run_cmd(meta_cmd, "ffmpeg-hdr-annexb")
             _track(meta_input)
 
         if video.copy_dv and dovi_converted_to_p8 and source_is_vfr and converted_source is not None:
@@ -293,7 +296,7 @@ class NvenccRuntimeRemuxBuilder:
         cmd.extend(cb.offset_input_args(video_offset_ms))
         cmd.extend(["-i", str(encoded_video)])
         for src in all_sources:
-            cmd.extend(["-i", str(src)])
+            append_ffmpeg_input_args(cmd, src)
         cb.append_sync_inputs(cmd, sync_inputs)
 
         metadata_inputs = cb.materialize_container_metadata_inputs(
@@ -439,25 +442,29 @@ class NvenccDirectOutputRunner:
                     source_path=cb.video_source_path(config),
                     stream_index=cb.video_stream_index(config),
                 )
+                needs_ffmpeg_pipe = (
+                    _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video)
+                    or is_bluray_playlist(routing.input_path)
+                )
                 encode_cmd = _build_nvencc_command_runtime(
                     cb.nvencc_bin or "",
                     (
                         _nvencc_pipe_encode_video_runtime(runtime_video)
-                        if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video)
+                        if needs_ffmpeg_pipe
                         else runtime_video
                     ),
                     intermediate,
-                    input_path=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video) else routing.input_path,
-                    stream_index=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video) else routing.stream_index,
-                    input_reader=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video) else routing.input_reader,
-                    input_fps=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video) else routing.input_fps,
-                    input_avsync=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video) else routing.input_avsync,
+                    input_path=None if needs_ffmpeg_pipe else routing.input_path,
+                    stream_index=None if needs_ffmpeg_pipe else routing.stream_index,
+                    input_reader=None if needs_ffmpeg_pipe else routing.input_reader,
+                    input_fps=None if needs_ffmpeg_pipe else routing.input_fps,
+                    input_avsync=None if needs_ffmpeg_pipe else routing.input_avsync,
                     hdr10plus_json=None,
                     dovi_rpu=None,
-                    dovi_rpu_prm=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video) else routing.dovi_rpu_prm,
+                    dovi_rpu_prm=None if needs_ffmpeg_pipe else routing.dovi_rpu_prm,
                 )
                 decode_cmd: list[str] | None = None
-                if _nvencc_requires_ffmpeg_filter_pipe_runtime(runtime_video):
+                if needs_ffmpeg_pipe:
                     decode_cmd = _build_decode_pipe_cmd_runtime(
                         cb.ffmpeg_bin,
                         routing.input_path,
@@ -551,22 +558,26 @@ def build_nvencc_pipeline_commands(
     work_dir.mkdir(parents=True, exist_ok=True)
     intermediate = _nvencc_intermediate_path_runtime(work_dir, video.codec)
     routing = resolve_input_routing(config)
+    needs_ffmpeg_pipe = (
+        _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video)
+        or is_bluray_playlist(routing.input_path)
+    )
     encode = _build_nvencc_command_runtime(
         nvencc_bin,
         (
             _nvencc_pipe_encode_video_runtime(routing.video)
-            if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video)
+            if needs_ffmpeg_pipe
             else routing.video
         ),
         intermediate,
-        input_path=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video) else routing.input_path,
-        stream_index=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video) else routing.stream_index,
-        input_reader=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video) else routing.input_reader,
-        input_fps=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video) else routing.input_fps,
-        input_avsync=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video) else routing.input_avsync,
-        dovi_rpu_prm=None if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video) else routing.dovi_rpu_prm,
+        input_path=None if needs_ffmpeg_pipe else routing.input_path,
+        stream_index=None if needs_ffmpeg_pipe else routing.stream_index,
+        input_reader=None if needs_ffmpeg_pipe else routing.input_reader,
+        input_fps=None if needs_ffmpeg_pipe else routing.input_fps,
+        input_avsync=None if needs_ffmpeg_pipe else routing.input_avsync,
+        dovi_rpu_prm=None if needs_ffmpeg_pipe else routing.dovi_rpu_prm,
     )
-    if _nvencc_requires_ffmpeg_filter_pipe_runtime(routing.video):
+    if needs_ffmpeg_pipe:
         decode = _build_decode_pipe_cmd_runtime(
             ffmpeg_bin,
             routing.input_path,
@@ -578,12 +589,14 @@ def build_nvencc_pipeline_commands(
     remux = [
         ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(intermediate),
-        "-i", str(config.source),
+    ]
+    append_ffmpeg_input_args(remux, config.source)
+    remux.extend([
         "-map", "0:v:0",
         "-map", "1:a?",
         "-map", "1:s?",
         "-map_chapters", "1",
         "-c", "copy",
         str(config.output),
-    ]
+    ])
     return [decode, encode, remux] if decode is not None else [encode, remux]

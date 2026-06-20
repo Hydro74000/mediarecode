@@ -175,6 +175,7 @@ def _video(
     height: int = 1080,
     hdr_type: HDRType = HDRType.NONE,
     frame_rate: str | None = "23.976",
+    bit_rate: int | None = None,
     language: str | None = None,
     title: str | None = None,
 ) -> VideoTrack:
@@ -184,7 +185,7 @@ def _video(
         frame_rate=frame_rate,
         bit_depth=10, color_space=None,
         color_primaries=None, color_transfer=None, color_matrix=None,
-        hdr_type=hdr_type, language=language, title=title,
+        hdr_type=hdr_type, bit_rate=bit_rate, language=language, title=title,
     )
 
 
@@ -211,10 +212,11 @@ def _subtitle(
     language: str | None = "fra",
     forced: bool = False,
     default: bool = False,
+    element_count: int | None = None,
 ) -> SubtitleTrack:
     return SubtitleTrack(
         index=index, codec=codec, language=language,
-        title=None, forced=forced, default=default,
+        title=None, forced=forced, default=default, element_count=element_count,
     )
 
 
@@ -456,6 +458,11 @@ class TestTracksFromFileInfo:
         # 24000/1001 ≈ 23.976
         assert "23.976 fps" in entries[0].display_info
 
+    def test_video_display_info_excludes_bitrate(self):
+        info = _file_info(videos=[_video(0, bit_rate=22_000_000)])
+        entries = tracks_from_file_info(info)
+        assert "kbps" not in entries[0].display_info
+
     def test_video_fps_zero_denominator_safe(self):
         info = _file_info(videos=[_video(0, frame_rate="24000/0")])
         # Ne doit pas lever ZeroDivisionError
@@ -493,6 +500,11 @@ class TestTracksFromFileInfo:
         info = _file_info(subs=[_subtitle(2, forced=False, default=False)])
         entries = tracks_from_file_info(info)
         assert entries[0].display_info == ""
+
+    def test_subtitle_display_info_includes_element_count(self):
+        info = _file_info(subs=[_subtitle(2, element_count=1292)])
+        entries = tracks_from_file_info(info)
+        assert entries[0].display_info == "1292 éléments"
 
     def test_empty_file_info_returns_empty_list(self):
         info = _file_info()

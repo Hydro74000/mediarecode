@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.config import AppConfig
+from core.bluray import discover_titles, find_disc_root
 from core.file_types import is_accepted
 from core.i18n import apply_translations, set_current_language, translate_text
 from core.logging import LogLevel, VerboseFileLogger, parse_log_level
@@ -1772,6 +1773,12 @@ class MainWindow(QMainWindow):
 
         for path in paths:
             if path.is_dir():
+                titles = discover_titles(path, min_duration_s=60.0)
+                if titles:
+                    add_source(titles[0].playlist_path)
+                    continue
+                if find_disc_root(path) is not None:
+                    continue
                 for child in sorted(path.rglob("*")):
                     if child.is_file():
                         add_source(child)

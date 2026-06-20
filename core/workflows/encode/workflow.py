@@ -19,6 +19,7 @@ from typing import Callable
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Qt, Signal
+from core.bluray import append_ffmpeg_input_args
 from core.runner import TaskCancelledError, TaskSignals, ToolRunner
 from core.subprocess_utils import (
     subprocess_text_kwargs,
@@ -2094,7 +2095,9 @@ class EncodeWorkflow(QObject):
             "-y",
             "-ss", self._seconds_arg(start_s),
             "-t", self._seconds_arg(duration_s),
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-map", f"0:{int(stream_index)}",
             "-c:v", "copy",
             "-an",
@@ -2102,19 +2105,22 @@ class EncodeWorkflow(QObject):
             "-dn",
             "-map_metadata", "-1",
             str(output),
-        ]
+        ])
         return cmd
 
     def _build_preview_image_extract_cmd(self, source: Path, output: Path) -> list[str]:
-        return [
+        cmd = [
             self._ffmpeg,
             "-hide_banner",
             "-y",
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-frames:v", "1",
             "-update", "1",
             str(output),
-        ]
+        ])
+        return cmd
 
     @staticmethod
     def _preview_image_zscale_tonemap_filter(hdr_kind: str) -> str:
@@ -2188,12 +2194,14 @@ class EncodeWorkflow(QObject):
             "-hide_banner",
             "-y",
             "-ss", self._seconds_arg(scene_time_s),
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-map", f"0:{int(stream_index)}",
             "-frames:v", "1",
             "-update", "1",
             "-an", "-sn", "-dn",
-        ]
+        ])
         tonemap = self._preview_image_tonemap_filter(hdr_kind)
         if tonemap:
             cmd += ["-vf", tonemap]

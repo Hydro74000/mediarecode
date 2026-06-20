@@ -1296,7 +1296,7 @@ def install_dnf(dry_run: bool, force: bool = False) -> None:
         _ensure_rpmfusion(dry_run, sudo)
 
     step(f"Installing: {' '.join(pkgs)}")
-    run(sudo + ["dnf", "install", "-y"] + pkgs, dry_run=dry_run)
+    run(sudo + ["dnf", "install", "-y", "--allowerasing"] + pkgs, dry_run=dry_run)
     ok("System packages installed")
 
 # ---------------------------------------------------------------------------

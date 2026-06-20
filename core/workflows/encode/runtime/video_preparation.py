@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.runner import TaskCancelledError, TaskSignals
 from core.workflows.encode.domain import (
     EncodeCodecDomainCallbacks,
@@ -55,7 +56,7 @@ class VideoOnlyCommandBuilder:
         cmd.extend(cb.ffmpeg_progress_args())
         cmd.extend(cb.offset_input_args(offset_ms))
         cmd.extend(hardware_input_args(video, callbacks=cb.codec_domain_callbacks()))
-        cmd.extend(["-i", str(source)])
+        append_ffmpeg_input_args(cmd, source)
         vf = build_encoder_vf(video, callbacks=cb.codec_domain_callbacks())
         if vf:
             cmd.extend(["-vf", vf])

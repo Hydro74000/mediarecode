@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from core.config import AppConfig
+from core.bluray import discover_titles, find_disc_root
 from core.file_types import is_accepted
 
 from cli.constants import EXIT_ARGS, EXIT_OK, EXIT_PARTIAL, EXIT_WORKFLOW
@@ -129,6 +130,18 @@ def discover_direct_batch_jobs(
             if not root.is_dir():
                 raise CliError(f"Chemin --input-dir invalide, attendu dossier : {root}", EXIT_ARGS)
             roots.append(str(root))
+            bluray_titles = discover_titles(root, min_duration_s=60.0)
+            if bluray_titles:
+                title = bluray_titles[0]
+                output_relative = Path(title.disc_root.name or title.label)
+                jobs.append(_job_for_source(
+                    title.playlist_path,
+                    output=(_generated_output_path(output_dir, output_relative) if not output_template else None),
+                    output_dir=output_dir,
+                    output_template=output_template,
+                    output_all=output_all,
+                ))
+                continue
             iterator = root.rglob("*") if recursive else root.iterdir()
             candidates = sorted(
                 (path for path in iterator if path.is_file()),
@@ -136,6 +149,8 @@ def discover_direct_batch_jobs(
             )
             for path in candidates:
                 scanned += 1
+                if find_disc_root(path.parent) is not None and path.suffix.lower() == ".m2ts":
+                    continue
                 relative = path.relative_to(root)
                 if not is_accepted(path, video_only=True):
                     continue

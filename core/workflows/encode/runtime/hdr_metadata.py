@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, cast
 
+from core.bluray import ffprobe_input_args
 from core.subprocess_utils import subprocess_text_kwargs
 
 
@@ -181,8 +182,8 @@ class HdrMetadataProbeService:
             "-v", "quiet",
             "-print_format", "json",
             "-show_streams",
-            str(source),
         ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
                 cmd,
@@ -243,8 +244,8 @@ class HdrMetadataProbeService:
             "-read_intervals", f"%+#{max(1, int(max_frames))}",
             "-show_frames",
             "-show_entries", "frame_side_data=side_data_type",
-            str(source),
         ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
                 cmd,
@@ -513,8 +514,8 @@ class HdrMetadataProbeService:
             "-select_streams", "v:0",
             "-show_entries", "stream=color_transfer",
             "-of", "csv=p=0",
-            str(source),
         ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
                 cmd,
@@ -561,8 +562,8 @@ class HdrMetadataProbeService:
                 "coded_picture_number,display_picture_number,key_frame,pict_type:"
                 "frame_side_data=side_data_type"
             ),
-            str(source),
         ]
+        cmd.extend(ffprobe_input_args(source))
         if progress_cb is not None:
             progress_cb("Analyse des keyframes HDR (ffprobe)…")
         if progress_pct_cb is not None:
@@ -656,8 +657,8 @@ class HdrMetadataProbeService:
             "-select_streams", f"v:{max(0, int(stream_index))}",
             "-show_entries", "frame_side_data=side_data_type",
             "-of", "json",
-            str(source),
         ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
                 cmd,
@@ -722,8 +723,8 @@ class HdrMetadataProbeService:
             "-select_streams", f"v:{max(0, int(stream_index))}",
             "-show_entries", "packet=pts_time,flags",
             "-of", "csv=p=0",
-            str(source),
         ]
+        cmd.extend(ffprobe_input_args(source))
         if progress_cb is not None:
             progress_cb("Index des keyframes (ffprobe packets)…")
         if progress_pct_cb is not None:
@@ -966,11 +967,17 @@ class HdrMetadataProbeService:
         )
 
     def color_primaries_label(self, source: Path) -> str:
+        cmd = [
+            self._tool_bin("ffprobe"),
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=color_primaries",
+            "-of", "default=nw=1:nk=1",
+        ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
-                [self._tool_bin("ffprobe"), "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=color_primaries",
-                 "-of", "default=nw=1:nk=1", str(source)],
+                cmd,
                 capture_output=True, check=False, timeout=10,
                 **subprocess_text_kwargs(),
             )
@@ -979,11 +986,18 @@ class HdrMetadataProbeService:
         return (result.stdout or "").strip().lower()
 
     def extract_static_hdr_via_ffprobe(self, source: Path) -> tuple[str, str]:
+        cmd = [
+            self._tool_bin("ffprobe"),
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_frames",
+            "-read_intervals", "%+#1",
+            "-print_format", "json",
+        ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
-                [self._tool_bin("ffprobe"), "-v", "error", "-select_streams", "v:0",
-                 "-show_frames", "-read_intervals", "%+#1",
-                 "-print_format", "json", str(source)],
+                cmd,
                 capture_output=True, check=False, timeout=20,
                 **subprocess_text_kwargs(),
             )

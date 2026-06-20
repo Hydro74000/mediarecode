@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, cast
 
+from core.bluray import append_ffmpeg_input_args, ffprobe_input_args
 from core.subprocess_utils import (
     decode_subprocess_output,
     subprocess_text_kwargs,
@@ -684,8 +685,8 @@ class SyncRewriteService:
             "-show_entries",
             "stream=index,codec_name,codec_long_name,profile,channels,channel_layout,bit_rate,sample_rate:stream_tags=title",
             "-of", "json",
-            str(source),
         ]
+        cmd.extend(ffprobe_input_args(source))
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -769,7 +770,9 @@ class SyncRewriteService:
             self._ffmpeg,
             "-hide_banner", "-y",
             *self._progress_args,
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-map", f"0:{stream_index}",
             "-vn", "-sn", "-dn",
             *self._thread_args,
@@ -778,7 +781,7 @@ class SyncRewriteService:
             "-b:a", f"{bitrate}k",
             "-f", "matroska",
             str(destination),
-        ]
+        ])
         self._run_checked(cmd, destination, "Réécriture sync audio échouée", cancel_cb=cancel_cb)
         return destination
 
@@ -864,7 +867,9 @@ class SyncRewriteService:
             self._ffmpeg,
             "-hide_banner", "-y",
             *self._progress_args,
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-map", f"0:{stream_index}",
             "-vn", "-sn", "-dn",
             *self._thread_args,
@@ -876,7 +881,7 @@ class SyncRewriteService:
             ),
             "-f", "matroska",
             str(destination),
-        ]
+        ])
         self._run_checked(cmd, destination, "Réécriture sync audio avancée échouée", cancel_cb=cancel_cb)
         return destination
 
@@ -897,7 +902,9 @@ class SyncRewriteService:
             self._ffmpeg,
             "-hide_banner", "-y",
             *self._progress_args,
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-map", f"0:{stream_index}",
             "-vn", "-sn", "-dn",
             "-ss", f"{abs(int(offset_ms)) / 1000.0:.3f}",
@@ -905,7 +912,7 @@ class SyncRewriteService:
             "-avoid_negative_ts", "make_zero",
             "-f", "matroska",
             str(destination),
-        ]
+        ])
         self._run_checked(cmd, destination, "Copie/coupe sync audio avancée échouée", cancel_cb=cancel_cb)
         return destination
 
@@ -928,11 +935,13 @@ class SyncRewriteService:
             self._ffmpeg,
             "-hide_banner", "-y",
             *self._progress_args,
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(extract_cmd, source)
+        extract_cmd.extend([
             "-map", f"0:{stream_index}",
             "-c:s", codec_arg,
             str(extracted),
-        ]
+        ])
         self._run_checked(extract_cmd, extracted, "Extraction sous-titre pour sync réelle échouée", cancel_cb=cancel_cb)
         text = extracted.read_text(encoding="utf-8-sig", errors="replace")
         shifted.write_text(self._shift_subtitle_text(text, text_kind, offset_ms), encoding="utf-8")

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.workflows.common.attachments import mime_for_path
 from core.workflows.common.metadata import (
     disposition_value as _common_disposition_value,
@@ -202,13 +203,14 @@ class EncodeFinalMuxBuilder:
                 input_args = [str(arg) for arg in raw_input_args]
             else:
                 input_args = []
-            cmd.extend([*input_args, "-i", str(spec["path"])])
+            cmd.extend(input_args)
+            append_ffmpeg_input_args(cmd, spec["path"])
 
         plan = plan or cb.build_encode_plan(config)
         all_sources = list(plan.all_sources)
         source_idx = _source_input_index_map_plan(all_sources, start_index=len(video_inputs))
         for src in all_sources:
-            cmd.extend(["-i", str(src)])
+            append_ffmpeg_input_args(cmd, src)
 
         next_input_index, chapter_input_index, tag_input_index = cb.prepare_container_metadata_inputs(
             cmd,
