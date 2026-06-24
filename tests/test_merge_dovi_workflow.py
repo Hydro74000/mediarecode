@@ -85,6 +85,7 @@ def test_step_remux_wraps_and_rebuilds_with_ffmpeg(tmp_path: Path) -> None:
 
     wf = MergeDoviWorkflow(ffmpeg_bin="ffmpeg")
     wf._source_video_fps_expr = lambda _src: "24000/1001"  # type: ignore[method-assign, assignment]
+    wf._patch_video_timecodes = lambda *_args, **_kwargs: None  # type: ignore[method-assign, assignment]
 
     calls: list[list[str]] = []
 
@@ -119,6 +120,117 @@ def test_step_remux_wraps_and_rebuilds_with_ffmpeg(tmp_path: Path) -> None:
     assert "-map_chapters" in final_cmd
     assert final_cmd[final_cmd.index("-map_chapters") + 1] == "1"
     assert str(paths.output_mkv) == final_cmd[-1]
+
+
+def test_step_remux_patches_video_timecodes_from_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    film1 = tmp_path / "film1.mkv"
+    film1.write_bytes(b"film1")
+    paths = _paths(tmp_path, film1)
+    flags = HDRFlags(has_dovi=False, has_hdr10plus=True)
+    paths.film1_final.write_bytes(b"hevc")
+
+    wf = MergeDoviWorkflow(ffmpeg_bin="ffmpeg")
+    wf._source_video_fps_expr = lambda _src: "24000/1001"  # type: ignore[method-assign, assignment]
+
+    calls: list[list[str]] = []
+
+    def _fake_run_cmd(cmd: list[str], _step: WorkflowStep) -> str:
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"ok")
+        return ""
+
+    wf._run_cmd = _fake_run_cmd  # type: ignore[method-assign, assignment]
+
+    patch_calls: list[tuple[Path, Path]] = []
+
+    class _PatchResult:
+        patched_blocks = 100
+        source_pts = 100
+        first_pts_ms = 0
+        last_pts_ms = 4200
+
+    class _Patcher:
+        def __init__(self, *, ffprobe_bin: str) -> None:
+            self.ffprobe_bin = ffprobe_bin
+
+        def patch(self, *, target_mkv: Path, source_for_timestamps: Path) -> _PatchResult:
+            patch_calls.append((target_mkv, source_for_timestamps))
+            return _PatchResult()
+
+    monkeypatch.setattr(
+        "core.workflows.merge_dovi.MatroskaVideoTimecodePatcher",
+        _Patcher,
+    )
+
+    wf._step_remux(film1, paths, flags)
+
+    assert patch_calls == [(paths.output_mkv, film1)]
+    assert len(calls) == 2
+    assert calls[0][-1] == str(paths.film1_wrapped_video)
+    assert calls[1][calls[1].index("-i") + 1] == str(paths.film1_wrapped_video)
+
+
+def test_step_remux_patches_dovi_block_addition_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    film1 = tmp_path / "film1.mkv"
+    film1.write_bytes(b"film1")
+    paths = _paths(tmp_path, film1)
+    flags = HDRFlags(has_dovi=True, has_hdr10plus=False)
+    paths.film1_with_dovi.write_bytes(b"hevc")
+    paths.film2_rpu.write_bytes(b"rpu")
+
+    wf = MergeDoviWorkflow(ffmpeg_bin="ffmpeg")
+    wf._source_video_fps_expr = lambda _src: "24000/1001"  # type: ignore[method-assign, assignment]
+    wf._patch_video_timecodes = lambda *_args, **_kwargs: None  # type: ignore[method-assign, assignment]
+
+    def _fake_run_cmd(cmd: list[str], _step: WorkflowStep) -> str:
+        out = Path(cmd[-1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"ok")
+        return ""
+
+    wf._run_cmd = _fake_run_cmd  # type: ignore[method-assign, assignment]
+
+    compat_ids: list[int | None] = []
+    record = object()
+
+    def _fake_record(_rpu: Path, *, forced_compat_id: int | None = None) -> object:
+        compat_ids.append(forced_compat_id)
+        return record
+
+    wf._build_dovi_record_from_rpu = _fake_record  # type: ignore[method-assign, assignment]
+
+    patched: list[tuple[Path, object]] = []
+
+    class _PatchResult:
+        applied = True
+        skipped = False
+        patched_track_number = 1
+        bytes_delta = 42
+        reason = ""
+
+    class _Editor:
+        def patch(self, output: Path, *, record: object) -> _PatchResult:
+            patched.append((output, record))
+            return _PatchResult()
+
+    monkeypatch.setattr(
+        "core.workflows.merge_dovi.MatroskaDoviBlockAdditionEditor",
+        lambda: _Editor(),
+    )
+
+    wf._step_remux(
+        film1,
+        paths,
+        flags,
+        dovi_profile=DoviProfile.P8_1,
+    )
+
+    assert compat_ids == [1]
+    assert patched == [(paths.output_mkv, record)]
 
 
 def test_verify_raises_when_injected_framecount_is_outside_tolerance(
