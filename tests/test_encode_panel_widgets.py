@@ -64,7 +64,8 @@ from typing import Any, cast
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QLineEdit, QPushButton, QSpinBox, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QLineEdit,
+    QPushButton, QSpinBox, QWidget,
 )
 
 from core.config import AppConfig
@@ -72,6 +73,10 @@ from core.inspector import AudioTrack, FileInfo, HDRType, VideoTrack
 from core.workflows.remux_models import TrackEntry, clone_track_entry
 from ui.panels.encode_panel.panel import EncodePanel
 from ui.panels.encode_panel.widgets import _AudioTable
+from core.workflows.encode.runtime.static_hdr_estimator import (
+    StaticHdrEstimate,
+    StaticHdrEstimateService,
+)
 
 
 # ===========================================================================
@@ -732,6 +737,302 @@ class TestEncodePanelDynamicHdrDefaults:
         by_entry = {str(track.track_entry_id): track for track in cfg.video_tracks}
         assert by_entry["video-dv"].copy_dv is True
         assert by_entry["video-sdr"].copy_dv is False
+        panel.close()
+
+    def test_p5_to_p8_static_hdr_estimate_candidate_when_static_fields_missing(self, qt_app):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        panel._dovi_profile_combo.blockSignals(True)
+        panel._set_combo_data(panel._dovi_profile_combo, "2")
+        panel._dovi_profile_combo.blockSignals(False)
+        panel._save_current_video_state()
+
+        candidate = panel._static_hdr_estimate_candidate_current()
+
+        assert candidate is not None
+        assert candidate[0] == "video-p5"
+        panel.close()
+
+    def test_static_hdr_estimate_prompt_exposes_precise_fast_ignore(self, qt_app, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        labels: list[str] = []
+
+        class FakeMessageBox:
+            class ButtonRole:
+                AcceptRole = object()
+                ActionRole = object()
+                RejectRole = object()
+
+            clicked_label = "Analyse rapide"
+
+            def __init__(self, *_args, **_kwargs):
+                self._buttons: dict[str, object] = {}
+
+            def setWindowTitle(self, _title):  # noqa: ANN001
+                pass
+
+            def setText(self, _text):  # noqa: ANN001
+                pass
+
+            def addButton(self, label, _role):  # noqa: ANN001
+                button = object()
+                self._buttons[label] = button
+                labels.append(label)
+                return button
+
+            def setDefaultButton(self, button):  # noqa: ANN001
+                self.default_button = button
+
+            def exec(self):  # noqa: A003, ANN201
+                return 0
+
+            def clickedButton(self):  # noqa: ANN201
+                return self._buttons[self.clicked_label]
+
+        monkeypatch.setattr("ui.panels.encode_panel.panel.QMessageBox", FakeMessageBox)
+
+        mode = panel._ask_static_hdr_estimate_mode()
+
+        assert labels == ["Analyse précise", "Analyse rapide", "Ignorer"]
+        assert mode == StaticHdrEstimateService.FAST_MODE
+        panel.close()
+
+    def test_p5_to_p8_keeps_profile_and_schedules_precise_analysis(self, qt_app, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+        scheduled: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            panel,
+            "_ask_static_hdr_estimate_mode",
+            lambda: StaticHdrEstimateService.PRECISE_MODE,
+        )
+        monkeypatch.setattr(
+            panel,
+            "_schedule_static_hdr_estimate",
+            lambda entry_id, _state, mode: scheduled.append((entry_id, mode)),
+        )
+
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        panel._dovi_profile_combo.setCurrentIndex(
+            next(i for i in range(panel._dovi_profile_combo.count()) if panel._dovi_profile_combo.itemData(i) == "2")
+        )
+
+        assert scheduled == [("video-p5", StaticHdrEstimateService.PRECISE_MODE)]
+        assert panel._dovi_profile_combo.currentData() == "2"
+        assert panel._video_settings_by_entry_id["video-p5"]["dovi_profile"] == "2"
+        panel.close()
+
+    def test_p5_to_p8_can_schedule_fast_analysis(self, qt_app, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+        scheduled: list[str] = []
+        monkeypatch.setattr(
+            panel,
+            "_ask_static_hdr_estimate_mode",
+            lambda: StaticHdrEstimateService.FAST_MODE,
+        )
+        monkeypatch.setattr(
+            panel,
+            "_schedule_static_hdr_estimate",
+            lambda _entry_id, _state, mode: scheduled.append(mode),
+        )
+
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        panel._set_combo_data(panel._dovi_profile_combo, "2")
+
+        assert scheduled == [StaticHdrEstimateService.FAST_MODE]
+        assert panel._dovi_profile_combo.currentData() == "2"
+        panel.close()
+
+    def test_static_hdr_estimate_is_scheduled_for_workflow(self, qt_app):
+        panel = EncodePanel(AppConfig())
+        panel.set_output_provider(lambda: Path("/tmp/out.mkv"))
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        panel._dovi_profile_combo.blockSignals(True)
+        panel._set_combo_data(panel._dovi_profile_combo, "2")
+        panel._dovi_profile_combo.blockSignals(False)
+        panel._save_current_video_state()
+        state = panel._video_settings_by_entry_id["video-p5"]
+
+        panel._schedule_static_hdr_estimate("video-p5", state, mode="precise")
+
+        scheduled = panel._video_settings_by_entry_id["video-p5"]
+        assert scheduled["static_hdr_metadata_analysis_request"] == "precise"
+        assert scheduled["inject_hdr_meta"] is True
+        assert scheduled["master_display"] == ""
+        assert scheduled["max_cll"] == ""
+        config = panel.collect_config()
+        assert config is not None
+        assert config.video is not None
+        assert config.video.static_hdr_metadata_analysis_request == "precise"
+        panel.close()
+
+    def test_static_hdr_prefill_reuses_initial_mediainfo_json(self, qt_app, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.HDR10)
+        entry = _video_entry(0)
+        entry.entry_id = "video-hdr"
+        info = _file_info(_PATH_A, [video], hdr_type=HDRType.HDR10)
+        info.mediainfo_json = {
+            "media": {
+                "track": [
+                    {
+                        "@type": "Video",
+                        "MasteringDisplay_ColorPrimaries": "BT.2020",
+                        "MasteringDisplay_Luminance_Min": "0.0001",
+                        "MasteringDisplay_Luminance_Max": "1000",
+                        "MaxCLL": "1000 cd/m2",
+                        "MaxFALL": "400 cd/m2",
+                    }
+                ]
+            }
+        }
+
+        def fail_subprocess_run(*_args, **_kwargs):
+            raise AssertionError("mediainfo should be reused from FileInfo, not relaunched")
+
+        monkeypatch.setattr("ui.panels.encode_panel.panel.subprocess.run", fail_subprocess_run)
+
+        panel.set_video_tracks([(info, entry, _COLOR)])
+
+        state = panel._video_settings_by_entry_id["video-hdr"]
+        assert state["master_display"] == "G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1)"
+        assert state["max_cll"] == "1000,400"
+        assert panel._master_display.text() == state["master_display"]
+        assert panel._max_cll.text() == "1000,400"
+        panel.close()
+
+    def test_manual_hdr_values_cancel_scheduled_workflow_analysis(self, qt_app):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        panel._dovi_profile_combo.blockSignals(True)
+        panel._set_combo_data(panel._dovi_profile_combo, "2")
+        panel._dovi_profile_combo.blockSignals(False)
+        panel._save_current_video_state()
+        state = panel._video_settings_by_entry_id["video-p5"]
+        panel._schedule_static_hdr_estimate("video-p5", state, mode="precise")
+
+        panel._master_display.setText("MANUAL_MD")
+
+        updated = panel._video_settings_by_entry_id["video-p5"]
+        assert updated["master_display"] == "MANUAL_MD"
+        assert updated["static_hdr_metadata_analysis_request"] == ""
+        assert "video-p5:p5_to_p8" not in panel._static_hdr_estimate_prompted
+        panel.close()
+
+    def test_dovi_option_change_cancels_scheduled_workflow_analysis(self, qt_app):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        panel._dovi_profile_combo.blockSignals(True)
+        panel._set_combo_data(panel._dovi_profile_combo, "2")
+        panel._dovi_profile_combo.blockSignals(False)
+        panel._save_current_video_state()
+        state = panel._video_settings_by_entry_id["video-p5"]
+        panel._schedule_static_hdr_estimate("video-p5", state, mode="fast")
+
+        panel._set_combo_data(panel._dovi_profile_combo, "0")
+
+        updated = panel._video_settings_by_entry_id["video-p5"]
+        assert updated["dovi_profile"] == "0"
+        assert updated["static_hdr_metadata_analysis_request"] == ""
+        panel.close()
+
+    def test_static_hdr_workflow_failure_shows_dialog(self, qt_app, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "ui.panels.encode_panel.panel.QMessageBox.critical",
+            lambda _parent, title, message: shown.append((title, message)),
+        )
+
+        panel._on_static_hdr_estimate_failed("", "Quota insuffisant.")
+
+        assert shown == [("Analyse HDR10 impossible", "Quota insuffisant.")]
+        panel.close()
+
+    def test_static_hdr_estimate_prefills_fields_and_marks_metadata_source(self, qt_app):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        panel._dovi_profile_combo.blockSignals(True)
+        panel._set_combo_data(panel._dovi_profile_combo, "2")
+        panel._dovi_profile_combo.blockSignals(False)
+        panel._save_current_video_state()
+        panel._video_settings_by_entry_id["video-p5"]["static_hdr_metadata_analysis_request"] = "precise"
+        estimate = StaticHdrEstimate(
+            master_display="G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1)",
+            max_cll="900,300",
+            confidence="medium",
+            sample_count=42,
+            coverage=0.44,
+            mode="precise",
+            active_sample_count=40,
+            ignored_sample_count=2,
+            active_crop="1920:800:0:100",
+        )
+
+        panel._on_static_hdr_estimate_ready("video-p5", estimate)
+
+        state = panel._video_settings_by_entry_id["video-p5"]
+        assert state["master_display"] == estimate.master_display
+        assert state["max_cll"] == "900,300"
+        assert state["static_hdr_metadata_source"] == "estimated_p5_to_p8"
+        assert state["static_hdr_metadata_analysis_mode"] == "precise"
+        assert panel._master_display.text() == estimate.master_display
+        assert panel._max_cll.text() == "900,300"
+        panel.close()
+
+    def test_static_hdr_estimate_does_not_overwrite_manual_fields(self, qt_app):
+        panel = EncodePanel(AppConfig())
+        video = _video_track(0, HDRType.DOLBY_VISION)
+        video.dovi_profile = 5
+        entry = _video_entry(0)
+        entry.entry_id = "video-p5"
+        panel.set_video_tracks([(_file_info(_PATH_A, [video]), entry, _COLOR)])
+        state = panel._video_settings_by_entry_id["video-p5"]
+        state["master_display"] = "MANUAL_MD"
+        state["max_cll"] = "111,22"
+        state["static_hdr_metadata_analysis_request"] = "precise"
+
+        panel._on_static_hdr_estimate_ready(
+            "video-p5",
+            StaticHdrEstimate(
+                master_display="AUTO_MD",
+                max_cll="900,300",
+                confidence="medium",
+                sample_count=42,
+                coverage=0.44,
+            ),
+        )
+
+        assert panel._video_settings_by_entry_id["video-p5"]["master_display"] == "MANUAL_MD"
+        assert panel._video_settings_by_entry_id["video-p5"]["max_cll"] == "111,22"
         panel.close()
 
     def test_new_video_track_does_not_inherit_previous_track_settings_when_apply_all_disabled(self, qt_app):

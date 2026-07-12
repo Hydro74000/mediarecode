@@ -150,6 +150,12 @@ from core.inspector import ChapterEntry
 from core.runner import TaskSignals
 from core.workflows.common.sync_rewrite import SyncRewritePreparedInput
 from core.workflows.encode.runtime.hdr_metadata import HdrMetadataProbeService
+from core.workflows.encode.runtime.dovi_p7_router import P7RoutingDecision
+from core.workflows.encode.runtime.metadata_inject import (
+    _friendly_dovi_conversion_error,
+)
+from core.workflows.encode.runtime.static_hdr_estimator import StaticHdrEstimate
+from core.dovi_profile_detector import DoviSubProfile
 
 
 # ---------------------------------------------------------------------------
@@ -2451,6 +2457,169 @@ class TestMetadataInjectCopyCodec:
         assert "enc.hevc" in input_file or "enc_hdr10p.hevc" in input_file, \
             f"inject-rpu n'opère pas sur enc.hevc : {input_file}"
 
+    def test_copy_dv_p8_normalization_reinjects_estimated_static_hdr(self, tmp_path):
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00" * 200_000)
+        config = _make_config(
+            source=src,
+            output=tmp_path / "output.mkv",
+            video=_make_video_settings(
+                codec="copy",
+                copy_dv=True,
+                dovi_profile="2",
+                inject_hdr_meta=True,
+                master_display="G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1)",
+                max_cll="900,300",
+                static_hdr_metadata_source="estimated_p5_to_p8",
+                static_hdr_metadata_confidence="medium",
+                static_hdr_metadata_analysis_mode="precise",
+            ),
+            work_dir=tmp_path / "work",
+        )
+        wf = _make_workflow(enabled=False)
+        calls: list[tuple[Path, Path, str, str]] = []
+        logs: list[tuple[str, str]] = []
+        wf.log_message.connect(lambda level, message: logs.append((str(level), str(message))))
+
+        def _fake_run(cmd, signals=None, cwd=None, progress_cb=None):
+            for arg in reversed(cmd):
+                s = str(arg)
+                if any(s.endswith(ext) for ext in (".hevc", ".mkv", ".bin", ".json")):
+                    p = Path(s)
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_bytes(b"\x00" * 100_000)
+                    break
+            return ""
+
+        def _fake_static_patch(src_path, dst_path, *, master_display, max_cll):
+            calls.append((src_path, dst_path, master_display, max_cll))
+            dst_path.write_bytes(b"patched")
+            from core.workflows.hevc_static_hdr_metadata import StaticHdrSeiInjectionResult
+            return StaticHdrSeiInjectionResult(
+                access_units=10,
+                targeted_access_units=2,
+                injected_access_units=2,
+                preserved_access_units=0,
+            )
+
+        with patch.object(EncodeWorkflow, "_shm_path", side_effect=lambda tmp_dir, name, _size: tmp_dir / name):
+            with patch.object(wf._runner, "_run_cmd", side_effect=_fake_run):
+                with patch(
+                    "core.workflows.encode.runtime.metadata_inject.inject_static_hdr_sei_file",
+                    side_effect=_fake_static_patch,
+                ):
+                    sigs = wf._run_with_metadata_inject(config)
+                    _collect_signals(sigs)
+
+        assert len(calls) == 1
+        assert calls[0][2] == config.video.master_display
+        assert calls[0][3] == "900,300"
+        assert any(
+            level == "WARN" and "estimée" in message and "mode precise" in message
+            for level, message in logs
+        )
+
+    def test_quota_error_is_reported_with_actionable_workdir_message(self, tmp_path):
+        message = _friendly_dovi_conversion_error(
+            RuntimeError("Error: Quota exceeded (os error 122)"),
+            tmp_path,
+        )
+
+        assert "quota ou espace temporaire insuffisant" in message
+        assert str(tmp_path) in message
+        assert "Libérez de l’espace" in message
+
+    def test_p5_to_p8_reencodes_bl_with_libplacebo_and_analyzes_final_bl(self, tmp_path):
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00" * 200_000)
+        video = _make_video_settings(
+            codec="copy",
+            copy_dv=True,
+            dovi_profile="2",
+            inject_hdr_meta=True,
+            track_entry_id="video-p5",
+            static_hdr_metadata_analysis_request="precise",
+        )
+        config = _make_config(
+            source=src,
+            output=tmp_path / "output.mkv",
+            video=video,
+            video_tracks=[video],
+            work_dir=tmp_path / "work",
+        )
+        wf = _make_workflow(enabled=False)
+        commands: list[list[str]] = []
+        ready: list[tuple[str, object]] = []
+        wf.static_hdr_estimate_ready.connect(
+            lambda entry_id, estimate: ready.append((entry_id, estimate))
+        )
+        estimate = StaticHdrEstimate(
+            master_display="G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1)",
+            max_cll="900,300",
+            confidence="medium",
+            sample_count=80,
+            coverage=0.8,
+            mode="precise",
+            analysis_method="linear_grayf32le",
+            active_sample_count=80,
+        )
+
+        def _fake_run(cmd, signals=None, cwd=None, progress_cb=None):
+            commands.append([str(part) for part in cmd])
+            for arg in reversed(cmd):
+                path = Path(str(arg))
+                if path.suffix.lower() in {".hevc", ".mkv", ".bin", ".json"}:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"\x00" * 100_000)
+                    break
+            return ""
+
+        def _fake_static_patch(src_path, dst_path, *, master_display, max_cll):
+            dst_path.write_bytes(b"patched")
+            from core.workflows.hevc_static_hdr_metadata import StaticHdrSeiInjectionResult
+            return StaticHdrSeiInjectionResult(
+                access_units=10,
+                targeted_access_units=2,
+                injected_access_units=2,
+                preserved_access_units=0,
+            )
+
+        decision = P7RoutingDecision(
+            conversion_needed=True,
+            sub_profile=DoviSubProfile.P5,
+            convert_mode="3",
+            reason="Source P5 détectée.",
+        )
+        with patch(
+            "core.workflows.encode.runtime.metadata_inject.DoviP7Router.analyze",
+            return_value=decision,
+        ):
+            with patch.object(wf._runner, "_run_cmd", side_effect=_fake_run):
+                with patch.object(
+                    wf._static_hdr_estimator,
+                    "estimate_converted_static_hdr",
+                    return_value=estimate,
+                ) as estimate_mock:
+                    with patch(
+                        "core.workflows.encode.runtime.metadata_inject.inject_static_hdr_sei_file",
+                        side_effect=_fake_static_patch,
+                    ):
+                        signals = wf._run_with_metadata_inject(config)
+                        _collect_signals(signals)
+
+        convert_commands = [cmd for cmd in commands if "convert" in cmd]
+        encode_commands = [cmd for cmd in commands if "libplacebo=" in " ".join(cmd)]
+        assert len(convert_commands) == 1
+        assert len(encode_commands) == 1
+        encode_cmd = encode_commands[0]
+        assert ["-init_hw_device", "vulkan=mre_dovi"] == encode_cmd[
+            encode_cmd.index("-init_hw_device"):encode_cmd.index("-init_hw_device") + 2
+        ]
+        assert "libx265" in encode_cmd
+        assert "apply_dolbyvision=true" in encode_cmd[encode_cmd.index("-vf") + 1]
+        assert Path(estimate_mock.call_args.args[0]).name == "enc.hevc"
+        assert ready == [("video-p5", estimate)]
+
 
 # ===========================================================================
 # Codec COPY — passthrough métadonnées dans les commandes FFmpeg
@@ -2661,6 +2830,54 @@ class TestRunCopyBypassesInject:
         assert detect_mock.called
         assert inject_mock.called, "copy + dovi_profile=2 doit lancer l'injection metadata"
         assert not direct_mock.called
+
+    def test_scheduled_analysis_defers_generic_static_hdr_fallback(self, tmp_path):
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00" * 1000)
+        video = _make_video_settings(
+            codec="copy",
+            copy_dv=True,
+            dovi_profile="2",
+            inject_hdr_meta=True,
+            static_hdr_metadata_analysis_request="precise",
+        )
+        config = _make_config(
+            source=src,
+            output=tmp_path / "output.mkv",
+            video=video,
+            video_tracks=[video],
+        )
+        wf = _make_workflow()
+
+        with patch.object(wf, "_detect_source_dynamic_hdr_presence", return_value=(True, False)), \
+             patch.object(wf, "_extract_static_hdr_metadata", return_value=("SOURCE_MD", "1000,400")), \
+             patch.object(wf, "_extract_static_hdr_via_ffprobe", return_value=("FF_MD", "900,300")):
+            normalized = wf._normalize_dynamic_hdr_config(config)
+
+        assert normalized.video is not None
+        assert normalized.video.master_display == ""
+        assert normalized.video.max_cll == ""
+        assert normalized.video.static_hdr_metadata_analysis_request == "precise"
+
+    def test_scheduled_analysis_rejects_external_nvencc_pipeline(self, tmp_path):
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00" * 1000)
+        video = _make_video_settings(
+            codec="nvencc_hevc",
+            copy_dv=True,
+            dovi_profile="2",
+            static_hdr_metadata_analysis_request="precise",
+        )
+        config = _make_config(
+            source=src,
+            output=tmp_path / "output.mkv",
+            video=video,
+            video_tracks=[video],
+        )
+
+        errors = _make_workflow().validate(config)
+
+        assert any("pipeline vidéo unique FFmpeg/copy" in error for error in errors)
 
     def test_copy_codec_with_dovi_normalization_but_no_dv_uses_standard_runner(self, tmp_path):
         """Si la source ne contient pas de DoVi, la normalisation demandée est ignorée."""

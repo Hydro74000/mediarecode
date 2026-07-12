@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from core.bluray import discover_titles
 from core.file_types import VIDEO_CONTAINER_EXTENSIONS, build_qt_filter
 from core.inspector import AudioTrack, FileInfo
 from core.i18n import apply_translations, translate_text
@@ -361,7 +362,8 @@ class _FileZone(QFrame):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if Path(url.toLocalFile()).suffix.lower() in self._ACCEPTED:
+                path = Path(url.toLocalFile())
+                if path.suffix.lower() in self._ACCEPTED or (path.is_dir() and discover_titles(path, min_duration_s=60.0)):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -373,6 +375,12 @@ class _FileZone(QFrame):
                 self.file_selected.emit(str(path))
                 event.acceptProposedAction()
                 return
+            if path.is_dir():
+                titles = discover_titles(path, min_duration_s=60.0)
+                if titles:
+                    self.file_selected.emit(str(titles[0].playlist_path))
+                    event.acceptProposedAction()
+                    return
         event.ignore()
 
     def _browse(self) -> None:

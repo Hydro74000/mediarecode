@@ -69,6 +69,8 @@ def has_cpu_video_filter(video: VideoEncodeSettings) -> bool:
     if video.codec == "copy":
         return False
     return bool(
+        getattr(video, "p5_to_hdr10", False)
+        or
         video.resize.is_active()
         or video.crop.is_active()
         or video.filters.is_active()
@@ -176,10 +178,15 @@ def should_reinject_static_hdr_metadata(video: VideoEncodeSettings) -> bool:
     les exposait correctement. L'injection est idempotente et ne duplique
     pas les SEI déjà présents.
     """
-    if video.codec == "copy":
-        return False
     if not requests_hdr_metadata(video):
         return False
+    if video.codec == "copy":
+        return bool(
+            video.inject_hdr_meta
+            and video.copy_dv
+            and str(video.dovi_profile or "0").strip() == "2"
+            and (video.master_display or video.max_cll)
+        )
     return bool(video.master_display or video.max_cll)
 
 
@@ -713,7 +720,21 @@ def build_encoder_vf(video: VideoEncodeSettings, *, callbacks: EncodeCodecDomain
 def build_vf(video: VideoEncodeSettings) -> str:
     if video.codec == "copy":
         return ""
-    chain = _build_filters(video)
+    chain: list[str] = []
+    if bool(getattr(video, "p5_to_hdr10", False)):
+        chain.extend([
+            "format=yuv420p10le",
+            "hwupload",
+            (
+                "libplacebo=apply_dolbyvision=true:"
+                "color_primaries=bt2020:color_trc=smpte2084:"
+                "colorspace=bt2020nc:range=tv:"
+                "tonemapping=clip:peak_detect=false:gamut_mode=clip"
+            ),
+            "hwdownload",
+            "format=yuv420p10le",
+        ])
+    chain.extend(_build_filters(video))
     if not video.tonemap_to_sdr:
         return ",".join(chain)
     algo = video.tonemap_algorithm or "hable"
@@ -730,6 +751,11 @@ def build_vf(video: VideoEncodeSettings) -> str:
 
 def hardware_input_args(video: VideoEncodeSettings, *, callbacks: EncodeCodecDomainCallbacks) -> list[str]:
     args: list[str] = []
+    if bool(getattr(video, "p5_to_hdr10", False)):
+        args.extend([
+            "-init_hw_device", "vulkan=mre_dovi",
+            "-filter_hw_device", "mre_dovi",
+        ])
     tonemap = bool(video.tonemap_to_sdr)
     software_filtering = has_cpu_video_filter(video)
     force_8bit = force_h264_8bit(video)

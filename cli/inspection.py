@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from core.bluray import discover_titles, playlist_path_for
 from core.config import AppConfig
 from core.inspector import AttachmentInfo, FileInfo, FileInspector
 from core.workflows.remux_models import SourceInput, TrackEntry, tracks_from_file_info
@@ -58,6 +59,23 @@ def inspect_sources(
 
     for source_index, item in enumerate(source_items):
         path = Path(str(item["path"])).expanduser()
+        playlist_value = item.get("playlist")
+        if playlist_value is not None:
+            try:
+                playlist_id = int(playlist_value)
+            except (TypeError, ValueError) as exc:
+                raise CliError(f"Playlist Blu-ray invalide : {playlist_value}", EXIT_VALIDATION) from exc
+            playlist_path = playlist_path_for(path, playlist_id)
+            if playlist_path is None:
+                raise CliError(
+                    f"Playlist Blu-ray introuvable : {playlist_id:05d}.mpls dans {path}",
+                    EXIT_VALIDATION,
+                )
+            path = playlist_path
+        elif path.is_dir():
+            titles = discover_titles(path, min_duration_s=60.0)
+            if titles:
+                path = titles[0].playlist_path
         if not path.exists():
             raise CliError(f"Source introuvable : {path}", EXIT_VALIDATION)
         info = inspector.inspect(path)

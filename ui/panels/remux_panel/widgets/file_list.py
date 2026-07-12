@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.bluray import discover_titles
 from core.file_types import ACCEPTED_EXTENSIONS, build_qt_filter
 from core.i18n import translate_text
 from core.inspector import FileInfo
@@ -105,6 +106,8 @@ class _FileRow(QWidget):
         parts = [info.size_human, info.duration_human, info.format]
         if info.primary_video:
             parts.append(info.primary_video.resolution)
+            if info.primary_video.bit_rate:
+                parts.append(f"{info.primary_video.bit_rate // 1000} kbps")
             hdr_lbl = info.primary_video.hdr_label
             if hdr_lbl != "SDR":
                 parts.append(hdr_lbl)
@@ -282,7 +285,8 @@ class _FileListWidget(QFrame):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if Path(url.toLocalFile()).suffix.lower() in _ACCEPTED_EXT:
+                path = Path(url.toLocalFile())
+                if path.suffix.lower() in _ACCEPTED_EXT or (path.is_dir() and discover_titles(path, min_duration_s=60.0)):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -293,6 +297,9 @@ class _FileListWidget(QFrame):
             p = Path(url.toLocalFile())
             if p.suffix.lower() in _ACCEPTED_EXT and p.is_file():
                 paths.append(str(p))
+            elif p.is_dir():
+                if discover_titles(p, min_duration_s=60.0):
+                    paths.append(str(p))
         if paths:
             self.add_requested.emit(paths)
             event.acceptProposedAction()

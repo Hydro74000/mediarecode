@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.subtitle_codec import plan_subtitle_codec
 from core.workflows.common.sync_rewrite import (
     audio_bitrate_kbps_from_display_info,
@@ -95,7 +96,7 @@ def build_remux_command(
     cmd.extend(ffmpeg_thread_args)
 
     for source in config.sources:
-        cmd.extend(["-i", cli_path(source.path)])
+        append_ffmpeg_input_args(cmd, source.path, cli_path=cli_path)
     for index, path in enumerate(sync_inputs or []):
         fmt = (sync_input_formats or [])[index] if sync_input_formats and index < len(sync_input_formats) else "matroska"
         cmd.extend(["-f", fmt, "-i", cli_path(path)])

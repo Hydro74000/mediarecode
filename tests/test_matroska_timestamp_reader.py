@@ -85,6 +85,24 @@ class TestMatroskaTimestampReader:
             seq = reader.read(tmp_path / "src.mkv")
         assert list(seq.pts_ms) == sorted(seq.pts_ms)
 
+    def test_can_preserve_packet_order_for_b_frames(self, tmp_path):
+        reader = MatroskaTimestampReader()
+        packets_payload = json.dumps({
+            "packets": [
+                {"pts_time": "0.000"},
+                {"pts_time": "0.083"},
+                {"pts_time": "0.041"},
+            ]
+        })
+        with patch(
+            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            return_value=_completed(packets_payload),
+        ):
+            seq = reader.read(tmp_path / "src.mkv", sort_by_pts=False)
+
+        assert seq.pts_ms == (0, 83, 41)
+        assert seq.total_duration_ms == 125
+
     def test_skips_na_pts(self, tmp_path):
         reader = MatroskaTimestampReader()
         packets_payload = json.dumps({

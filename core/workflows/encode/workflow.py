@@ -19,6 +19,7 @@ from typing import Callable
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Qt, Signal
+from core.bluray import append_ffmpeg_input_args
 from core.runner import TaskCancelledError, TaskSignals, ToolRunner
 from core.subprocess_utils import (
     subprocess_text_kwargs,
@@ -84,6 +85,7 @@ from core.workflows.encode.runtime import (
     MultiVideoPipelineRunnerCallbacks as _MultiVideoPipelineRunnerCallbacks,
     SignalBindingService as _SignalBindingService,
     SignalBindingServiceCallbacks as _SignalBindingServiceCallbacks,
+    StaticHdrEstimateService as _StaticHdrEstimateService,
     default_attachment_filename as _default_attachment_filename,
     ensure_inject_storage_available as _ensure_inject_storage_available_runtime,
     estimate_duration_seconds as _estimate_duration_seconds_runtime,
@@ -292,6 +294,8 @@ class EncodeWorkflow(QObject):
     """
 
     log_message = Signal(str, str)
+    static_hdr_estimate_ready = Signal(str, object)
+    static_hdr_estimate_failed = Signal(str, str)
 
     def __init__(
         self,
@@ -331,6 +335,10 @@ class EncodeWorkflow(QObject):
         self._hdr_metadata_service = HdrMetadataProbeService(
             ffmpeg_bin=lambda: self._ffmpeg,
             tool_bin=lambda name: self._bins.get(name) or name,
+        )
+        self._static_hdr_estimator = _StaticHdrEstimateService(
+            ffmpeg_bin=self._ffmpeg,
+            dovi_tool_bin=self._bins["dovi_tool"],
         )
         self._generate_nfo = generate_nfo
         self._sync_rewrite_enabled = bool(sync_rewrite_enabled)
@@ -374,6 +382,10 @@ class EncodeWorkflow(QObject):
         """Met à jour le binaire ffmpeg utilisé pour l'encodage (ex: ffmpeg système pour HW)."""
         self._ffmpeg = ffmpeg_bin
         self._postprocess_service.set_ffprobe_bin(self._ffprobe_bin_from_ffmpeg(ffmpeg_bin))
+        self._static_hdr_estimator = _StaticHdrEstimateService(
+            ffmpeg_bin=self._ffmpeg,
+            dovi_tool_bin=self._bins["dovi_tool"],
+        )
 
     def set_writing_application(self, writing_application: str) -> None:
         """Met à jour la valeur du tag Multiplexing Application."""
@@ -2083,7 +2095,9 @@ class EncodeWorkflow(QObject):
             "-y",
             "-ss", self._seconds_arg(start_s),
             "-t", self._seconds_arg(duration_s),
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-map", f"0:{int(stream_index)}",
             "-c:v", "copy",
             "-an",
@@ -2091,19 +2105,22 @@ class EncodeWorkflow(QObject):
             "-dn",
             "-map_metadata", "-1",
             str(output),
-        ]
+        ])
         return cmd
 
     def _build_preview_image_extract_cmd(self, source: Path, output: Path) -> list[str]:
-        return [
+        cmd = [
             self._ffmpeg,
             "-hide_banner",
             "-y",
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-frames:v", "1",
             "-update", "1",
             str(output),
-        ]
+        ])
+        return cmd
 
     @staticmethod
     def _preview_image_zscale_tonemap_filter(hdr_kind: str) -> str:
@@ -2177,12 +2194,14 @@ class EncodeWorkflow(QObject):
             "-hide_banner",
             "-y",
             "-ss", self._seconds_arg(scene_time_s),
-            "-i", str(source),
+        ]
+        append_ffmpeg_input_args(cmd, source)
+        cmd.extend([
             "-map", f"0:{int(stream_index)}",
             "-frames:v", "1",
             "-update", "1",
             "-an", "-sn", "-dn",
-        ]
+        ])
         tonemap = self._preview_image_tonemap_filter(hdr_kind)
         if tonemap:
             cmd += ["-vf", tonemap]
@@ -2861,8 +2880,10 @@ class EncodeWorkflow(QObject):
                 bins=dict(self._bins),
                 log_step=self._log_step,
                 log_info=lambda message: self.log_message.emit("INFO", message),
+                log_warn=lambda message: self.log_message.emit("WARN", message),
                 check_cancelled=self._check_cancelled,
                 video_source_path=self._video_source_path,
+                video_stream_index=self._video_stream_index,
                 build_video_only_two_pass=self._build_video_only_two_pass,
                 build_video_only_cmd=self._build_video_only_cmd,
                 wrap_injected_hevc_for_reconstruction=self._wrap_injected_hevc_for_reconstruction,
@@ -2891,6 +2912,9 @@ class EncodeWorkflow(QObject):
                 ),
                 bind_matroska_segment_muxing_patch=self._bind_matroska_segment_muxing_patch,
                 bind_nfo_write=self._bind_nfo_write,
+                estimate_static_hdr=self._static_hdr_estimator.estimate_converted_static_hdr,
+                report_static_hdr_estimate=self.static_hdr_estimate_ready.emit,
+                report_static_hdr_failure=self.static_hdr_estimate_failed.emit,
             )
         ).run(
             config,

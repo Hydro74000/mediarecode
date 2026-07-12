@@ -27,6 +27,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from core.bluray import append_ffmpeg_input_args
 from core.subprocess_utils import subprocess_text_kwargs
 from core.workflows.encode.models import (
     QualityMode,
@@ -232,7 +233,7 @@ def build_decode_pipe_cmd(
     cmd: list[str] = [str(ffmpeg_bin), "-hide_banner", "-loglevel", "error", "-y"]
     if extra_input_args:
         cmd.extend(extra_input_args)
-    cmd.extend(["-i", str(source)])
+    append_ffmpeg_input_args(cmd, source)
     cmd.extend([
         "-map", f"0:{int(stream_index)}",
     ])
@@ -750,9 +751,9 @@ def build_remux_cmd(
     cmd: list[str] = [
         str(ffmpeg_bin), "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(encoded_video),
-        "-i", str(source),
-        "-map", "0:v:0",
     ]
+    append_ffmpeg_input_args(cmd, source)
+    cmd.extend(["-map", "0:v:0"])
     if map_audio:
         cmd.extend(["-map", "1:a?"])
     if map_subtitles:

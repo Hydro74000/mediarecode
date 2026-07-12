@@ -50,6 +50,11 @@ from core.workflows.encode.runtime.frame_count_guard import (
     FrameCountGuard,
 )
 from core.workflows.hevc_static_hdr_metadata import inject_static_hdr_sei_file
+from core.workflows.matroska_dovi_block_addition import (
+    DolbyVisionConfigRecord,
+    MatroskaDoviBlockAdditionEditor,
+)
+from core.workflows.matroska_video_timecode_patcher import MatroskaVideoTimecodePatcher
 
 # Outils dont la barre de progression XX% n'est émise qu'en TTY.
 _PTY_PROGRESS_TOOLS: frozenset[str] = frozenset({"dovi_tool", "hdr10plus_tool"})
@@ -571,7 +576,13 @@ class MergeDoviWorkflow(QObject):
             self._check_cancel()
 
             # 11 — Remuxage
-            self._step_remux(film1, paths, flags, static_hdr_applied=static_applied)
+            self._step_remux(
+                film1,
+                paths,
+                flags,
+                static_hdr_applied=static_applied,
+                dovi_profile=effective_profile,
+            )
             self._check_cancel()
 
             # 12 — Nettoyage
@@ -1305,6 +1316,7 @@ class MergeDoviWorkflow(QObject):
         flags: HDRFlags,
         *,
         static_hdr_applied: bool = False,
+        dovi_profile: DoviProfile = DoviProfile.P8_1,
     ) -> None:
         step = WorkflowStep.REMUX
         t0   = time.monotonic()
@@ -1319,6 +1331,13 @@ class MergeDoviWorkflow(QObject):
             step,
             f"Encapsulation vidéo injectée (FPS source: {fps_expr}) → {paths.film1_wrapped_video.name}…",
         )
+
+        dovi_record = None
+        if flags.has_dovi and paths.film2_rpu.exists():
+            dovi_record = self._build_dovi_record_from_rpu(
+                paths.film2_rpu,
+                forced_compat_id=1 if dovi_profile == DoviProfile.P8_1 else None,
+            )
 
         self._run_cmd([
             self._bins["ffmpeg"],
@@ -1358,6 +1377,16 @@ class MergeDoviWorkflow(QObject):
             str(paths.output_mkv),
         ], step)
 
+        self._patch_video_timecodes(paths.output_mkv, film1, step)
+
+        if flags.has_dovi and paths.film2_rpu.exists():
+            self._patch_dovi_block_addition(
+                paths,
+                dovi_profile=dovi_profile,
+                step=step,
+                dovi_record=dovi_record,
+            )
+
         size_mb = paths.output_mkv.stat().st_size / (1024 ** 2)
         duration = time.monotonic() - t0
         self.step_finished.emit(
@@ -1367,6 +1396,138 @@ class MergeDoviWorkflow(QObject):
                 f"{paths.output_mkv.name}  ({size_mb:.0f} Mo)",
                 duration,
             ),
+        )
+
+    def _patch_video_timecodes(
+        self,
+        target_mkv: Path,
+        source_for_timestamps: Path,
+        step: WorkflowStep,
+    ) -> None:
+        """Réapplique les PTS source packet-order sur les blocs vidéo."""
+        self.step_progress.emit(
+            step,
+            "Correction timecodes vidéo depuis la source (ordre packet)…",
+        )
+        try:
+            result = MatroskaVideoTimecodePatcher(
+                ffprobe_bin=self._bins["ffprobe"],
+            ).patch(
+                target_mkv=target_mkv,
+                source_for_timestamps=source_for_timestamps,
+            )
+        except Exception as exc:
+            raise WorkflowError(step, f"Patch timecodes vidéo échoué : {exc}") from exc
+        self.step_progress.emit(
+            step,
+            f"Timecodes vidéo corrigés : {result.patched_blocks} blocs "
+            f"(dernier PTS {result.last_pts_ms} ms).",
+        )
+
+    def _patch_dovi_block_addition(
+        self,
+        paths: _WorkflowPaths,
+        *,
+        dovi_profile: DoviProfile,
+        step: WorkflowStep,
+        dovi_record: DolbyVisionConfigRecord | None = None,
+    ) -> None:
+        """Ajoute la signalisation Dolby Vision Matroska sur la piste HEVC."""
+        self.step_progress.emit(step, "Injection signal Dolby Vision au niveau Matroska…")
+        record = dovi_record or self._build_dovi_record_from_rpu(
+            paths.film2_rpu,
+            forced_compat_id=1 if dovi_profile == DoviProfile.P8_1 else None,
+        )
+        if record is None:
+            self.step_progress.emit(
+                step,
+                "[WARN] Impossible d'extraire le profil DOVI du RPU "
+                "pour le signal Matroska.",
+            )
+            return
+
+        try:
+            patch_result = MatroskaDoviBlockAdditionEditor().patch(
+                paths.output_mkv,
+                record=record,
+            )
+        except Exception as exc:
+            self.step_progress.emit(
+                step,
+                f"[WARN] Patch BlockAdditionMapping DOVI échoué : {exc}",
+            )
+            return
+
+        if patch_result.applied:
+            self.step_progress.emit(
+                step,
+                f"BlockAdditionMapping DOVI ajouté "
+                f"(track #{patch_result.patched_track_number}, "
+                f"Δ {patch_result.bytes_delta:+d} octets).",
+            )
+        elif patch_result.skipped:
+            self.step_progress.emit(
+                step,
+                f"Signal DOVI Matroska non modifié : {patch_result.reason}",
+            )
+
+    def _build_dovi_record_from_rpu(
+        self,
+        rpu_bin: Path,
+        *,
+        forced_compat_id: int | None = None,
+    ) -> DolbyVisionConfigRecord | None:
+        """Construit le record ``dvcC`` Matroska depuis le résumé dovi_tool."""
+        try:
+            result = subprocess.run(
+                [
+                    self._bins["dovi_tool"],
+                    "info",
+                    "-i",
+                    str(rpu_bin),
+                    "--summary",
+                ],
+                capture_output=True,
+                check=False,
+                **subprocess_text_kwargs(),
+            )
+        except (FileNotFoundError, OSError):
+            return None
+        text = (result.stdout or "") + (result.stderr or "")
+
+        profile_match = re.search(r"Profile\s*:\s*(\d+)(?:\.(\d+))?", text)
+        if not profile_match:
+            return None
+        profile = int(profile_match.group(1))
+        sub_profile = int(profile_match.group(2) or 0)
+
+        if forced_compat_id is not None:
+            compat_id = int(forced_compat_id)
+        else:
+            compat_match = re.search(
+                r"compatibility\s*id\s*:\s*(\d+)",
+                text,
+                re.IGNORECASE,
+            )
+            if compat_match:
+                compat_id = int(compat_match.group(1))
+            elif profile == 8 and sub_profile > 0:
+                compat_id = sub_profile
+            else:
+                # Profile 8 nu dans dovi_tool == P8.x ; pour une base HDR10,
+                # signaler P8.1 évite le fallback DV/HDR10 ambigu côté players.
+                compat_id = 1 if profile == 8 else 0
+
+        level_match = re.search(r"DV\s+Level\s*:\s*(\d+)", text, re.IGNORECASE)
+        level = int(level_match.group(1)) if level_match else 6
+
+        return DolbyVisionConfigRecord(
+            profile=profile,
+            level=level,
+            rpu_present=True,
+            el_present=False,
+            bl_present=True,
+            bl_signal_compat_id=max(0, min(15, compat_id)),
         )
 
     # ------------------------------------------------------------------

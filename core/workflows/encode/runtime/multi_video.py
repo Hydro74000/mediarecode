@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, cast
 
+from core.bluray import append_ffmpeg_input_args
 from core.runner import TaskCancelledError, TaskSignals
 from core.workdir import remove_path
 from core.workflows.encode.domain import (
@@ -111,13 +112,14 @@ class MultiVideoPipelineRunner:
             src_ext = source.suffix.lower()
             if src_ext not in _RAW_HEVC_EXT and src_ext != ".mkv":
                 annexb_src = work_dir / f"video_{index}.source.hevc"
-                run_cmd([
-                    cb.ffmpeg_bin, "-nostdin", "-y",
-                    "-i", str(source),
+                annexb_cmd = [cb.ffmpeg_bin, "-nostdin", "-y"]
+                append_ffmpeg_input_args(annexb_cmd, source)
+                annexb_cmd.extend([
                     "-map", "0:v:0", "-c", "copy",
                     "-bsf:v", "hevc_mp4toannexb",
                     "-f", "hevc", str(annexb_src),
-                ], f"annexb-extract-{index}")
+                ])
+                run_cmd(annexb_cmd, f"annexb-extract-{index}")
                 local_cleanup.append(annexb_src)
                 meta_input = annexb_src
             else:
@@ -192,6 +194,13 @@ class MultiVideoPipelineRunner:
 
             if should_reinject_static_hdr_metadata(video):
                 static_hdr_out = work_dir / f"video_{index}.hdr_static.hevc"
+                if str(getattr(video, "static_hdr_metadata_source", "") or "") == "estimated_p5_to_p8":
+                    confidence = str(getattr(video, "static_hdr_metadata_confidence", "") or "?")
+                    mode = str(getattr(video, "static_hdr_metadata_analysis_mode", "") or "?")
+                    cb.log_info(
+                        f"Piste video {index}: metadata HDR10 statiques estimees "
+                        f"P5->P8.1 (confiance {confidence}, mode {mode})."
+                    )
                 cb.log_info(f"Piste video {index}: injection metadonnees HDR statiques…")
                 static_hdr_result = inject_static_hdr_sei_file(
                     current_hevc,
@@ -443,9 +452,10 @@ class MultiVideoPipelineRunner:
                 final_cmd: list[str] = [cb.ffmpeg_bin, "-hide_banner", "-y"]
                 final_cmd.extend(cb.ffmpeg_progress_args())
                 for prepared_input in prepared_inputs_ready:
-                    final_cmd.extend([*prepared_input.input_args, "-i", str(prepared_input.path)])
+                    final_cmd.extend(prepared_input.input_args)
+                    append_ffmpeg_input_args(final_cmd, prepared_input.path)
                 for src in all_sources:
-                    final_cmd.extend(["-i", str(src)])
+                    append_ffmpeg_input_args(final_cmd, src)
 
                 sync_remap, sync_inputs, live_sync_session, strict_interleave = cb.prepare_multisource_sync(
                     config=config,

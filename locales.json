@@ -559,9 +559,9 @@
     "fra": "{name} est déjà dans la liste.",
     "eng": "{name} is already in the list."
   },
-  "Inspection de {name}…": {
-    "fra": "Inspection de {name}…",
-    "eng": "Inspecting {name}..."
+  "Inspection de {name} (ffprobe + mediainfo)…": {
+    "fra": "Inspection de {name} (ffprobe + mediainfo)…",
+    "eng": "Inspecting {name} (ffprobe + mediainfo)..."
   },
   "Erreur inattendue : {exc}": {
     "fra": "Erreur inattendue : {exc}",
@@ -918,6 +918,14 @@
   "Injecter les métadonnées HDR10 statiques (ST 2086 / MaxCLL)": {
     "fra": "Injecter les métadonnées HDR10 statiques (ST 2086 / MaxCLL)",
     "eng": "Inject static HDR10 metadata (ST 2086 / MaxCLL)"
+  },
+  "Analyse HDR10 estimée": {
+    "fra": "Analyse HDR10 estimée",
+    "eng": "Estimated HDR10 analysis"
+  },
+  "La conversion P5→P8.1 va réencoder le base layer IPT en HDR10 BT.2020/PQ avec libplacebo, puis convertir et réinjecter le RPU Dolby Vision.\n\nChoisissez l'analyse HDR10 statique à appliquer sur le nouveau base layer.": {
+    "fra": "La conversion P5→P8.1 va réencoder le base layer IPT en HDR10 BT.2020/PQ avec libplacebo, puis convertir et réinjecter le RPU Dolby Vision.\n\nChoisissez l'analyse HDR10 statique à appliquer sur le nouveau base layer.",
+    "eng": "P5→P8.1 conversion will re-encode the IPT base layer to HDR10 BT.2020/PQ with libplacebo, then convert and re-inject the Dolby Vision RPU.\n\nChoose the static HDR10 analysis to apply to the new base layer."
   },
   "Master Display": {
     "fra": "Master Display",
@@ -3754,5 +3762,13 @@
   "default, !forced": {
     "fra": "default, !forced",
     "eng": "default, !forced"
+  },
+  "Sélectionner une playlist Blu-ray": {
+    "fra": "Sélectionner une playlist Blu-ray",
+    "eng": "Select a Blu-ray playlist"
+  },
+  "Playlist :": {
+    "fra": "Playlist :",
+    "eng": "Playlist:"
   }
 }

@@ -155,9 +155,7 @@ class TestDoviP7RouterExecuteConversion:
         )
         assert "--discard" in captured[0]
 
-    def test_p5_command_does_not_contain_discard(self, tmp_path):
-        # `--discard` est spécifique aux conversions P7. Pour P5 → P8, on
-        # n'envoie pas ce flag.
+    def test_p5_command_converts_rpu_without_discard(self, tmp_path):
         router = DoviP7Router()
         decision = P7RoutingDecision(
             conversion_needed=True,
@@ -173,9 +171,8 @@ class TestDoviP7RouterExecuteConversion:
             dovi_tool_bin="dovi_tool",
             decision=decision,
         )
-        assert "--discard" not in captured[0]
-        # Le mode reste -m 3.
         assert captured[0][:4] == ["dovi_tool", "-m", "3", "convert"]
+        assert "--discard" not in captured[0]
 
     def test_raises_when_conversion_not_needed(self, tmp_path):
         router = DoviP7Router()

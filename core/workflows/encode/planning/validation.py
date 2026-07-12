@@ -55,6 +55,9 @@ def validate_encode_config(
                 copy_hdr10plus=bool(video.copy_hdr10plus),
                 master_display=str(video.master_display or ""),
                 max_cll=str(video.max_cll or ""),
+                static_hdr_analysis_request=str(
+                    video.static_hdr_metadata_analysis_request or ""
+                ),
             )
             for video in video_tracks
         )
@@ -73,6 +76,15 @@ def validate_encode_config(
         if (video.copy_dv or video.copy_hdr10plus) and not supports_dynamic_hdr(video.codec):
             errors.append(
                 f"Piste vidéo #{index} — DoVi/HDR10+ exige un codec compatible."
+            )
+        analysis_request = str(video.static_hdr_analysis_request or "").strip()
+        if analysis_request and (
+            len(planned_video_tracks) != 1
+            or str(video.codec or "").strip().lower().startswith("nvencc_")
+        ):
+            errors.append(
+                f"Piste vidéo #{index} — l’analyse HDR10 P5→P8.1 intégrée "
+                "requiert un pipeline vidéo unique FFmpeg/copy."
             )
 
     output_dir = config.output.parent

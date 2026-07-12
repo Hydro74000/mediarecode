@@ -41,14 +41,13 @@ jobs:
       - name: Checkout
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
-          git checkout --force "$CHECKOUT_SHA"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach --force "$CHECKOUT_SHA"
 
       - name: Compute release identity
         id: metadata
@@ -98,13 +97,8 @@ jobs:
           fi
 
           if [ "$channel" = "stable" ]; then
-            if [ "${GITHUB_REF_TYPE:-}" = "branch" ] && [ "${GITHUB_REF_NAME:-}" = "main" ]; then
-              release_tag="stable"
-              release_name="Stable ${package_version}"
-            else
-              release_tag="v${package_version}"
-              release_name="Release ${release_tag}"
-            fi
+            release_tag="v${package_version}"
+            release_name="Muxiveo ${package_version}"
             appimage_update_release="latest"
           else
             release_tag="v${package_version}"
@@ -129,14 +123,13 @@ jobs:
       - name: Checkout
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
-          git checkout --force "$CHECKOUT_SHA"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach --force "$CHECKOUT_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -155,6 +148,7 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           MUXIVEO_APPIMAGE_UPDATE_RELEASE: ${{ needs.release-metadata.outputs.appimage_update_release }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python package_appimage.py --allinc --version "${{ needs.release-metadata.outputs.package_version }}"
 
@@ -182,14 +176,13 @@ jobs:
       - name: Checkout
         shell: pwsh
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           $ErrorActionPreference = "Stop"
           git init .
           git remote add origin "https://github.com/$env:GITHUB_REPOSITORY.git"
-          git fetch --no-tags --depth=1 origin "$env:CHECKOUT_REF"
-          git checkout --force "$env:CHECKOUT_SHA"
+          git fetch --no-tags --depth=1 origin "$env:CHECKOUT_SHA"
+          git checkout --detach --force "$env:CHECKOUT_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -241,14 +234,13 @@ jobs:
       - name: Checkout
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
-          git checkout --force "$CHECKOUT_SHA"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach --force "$CHECKOUT_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -314,14 +306,13 @@ jobs:
       - name: Checkout
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
-          git checkout --force "$CHECKOUT_SHA"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach --force "$CHECKOUT_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -410,8 +401,9 @@ jobs:
           set -euo pipefail
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags origin "$CHECKOUT_SHA"
           git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
-          git checkout --force "$CHECKOUT_SHA"
+          git checkout --detach --force "$CHECKOUT_SHA"
 
       - name: Download release assets
         uses: actions/download-artifact@v4
@@ -498,19 +490,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "$CHANNEL" = "stable" ] && [ "$RELEASE_TAG" = "stable" ]; then
-            git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git push --force origin "refs/tags/${RELEASE_TAG}"
-            git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          fi
-
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists; keeping notes and uploading assets."
+            if [ "$CHANNEL" = "stable" ]; then
+              gh release edit "$RELEASE_TAG" --latest
+            fi
           else
             create_args=()
             if [ "$PRERELEASE" = "true" ]; then
               create_args+=(--prerelease)
+            else
+              create_args+=(--latest)
             fi
             gh release create "$RELEASE_TAG" \
               --target "$GITHUB_SHA" \

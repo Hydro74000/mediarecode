@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import validate_bluray_source
 from core.workflows.common.metadata import STREAM_SPEC_BY_TRACK_TYPE
 from core.workflows.remux_models import RemuxConfig, TrackEntry
 
@@ -36,6 +37,7 @@ def validate_remux_config(
     for src in config.sources:
         if not src.path.is_file():
             errors.append(f"Fichier source introuvable : {src.path}")
+        errors.extend(validate_bluray_source(src.path))
         if src.path == config.output:
             errors.append(f"Le fichier de sortie doit être différent de la source : {src.path.name}")
 

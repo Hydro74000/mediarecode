@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.workflows.common.metadata import (
     STREAM_SPEC_BY_TRACK_TYPE as STREAM_SPEC_BY_TYPE,
     disposition_value,
@@ -171,9 +172,11 @@ def append_offset_inputs(
         input_idx = input_by_key.get(input_key)
         if input_idx is None:
             if int(spec.offset_ms) > 0:
-                cmd.extend(["-itsoffset", offset_seconds(spec.offset_ms), "-i", cli_path(spec.input_path)])
+                cmd.extend(["-itsoffset", offset_seconds(spec.offset_ms)])
+                append_ffmpeg_input_args(cmd, spec.input_path, cli_path=cli_path)
             else:
-                cmd.extend(["-ss", offset_seconds(spec.offset_ms), "-i", cli_path(spec.input_path)])
+                cmd.extend(["-ss", offset_seconds(spec.offset_ms)])
+                append_ffmpeg_input_args(cmd, spec.input_path, cli_path=cli_path)
             input_idx = next_input_index
             input_by_key[input_key] = input_idx
             next_input_index += 1

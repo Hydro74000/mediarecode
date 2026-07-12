@@ -34,9 +34,10 @@ Limitations
     BlockAdditionMapping existant.
   - Pas de lacing (un SimpleBlock = une frame). Lacing pénalisant en HEVC
     de toute façon.
-  - Pas de B-frame reordering forcé : on écrit les frames dans l'ordre
-    des PTS croissants (le décodeur reconstruit l'ordre DTS via le
-    bitstream HEVC lui-même).
+  - Pas de B-frame reordering forcé : par défaut on écrit les frames dans
+    l'ordre des PTS croissants. Pour un HEVC brut copié/injecté depuis une
+    source existante, ``timestamp_order="packet"`` conserve l'ordre packet
+    source afin que les B-frames gardent leurs PTS d'origine.
   - CodecPrivate (hvcC) extrait des NAL VPS/SPS/PPS du 1er AU.
 """
 
@@ -486,7 +487,10 @@ class MatroskaNativeMuxer:
         track_number: int = 1,
         track_uid: int = 1,
         language: str = "und",
+        timestamp_order: str = "presentation",
     ) -> MatroskaNativeMuxResult:
+        if timestamp_order not in {"presentation", "packet"}:
+            raise ValueError("timestamp_order doit être 'presentation' ou 'packet'.")
         # 1) Parser le HEVC
         hevc_bytes = hevc_input.read_bytes()
         access_units = split_into_access_units(hevc_bytes)
@@ -494,7 +498,10 @@ class MatroskaNativeMuxer:
             raise RuntimeError(f"Aucun access unit HEVC trouvé dans {hevc_input}.")
 
         # 2) Lire les PTS source
-        pts_seq = self._timestamp_reader.read(source_for_timestamps)
+        pts_seq = self._timestamp_reader.read(
+            source_for_timestamps,
+            sort_by_pts=(timestamp_order == "presentation"),
+        )
 
         # 3) Vérifier l'alignement (le frame count guard a normalement déjà
         #    aligné les choses ; on lève ici si quelque chose a glissé).

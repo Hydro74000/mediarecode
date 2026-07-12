@@ -4,6 +4,11 @@ import subprocess
 import sys
 from collections import defaultdict
 
+# Chemin complet optionnel vers l'executable MediaInfo, nom du binaire inclus.
+# Exemple : "/usr/bin/mediainfo" ou r"C:\Program Files\MediaInfo\MediaInfo.exe"
+# Laisser vide pour conserver l'appel actuel via le PATH : "mediainfo".
+MEDIAINFO_EXECUTABLE_PATH = "/var/home/hydromel/dev/MediaInfo/MediaInfo_CLI_CPP/MediaInfo/Project/GNU/CLI/mediainfo"
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QPushButton, QLabel,
@@ -181,7 +186,8 @@ class MediaInfoThread(QThread):
                 except: pass
 
         try:
-            res = subprocess.run(['mediainfo', self.filepath], capture_output=True, text=True, encoding='utf-8', stdin=subprocess.DEVNULL)
+            mediainfo_executable = MEDIAINFO_EXECUTABLE_PATH or 'mediainfo'
+            res = subprocess.run([mediainfo_executable, self.filepath], capture_output=True, text=True, encoding='utf-8', stdin=subprocess.DEVNULL)
             if res.stdout:
                 target = mediainfo_nfo_path if os.path.exists(nfo_path) else nfo_path
                 try:
@@ -343,9 +349,7 @@ class MediaManager(QMainWindow):
         self.details_layout = QVBoxLayout(self.details_container)
         self.details_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.placeholder = QLabel("Sélectionnez un fichier pour voir les détails")
-        self.placeholder.setStyleSheet("color: #565f89; font-style: italic; font-size: 14px;")
-        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder = self._make_placeholder()
         self.details_layout.addWidget(self.placeholder)
 
         self.scroll_area.setWidget(self.details_container)
@@ -354,6 +358,25 @@ class MediaManager(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter, 1)
+
+    def _make_placeholder(self):
+        placeholder = QLabel("Sélectionnez un fichier pour voir les détails")
+        placeholder.setStyleSheet("color: #565f89; font-style: italic; font-size: 14px;")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        return placeholder
+
+    def _clear_details(self):
+        while self.details_layout.count():
+            item = self.details_layout.takeAt(0)
+            if item:
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+
+    def _show_placeholder(self):
+        self._clear_details()
+        self.placeholder = self._make_placeholder()
+        self.details_layout.addWidget(self.placeholder)
 
     def handle_header_click(self, index):
         C = self.COL
@@ -647,11 +670,7 @@ class MediaManager(QMainWindow):
 
         self._current_path = path
 
-        while self.details_layout.count():
-            item = self.details_layout.takeAt(0)
-            if item:
-                w = item.widget()
-                if w: w.deleteLater()
+        self._clear_details()
 
         loader = QLabel("⚡ Extraction des métadonnées MediaInfo...")
         loader.setStyleSheet("color: #7aa2f7; font-weight: bold; font-size: 12px; margin-top: 20px;")
@@ -670,11 +689,7 @@ class MediaManager(QMainWindow):
         self.draw_info(sections)
 
     def draw_info(self, sections):
-        while self.details_layout.count():
-            item = self.details_layout.takeAt(0)
-            if item:
-                w = item.widget()
-                if w: w.deleteLater()
+        self._clear_details()
             
         if not sections:
             err = QLabel("Aucune donnée MediaInfo trouvée.")
@@ -767,12 +782,8 @@ class MediaManager(QMainWindow):
                     ep_or_movie_node.setData(C["action"], Qt.ItemDataRole.UserRole, new_count - 1)
 
             # Réinitialiser le panneau de droite
-            while self.details_layout.count():
-                item = self.details_layout.takeAt(0)
-                if item:
-                    w = item.widget()
-                    if w: w.deleteLater()
-            self.details_layout.addWidget(self.placeholder)
+            self._current_path = None
+            self._show_placeholder()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

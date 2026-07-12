@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from core.bluray import ffprobe_input_args, title_for_playlist, is_bluray_playlist
 from core.subprocess_utils import subprocess_text_kwargs
 
 
@@ -15,13 +16,18 @@ def ffmeta_escape(value: str) -> str:
 
 
 def probe_media_duration_seconds(ffprobe_bin: str, source: Path) -> float | None:
+    if is_bluray_playlist(source):
+        title = title_for_playlist(source)
+        if title is not None and title.duration_s > 0:
+            return title.duration_s
+
     cmd = [
         ffprobe_bin,
         "-v", "quiet",
         "-print_format", "json",
         "-show_format",
-        str(source),
     ]
+    cmd.extend(ffprobe_input_args(source))
     try:
         result = subprocess.run(
             cmd,
@@ -43,7 +49,8 @@ def probe_media_duration_seconds(ffprobe_bin: str, source: Path) -> float | None
         value = float(raw)
         return value if value > 0 else None
     except Exception:
-        return None
+        pass
+    return None
 
 
 def write_ffmetadata_chapters(

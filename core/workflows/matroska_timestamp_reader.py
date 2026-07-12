@@ -20,6 +20,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.bluray import ffprobe_input_args
 from core.subprocess_utils import subprocess_text_kwargs
 
 
@@ -44,7 +45,10 @@ class TimestampSequence:
     def total_duration_ms(self) -> int:
         if not self.pts_ms:
             return 0
-        return self.pts_ms[-1] + self.durations_ms[-1]
+        return max(
+            pts + max(0, duration)
+            for pts, duration in zip(self.pts_ms, self.durations_ms)
+        )
 
 
 class MatroskaTimestampReader:
@@ -59,22 +63,28 @@ class MatroskaTimestampReader:
     def __init__(self, *, ffprobe_bin: str = "ffprobe") -> None:
         self._ffprobe = ffprobe_bin
 
-    def read(self, source: Path) -> TimestampSequence:
+    def read(self, source: Path, *, sort_by_pts: bool = True) -> TimestampSequence:
         """
         Renvoie la séquence des PTS de la piste vidéo de ``source``.
 
         Lève RuntimeError si ffprobe est indisponible ou si aucun packet
         vidéo n'a été trouvé.
+
+        ``sort_by_pts`` garde le comportement historique : ordre de
+        présentation croissant. Pour remuxer un HEVC brut déjà encodé en
+        ordre de décodage (B-frames), passer ``False`` afin de conserver
+        l'ordre packet et d'associer chaque AU au PTS source correspondant.
         """
+        cmd = [
+            self._ffprobe, "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time,duration_time",
+            "-of", "json",
+        ]
+        cmd.extend(ffprobe_input_args(source))
         try:
             result = subprocess.run(
-                [
-                    self._ffprobe, "-v", "error",
-                    "-select_streams", "v:0",
-                    "-show_entries", "packet=pts_time,duration_time",
-                    "-of", "json",
-                    str(source),
-                ],
+                cmd,
                 capture_output=True,
                 check=False,
                 **subprocess_text_kwargs(),
@@ -109,25 +119,36 @@ class MatroskaTimestampReader:
         if not pts_ms_list:
             raise RuntimeError("Aucun pts_time exploitable dans les packets ffprobe.")
 
-        # Trie par PTS (ffprobe sort dans l'ordre du démuxeur, mais en B-frames
-        # PTS != DTS et l'ordre packet peut être DTS croissant). Pour un muxer
-        # qui écrit des SimpleBlocks par ordre PTS (recommandé), on trie.
-        # Note : pour un fichier complexe, l'ordre DTS est mieux côté Cluster
-        # mais Matroska tolère les deux ; on garde simple.
-        pts_ms_list.sort()
-
+        ordered_pts = sorted(pts_ms_list) if sort_by_pts else list(pts_ms_list)
+        presentation_pts = sorted(pts_ms_list)
         durations_ms_list: list[int] = []
-        for i in range(len(pts_ms_list) - 1):
-            durations_ms_list.append(pts_ms_list[i + 1] - pts_ms_list[i])
+        for i in range(len(presentation_pts) - 1):
+            durations_ms_list.append(presentation_pts[i + 1] - presentation_pts[i])
         if durations_ms_list:
-            # Dernière frame : duplique la durée précédente.
             durations_ms_list.append(durations_ms_list[-1])
         else:
             durations_ms_list.append(0)
 
+        if sort_by_pts:
+            ordered_durations = durations_ms_list
+        else:
+            # Réassocie une durée à chaque PTS dans l'ordre packet. En cas de
+            # PTS dupliqués, on consomme les durées dans l'ordre d'apparition
+            # en présentation.
+            by_pts: dict[int, list[int]] = {}
+            for pts, duration in zip(presentation_pts, durations_ms_list):
+                by_pts.setdefault(pts, []).append(duration)
+            default_duration = durations_ms_list[-1] if durations_ms_list else 0
+            ordered_durations = []
+            for pts in ordered_pts:
+                bucket = by_pts.get(pts)
+                ordered_durations.append(
+                    bucket.pop(0) if bucket else default_duration
+                )
+
         return TimestampSequence(
-            pts_ms=tuple(pts_ms_list),
-            durations_ms=tuple(durations_ms_list),
+            pts_ms=tuple(ordered_pts),
+            durations_ms=tuple(ordered_durations),
         )
 
 

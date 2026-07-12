@@ -42,7 +42,9 @@ def on_add_files(panel: "RemuxPanel", paths: list[str]) -> None:
         panel._source_colors[sf.id] = color
 
         panel._file_list.add_file(sf)
-        panel.log_message.emit("INFO", translate_text("Inspection de {name}…", name=path.name))
+        panel.log_message.emit(
+            "INFO", translate_text("Inspection de {name} (ffprobe + mediainfo)…", name=path.name)
+        )
         panel._executor.submit(panel._inspect_file, sf.id, path)
 
     panel._sync_tmdb_suggested_title()

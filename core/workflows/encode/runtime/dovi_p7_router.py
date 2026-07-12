@@ -1,18 +1,16 @@
 """
 core/workflows/encode/runtime/dovi_p7_router.py
 
-Routeur P7 / P5 → P8.1 pour le pipeline d'encode DoVi.
+Routeur P7 / P5 pour le pipeline d'encode DoVi.
 
-Quand la source est en Dolby Vision Profile 5 ou Profile 7 (FEL/MEL), le
-RPU n'est pas directement compatible avec une encode mono-layer NVENC ou
-software. ``dovi_tool convert`` normalise le flux en P8.1 avant le reste
-du pipeline :
+Quand la source est en Dolby Vision Profile 7 (FEL/MEL), ``dovi_tool
+convert`` peut normaliser le flux en P8.1 avant le reste du pipeline :
 
   - P7 FEL/MEL : ``dovi_tool -m 2 convert --discard``
-  - P5         : ``dovi_tool -m 3 convert``
 
-Le résultat est un HEVC annexB mono-layer P8.1 que les étapes suivantes
-(extract-rpu, extract HDR10+, encode NVENC) peuvent traiter normalement.
+Pour P5, le mode 3 ne convertit que le RPU. Le base layer IPT doit être
+réencodé vers BT.2020/PQ par un traitement Dolby Vision conscient avant
+de pouvoir constituer un vrai fallback HDR10 P8.1.
 
 Cette classe encapsule toute la logique de routage pour rester testable
 et garder ``metadata_inject.py`` propre.
@@ -162,7 +160,8 @@ class DoviP7Router:
             "convert",
         ]
         # Le flag --discard est requis pour P7 FEL/MEL (jette la EL après
-        # conversion). Pour P5 → P8 il n'a pas de sens.
+        # conversion). Pour P5, le résultat sert uniquement à extraire le
+        # RPU P8.1 ; le base layer HDR10 est produit séparément par libplacebo.
         if decision.sub_profile in {DoviSubProfile.P7_FEL, DoviSubProfile.P7_MEL}:
             cmd.append("--discard")
         cmd.extend(["-i", str(source), "-o", str(out_path)])

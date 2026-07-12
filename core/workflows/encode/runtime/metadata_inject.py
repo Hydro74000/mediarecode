@@ -10,12 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args
 from core.subprocess_utils import subprocess_text_kwargs
 
 from core.runner import TaskCancelledError, TaskSignals
 from core.workdir import remove_path
 from core.workflows.encode.domain import should_reinject_static_hdr_metadata
-from core.workflows.encode.models import EncodeConfig, QualityMode
+from core.workflows.encode.models import EncodeConfig, EncodeError, QualityMode
 from core.workflows.encode.planning.track_assembly import build_track_input_paths, resolve_track_assembly
 from core.workflows.encode.planning.plan_models import EncodePlan
 from core.workflows.encode.runtime.frame_count_guard import (
@@ -23,10 +24,12 @@ from core.workflows.encode.runtime.frame_count_guard import (
     FrameCountGuard,
 )
 from core.workflows.hevc_static_hdr_metadata import inject_static_hdr_sei_file
+from core.dovi_profile_detector import DoviSubProfile
 from core.workflows.encode.runtime.dovi_p7_router import DoviP7Router
 from core.workflows.encode.runtime.hevc_sei_normalizer import (
     strip_pic_timing_from_annexb_file,
 )
+from core.workflows.encode.runtime.static_hdr_estimator import StaticHdrEstimate
 from core.workflows.matroska_dovi_block_addition import (
     DolbyVisionConfigRecord,
     MatroskaDoviBlockAdditionEditor,
@@ -42,14 +45,48 @@ import dataclasses
 ENABLE_EXPERIMENTAL_NVENC_SEI_NORMALIZATION = False
 
 
+def _format_bytes(value: int) -> str:
+    size = float(max(0, value))
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    index = 0
+    while size >= 1024.0 and index < len(units) - 1:
+        size /= 1024.0
+        index += 1
+    return f"{size:.1f} {units[index]}"
+
+
+def _friendly_dovi_conversion_error(exc: Exception, work_dir: Path) -> str:
+    raw = str(exc)
+    lowered = raw.lower()
+    if (
+        "quota exceeded" not in lowered
+        and "no space left on device" not in lowered
+        and "os error 122" not in lowered
+        and "os error 28" not in lowered
+    ):
+        return f"Conversion Dolby Vision P5→P8.1 impossible : {raw}"
+    try:
+        free = shutil.disk_usage(work_dir).free
+        free_label = _format_bytes(free)
+    except OSError:
+        free_label = "inconnu"
+    return (
+        "Conversion Dolby Vision P5→P8.1 impossible : quota ou espace temporaire "
+        f"insuffisant dans {work_dir} (libre : {free_label}). "
+        "Libérez de l’espace ou choisissez un dossier de travail disposant d’un quota suffisant."
+    )
+
+
 @dataclass(frozen=True)
 class MetadataInjectRunnerCallbacks:
     ffmpeg_bin: str
     bins: dict[str, str]
     log_step: Callable[[int, str], None]
     log_info: Callable[[str], None]
+    log_warn: Callable[[str], None]
     check_cancelled: Callable[[TaskSignals | None], None]
     video_source_path: Callable[[EncodeConfig], Path]
+    video_stream_index: Callable[[EncodeConfig], int]
     build_video_only_two_pass: Callable[[EncodeConfig, Path], list[list[str]]]
     build_video_only_cmd: Callable[[EncodeConfig, Path], list[str]]
     wrap_injected_hevc_for_reconstruction: Callable[..., list[str]]
@@ -73,6 +110,9 @@ class MetadataInjectRunnerCallbacks:
     run_cmd: Callable[[list[str], TaskSignals, Path | None, Callable[[str], None] | None], str]
     bind_matroska_segment_muxing_patch: Callable[[TaskSignals, Path], None]
     bind_nfo_write: Callable[[TaskSignals, Path], None]
+    estimate_static_hdr: Callable[..., object]
+    report_static_hdr_estimate: Callable[[str, object], None]
+    report_static_hdr_failure: Callable[[str, str], None]
 
 
 class MetadataInjectRunner:
@@ -131,16 +171,19 @@ class MetadataInjectRunner:
                     pass
 
             try:
-                src_size_est = config.source.stat().st_size
+                rpu_bin = tmp / "rpu.bin"
+                rpu_preextracted = False
+                selected_video_source = cb.video_source_path(config)
+                selected_video_stream = cb.video_stream_index(config)
+                src_size_est = selected_video_source.stat().st_size
                 video = config.video
                 if video is None:
                     raise ValueError("EncodeConfig.video is required for metadata injection")
 
                 # STEP 4-bis : routage P7/P5 → P8.1 si besoin.
-                # Pour les sources DoVi P7 (FEL/MEL) ou P5, on convertit
-                # le bitstream en P8.1 mono-layer avant l'extraction RPU
-                # et l'encode. Sans ça, le BL+EL pose problème côté NVDEC
-                # et le RPU extrait n'est pas cohérent avec le BL encodé.
+                # P7 peut réutiliser son base layer. P5 nécessite deux chemins :
+                # dovi_tool convertit le RPU, tandis que libplacebo transforme
+                # réellement les pixels IPT en base layer HDR10 BT.2020/PQ.
                 # Pour P8.x → no-op, le config reste tel quel (aucune
                 # étape supplémentaire).
                 effective_config = config
@@ -149,10 +192,10 @@ class MetadataInjectRunner:
                     p7_router = DoviP7Router()
                     mi_video = _load_mediainfo_video(
                         cb.bins.get("mediainfo", "mediainfo"),
-                        config.source,
+                        selected_video_source,
                     )
                     p7_router_decision = p7_router.analyze(
-                        source=config.source,
+                        source=selected_video_source,
                         mi_video=mi_video,
                         fallback_to_dovi_tool=True,
                     )
@@ -172,30 +215,105 @@ class MetadataInjectRunner:
                         # « max 2 fichiers vidéo en parallèle ».
                         annexb_for_convert = tmp / "source_annexb.hevc"
                         signals.progress.emit("Extraction HEVC annexB pour conversion DoVi…")
-                        _run([
-                            cb.ffmpeg_bin, "-nostdin", "-y",
-                            "-i", str(config.source),
-                            "-map", "0:v:0", "-c", "copy",
+                        annexb_cmd = [cb.ffmpeg_bin, "-nostdin", "-y"]
+                        append_ffmpeg_input_args(annexb_cmd, selected_video_source)
+                        annexb_cmd.extend([
+                            "-map", f"0:{int(selected_video_stream)}", "-c", "copy",
                             "-bsf:v", "hevc_mp4toannexb",
                             "-f", "hevc", str(annexb_for_convert),
                         ])
+                        _run(annexb_cmd)
                         _check()
                         signals.progress.emit(
                             f"Conversion {p7_router_decision.sub_profile.label} → P8.1…"
                         )
-                        converted = p7_router.execute_conversion(
-                            source=annexb_for_convert,
-                            output_dir=tmp,
-                            run_cmd=lambda c: _run(c),
-                            dovi_tool_bin=cb.bins["dovi_tool"],
-                            decision=p7_router_decision,
-                        )
+                        try:
+                            converted = p7_router.execute_conversion(
+                                source=annexb_for_convert,
+                                output_dir=tmp,
+                                run_cmd=lambda c: _run(c),
+                                dovi_tool_bin=cb.bins["dovi_tool"],
+                                decision=p7_router_decision,
+                            )
+                        except Exception as exc:
+                            message = _friendly_dovi_conversion_error(exc, tmp)
+                            request_mode = str(
+                                getattr(video, "static_hdr_metadata_analysis_request", "") or ""
+                            ).strip()
+                            if request_mode:
+                                cb.report_static_hdr_failure(
+                                    str(getattr(video, "track_entry_id", "") or ""),
+                                    message,
+                                )
+                            raise EncodeError(message) from exc
                         # Annexb extrait n'est plus utile (consommé par convert).
                         try:
                             annexb_for_convert.unlink(missing_ok=True)
                         except OSError:
                             pass
                         ext_files.append(converted)
+                        if p7_router_decision.sub_profile == DoviSubProfile.P5:
+                            signals.progress.emit("Extraction du RPU P8.1 converti…")
+                            _run([
+                                cb.bins["dovi_tool"], "extract-rpu",
+                                "-i", str(converted), "-o", str(rpu_bin),
+                            ])
+                            _check()
+                            rpu_preextracted = True
+                            _free(converted)
+
+                            runtime_codec = str(video.codec or "copy").strip().lower()
+                            if runtime_codec == "copy":
+                                runtime_codec = "libx265"
+                                cb.log_warn(
+                                    "P5→P8.1 exige un réencodage du base layer : "
+                                    "remux remplacé par libx265 10-bit CRF 16."
+                                )
+                            video = dataclasses.replace(
+                                video,
+                                codec=runtime_codec,
+                                quality_mode=(
+                                    QualityMode.CRF
+                                    if str(video.codec or "").strip().lower() == "copy"
+                                    else video.quality_mode
+                                ),
+                                crf=(
+                                    16
+                                    if str(video.codec or "").strip().lower() == "copy"
+                                    else video.crf
+                                ),
+                                preset=(
+                                    "slow"
+                                    if str(video.codec or "").strip().lower() == "copy"
+                                    else video.preset
+                                ),
+                                force_8bit=False,
+                                force_10bit=True,
+                                p5_to_hdr10=True,
+                            )
+                            runtime_tracks = []
+                            for track_index, track in enumerate(config.video_tracks):
+                                same_track = bool(
+                                    video.track_entry_id
+                                    and track.track_entry_id == video.track_entry_id
+                                )
+                                runtime_tracks.append(
+                                    video
+                                    if same_track or (not video.track_entry_id and track_index == 0)
+                                    else track
+                                )
+                            effective_config = dataclasses.replace(
+                                config,
+                                video=video,
+                                video_tracks=runtime_tracks or [video],
+                            )
+                            cb.log_info(
+                                "Conversion colorimétrique P5 IPT→HDR10 BT.2020/PQ "
+                                "activée via libplacebo."
+                            )
+                            continue_rebound = False
+                        else:
+                            continue_rebound = True
                         # On clone EncodeConfig en redirigeant `source` ET
                         # `video_tracks[*].source_path` vers le HEVC P8.1.
                         # `_video_source_path` lit `video.source_path` en
@@ -206,21 +324,22 @@ class MetadataInjectRunner:
                         # lecture (Plex/TV).
                         # `config` original reste intact pour STEP 8/9
                         # (timestamps source, audio, subs, chapitres).
-                        rebound_tracks = [
-                            dataclasses.replace(track, source_path=converted)
-                            for track in config.video_tracks
-                        ]
-                        rebound_video = (
-                            dataclasses.replace(config.video, source_path=converted)
-                            if config.video is not None
-                            else None
-                        )
-                        effective_config = dataclasses.replace(
-                            config,
-                            source=converted,
-                            video=rebound_video,
-                            video_tracks=rebound_tracks,
-                        )
+                        if continue_rebound:
+                            rebound_tracks = [
+                                dataclasses.replace(track, source_path=converted, stream_index=0)
+                                for track in config.video_tracks
+                            ]
+                            rebound_video = (
+                                dataclasses.replace(config.video, source_path=converted, stream_index=0)
+                                if config.video is not None
+                                else None
+                            )
+                            effective_config = dataclasses.replace(
+                                config,
+                                source=converted,
+                                video=rebound_video,
+                                video_tracks=rebound_tracks,
+                            )
                         _check()
 
                 if video.copy_dv or video.copy_hdr10plus:
@@ -238,20 +357,20 @@ class MetadataInjectRunner:
                 if needs_annexb and (video.copy_dv or video.copy_hdr10plus):
                     annexb_src = _alloc("source.hevc", src_size_est)
                     signals.progress.emit("Extraction HEVC annexB pour outillage DoVi/HDR10+…")
-                    _run([
-                        cb.ffmpeg_bin, "-nostdin", "-y",
-                        "-i", str(meta_src),
+                    annexb_cmd = [cb.ffmpeg_bin, "-nostdin", "-y"]
+                    append_ffmpeg_input_args(annexb_cmd, meta_src)
+                    annexb_cmd.extend([
                         "-map", "0:v:0", "-c", "copy",
                         "-bsf:v", "hevc_mp4toannexb",
                         "-f", "hevc", str(annexb_src),
                     ])
+                    _run(annexb_cmd)
                     _check()
                     meta_input = annexb_src
                 else:
                     meta_input = meta_src
 
-                rpu_bin = tmp / "rpu.bin"
-                if video.copy_dv:
+                if video.copy_dv and not rpu_preextracted:
                     signals.progress.emit("Extraction RPU Dolby Vision…")
                     _run([
                         cb.bins["dovi_tool"], "extract-rpu",
@@ -285,6 +404,86 @@ class MetadataInjectRunner:
                     _run(cb.build_video_only_cmd(effective_config, enc_hevc))
                 _check()
                 current_hevc = enc_hevc
+
+                request_mode = str(
+                    getattr(video, "static_hdr_metadata_analysis_request", "") or ""
+                ).strip()
+                if request_mode:
+                    cb.log_info(
+                        "Analyse HDR10 statique sur le base layer BT.2020/PQ encodé."
+                    )
+                    signals.progress.emit(
+                        f"Analyse HDR10 {request_mode} sur le base layer final…"
+                    )
+                    try:
+                        estimate_obj = cb.estimate_static_hdr(
+                            current_hevc,
+                            duration_s=config.duration_s,
+                            mode=request_mode,
+                            progress_cb=signals.progress.emit,
+                            cancel_cb=lambda: signals._cancel_event.is_set(),
+                        )
+                    except TaskCancelledError:
+                        raise
+                    except Exception as exc:
+                        if signals._cancel_event.is_set():
+                            raise TaskCancelledError() from exc
+                        message = f"Analyse HDR10 P5→P8.1 impossible : {exc}"
+                        cb.report_static_hdr_failure(
+                            str(getattr(video, "track_entry_id", "") or ""),
+                            message,
+                        )
+                        raise EncodeError(message) from exc
+                    if not isinstance(estimate_obj, StaticHdrEstimate):
+                        message = "Analyse HDR10 P5→P8.1 impossible : résultat interne invalide."
+                        cb.report_static_hdr_failure(
+                            str(getattr(video, "track_entry_id", "") or ""),
+                            message,
+                        )
+                        raise EncodeError(message)
+
+                    video = dataclasses.replace(
+                        video,
+                        inject_hdr_meta=True,
+                        master_display=estimate_obj.master_display,
+                        max_cll=estimate_obj.max_cll,
+                        static_hdr_metadata_source=estimate_obj.source,
+                        static_hdr_metadata_confidence=estimate_obj.confidence,
+                        static_hdr_metadata_analysis_mode=estimate_obj.mode,
+                        static_hdr_metadata_analysis_request="",
+                    )
+                    updated_tracks = []
+                    for track_index, track in enumerate(effective_config.video_tracks):
+                        same_track = bool(
+                            video.track_entry_id
+                            and track.track_entry_id == video.track_entry_id
+                        )
+                        if same_track or (not video.track_entry_id and track_index == 0):
+                            track = dataclasses.replace(
+                                track,
+                                inject_hdr_meta=True,
+                                master_display=estimate_obj.master_display,
+                                max_cll=estimate_obj.max_cll,
+                                static_hdr_metadata_source=estimate_obj.source,
+                                static_hdr_metadata_confidence=estimate_obj.confidence,
+                                static_hdr_metadata_analysis_mode=estimate_obj.mode,
+                                static_hdr_metadata_analysis_request="",
+                            )
+                        updated_tracks.append(track)
+                    effective_config = dataclasses.replace(
+                        effective_config,
+                        video=video,
+                        video_tracks=updated_tracks or [video],
+                    )
+                    cb.report_static_hdr_estimate(
+                        str(getattr(video, "track_entry_id", "") or ""),
+                        estimate_obj,
+                    )
+                    cb.log_warn(
+                        "HDR10 statique estimé dans le workflow depuis le base layer "
+                        f"final (mode {estimate_obj.mode}, confiance "
+                        f"{estimate_obj.confidence}) : {estimate_obj.max_cll}."
+                    )
 
                 # Audit frame count : empêche l'injection sur un stream qui
                 # aurait dérapé en frame count (NVENC drop, NVDEC dup, filtre
@@ -375,6 +574,14 @@ class MetadataInjectRunner:
                 if should_reinject_static_hdr_metadata(video):
                     cur_size = current_hevc.stat().st_size
                     out_static_hdr = _alloc("enc_hdr_static.hevc", cur_size)
+                    if str(getattr(video, "static_hdr_metadata_source", "") or "") == "estimated_p5_to_p8":
+                        confidence = str(getattr(video, "static_hdr_metadata_confidence", "") or "?")
+                        mode = str(getattr(video, "static_hdr_metadata_analysis_mode", "") or "?")
+                        cb.log_warn(
+                            "Injection HDR10 statique estimée depuis analyse P5→P8.1 "
+                            f"(confiance {confidence}, mode {mode}) — fallback approximatif, "
+                            "pas metadata source."
+                        )
                     signals.progress.emit("Injection metadonnees HDR statiques…")
                     static_hdr_result = inject_static_hdr_sei_file(
                         current_hevc,
@@ -494,11 +701,10 @@ class MetadataInjectRunner:
                     *cb.ffmpeg_progress_args(),
                     "-i",
                     str(current_video_input),
-                    "-i",
-                    str(config.source),
                 ]
+                append_ffmpeg_input_args(recon_cmd, config.source)
                 for sp in extra_sources:
-                    recon_cmd.extend(["-i", str(sp)])
+                    append_ffmpeg_input_args(recon_cmd, sp)
 
                 sync_remap, sync_inputs, live_sync_session, strict_interleave = cb.prepare_multisource_sync(
                     config=config,

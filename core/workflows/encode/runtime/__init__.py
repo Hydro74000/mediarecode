@@ -71,6 +71,7 @@ from .nvencc_routing import (
     NvenccRoutingCallbacks,
 )
 from .preparation import EncodePreparationRunner, EncodePreparationRunnerCallbacks
+from .static_hdr_estimator import StaticHdrEstimate, StaticHdrEstimateService
 from .storage_guard import (
     ensure_inject_storage_available,
     estimate_duration_seconds,
@@ -122,6 +123,8 @@ __all__ = [
     "NvenccRoutingCallbacks",
     "EncodePreparationRunner",
     "EncodePreparationRunnerCallbacks",
+    "StaticHdrEstimate",
+    "StaticHdrEstimateService",
     "TwoPassLogCleanupService",
     "TwoPassRunner",
     "TwoPassRunnerCallbacks",

@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args, ffprobe_input_args
 from core.runner import TaskCancelledError, TaskSignals
 from core.subprocess_utils import subprocess_text_kwargs
 from core.workflows.common.attachments import attachment_filename_from_meta
@@ -31,8 +32,8 @@ def probe_attachment_stream(
         "-print_format",
         "json",
         "-show_streams",
-        str(source),
     ]
+    cmd.extend(ffprobe_input_args(source))
     try:
         result = subprocess_run(
             cmd,
@@ -110,8 +111,9 @@ def extract_attached_pic(
         ffmpeg_bin,
         "-hide_banner",
         "-y",
-        "-i",
-        str(source),
+    ]
+    append_ffmpeg_input_args(cmd, source)
+    cmd.extend([
         "-map",
         f"0:{stream_idx}",
         *ffmpeg_thread_args(),
@@ -120,7 +122,7 @@ def extract_attached_pic(
         "-frames:v",
         "1",
         str(dest),
-    ]
+    ])
     log_info("$ " + " ".join(cmd))
     try:
         run_cmd(cmd, "extract-attached-pic", signals)

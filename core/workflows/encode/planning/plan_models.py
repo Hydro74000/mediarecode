@@ -66,6 +66,7 @@ class PlannedVideoTrack:
     copy_hdr10plus: bool
     master_display: str
     max_cll: str
+    static_hdr_analysis_request: str = ""
 
 
 @dataclass(frozen=True)

@@ -142,12 +142,28 @@ class DynamicHdrConfigNormalizer:
             )
 
         auto_md, auto_cll = video.master_display, video.max_cll
-        if (copy_dv or copy_hdr10plus) and (not auto_md or not auto_cll):
+        analysis_pending = bool(
+            str(getattr(video, "static_hdr_metadata_analysis_request", "") or "").strip()
+        )
+        if (
+            (copy_dv or copy_hdr10plus)
+            and (not auto_md or not auto_cll)
+            and not analysis_pending
+        ):
             auto_md, auto_cll = self._fill_static_hdr_fallbacks(
                 source,
                 master_display=auto_md,
                 max_cll=auto_cll,
                 track_label=track_label,
+            )
+        elif analysis_pending:
+            self._cb.log(
+                "INFO",
+                self._track_message(
+                    track_label,
+                    "Analyse HDR10 P5→P8.1 programmée",
+                    "fallback statique différé au workflow.",
+                ),
             )
 
         return replace(

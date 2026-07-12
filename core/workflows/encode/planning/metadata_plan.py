@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from core.bluray import append_ffmpeg_input_args
 from core.workflows.encode.models import ChapterEntryLike, EncodeConfig
 
 from .plan_models import (
@@ -101,7 +102,7 @@ def materialize_container_metadata_inputs(
         else:
             tag_input_index = next_input_index
             next_input_index += 1
-            input_args.extend(["-i", str(metadata_plan.tag_source)])
+            append_ffmpeg_input_args(input_args, metadata_plan.tag_source)
     return MaterializedContainerMetadataPlan(
         next_input_index=next_input_index,
         chapter_input_index=chapter_input_index,

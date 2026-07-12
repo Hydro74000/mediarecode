@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.bluray import append_ffmpeg_input_args, ffprobe_input_args
 from core.subprocess_utils import subprocess_text_kwargs, subprocess_windows_no_window_kwargs
 
 
@@ -135,8 +136,8 @@ class AudioSyncWorkflow:
             "-select_streams", f"a:{self._audio_stream_ordinal(track)}",
             "-show_entries", "stream=channels,channel_layout,duration",
             "-of", "json",
-            str(track.source_path),
         ]
+        cmd.extend(ffprobe_input_args(track.source_path))
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -169,8 +170,8 @@ class AudioSyncWorkflow:
             "-v", "error",
             "-show_entries", "stream=index,codec_type",
             "-of", "json",
-            str(track.source_path),
         ]
+        cmd.extend(ffprobe_input_args(track.source_path))
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -244,11 +245,13 @@ class AudioSyncWorkflow:
         cmd = [
             self._ffmpeg,
             "-hide_banner", "-loglevel", "error",
-            "-i", str(track.source_path),
+        ]
+        append_ffmpeg_input_args(cmd, track.source_path)
+        cmd.extend([
             "-map", f"0:{int(track.stream_index)}",
             "-vn", "-sn", "-dn",
             "-t", str(self._analysis_seconds),
-        ]
+        ])
         if audio_filter:
             cmd.extend(["-af", audio_filter])
         cmd.extend([

@@ -48,6 +48,7 @@ from core.inspector import (
     FileInspector,
     HDRType,
     InspectionError,
+    SubtitleTrack,
     VideoTrack,
     _float_or_none,
     _int_or_none,
@@ -430,6 +431,20 @@ class TestParseFFprobe:
         assert info.subtitle_tracks[0].forced  is True
         assert info.subtitle_tracks[0].default is False
 
+    def test_parse_subtitle_element_count_from_ffprobe_frames(self):
+        raw = _make_ffprobe_output(sub_streams=[
+            _sub_stream(nb_frames="1292")
+        ])
+        info = self.insp._parse_ffprobe(self.path, raw)
+        assert info.subtitle_tracks[0].element_count == 1292
+
+    def test_parse_subtitle_element_count_from_ffprobe_tags(self):
+        raw = _make_ffprobe_output(sub_streams=[
+            _sub_stream(tags={"language": "fre", "NUMBER_OF_FRAMES": "1 292"})
+        ])
+        info = self.insp._parse_ffprobe(self.path, raw)
+        assert info.subtitle_tracks[0].element_count == 1292
+
     def test_parse_chapters(self):
         raw = _make_ffprobe_output(chapters=[
             {"start_time": "0.000000", "tags": {"title": "Chapitre 1"}},
@@ -806,6 +821,61 @@ class TestInspect:
         assert len(info.video_tracks) == 1
         assert len(info.audio_tracks) == 1
         assert info.frame_count == 142857
+
+    def test_inspect_prefers_mediainfo_for_video_bitrate_and_subtitle_elements(self):
+        info = FileInfo(
+            path=self.path,
+            format="mov,mp4,m4a,3gp,3g2,mj2",
+            duration_s=None,
+            size_bytes=None,
+            bit_rate=None,
+            video_tracks=[
+                VideoTrack(
+                    index=0,
+                    codec="hevc",
+                    codec_long="H.265",
+                    width=1920,
+                    height=1080,
+                    frame_rate="24000/1001",
+                    bit_depth=10,
+                    color_space="yuv420p10le",
+                    color_primaries=None,
+                    color_transfer=None,
+                    color_matrix=None,
+                    bit_rate=1_000_000,
+                )
+            ],
+            subtitle_tracks=[
+                SubtitleTrack(
+                    index=2,
+                    codec="subrip",
+                    language="fra",
+                    title=None,
+                )
+            ],
+        )
+        mi_data = {
+            "media": {
+                "track": [
+                    {"@type": "Video", "BitRate": "22 000 000", "FrameCount": "240"},
+                    {"@type": "Text", "ElementCount": "1 292"},
+                ]
+            }
+        }
+
+        with (
+            patch.object(self.insp, "_run_ffprobe", return_value={}),
+            patch.object(self.insp, "_parse_ffprobe", return_value=info),
+            patch.object(self.insp, "_run_mediainfo_json", return_value=mi_data),
+            patch.object(self.insp, "get_frame_count", side_effect=AssertionError("mediainfo JSON must be reused")),
+            patch.object(self.insp, "_detect_hdr_from_raw", return_value=HDRType.NONE),
+        ):
+            out = self.insp.inspect(self.path)
+
+        assert out.video_tracks[0].bit_rate == 22_000_000
+        assert out.subtitle_tracks[0].element_count == 1292
+        assert out.frame_count == 240
+        assert out.mediainfo_json == mi_data
 
     def test_inspect_continues_when_mediainfo_fails(self):
         """inspect() ne plante pas si mediainfo est absent."""

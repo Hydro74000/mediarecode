@@ -35,6 +35,9 @@ def build_planned_video_tracks(
                 copy_hdr10plus=bool(settings.copy_hdr10plus),
                 master_display=str(settings.master_display or ""),
                 max_cll=str(settings.max_cll or ""),
+                static_hdr_analysis_request=str(
+                    settings.static_hdr_metadata_analysis_request or ""
+                ),
             )
         )
     return tuple(planned)

@@ -15,7 +15,8 @@ pipeline a besoin de cette distinction afin de :
 - Pour P7 FEL : encoder uniquement le BL (suffisant), comme aujourd'hui.
 - Pour P7 MEL : convertir P7→P8.1 via ``dovi_tool -m 2 convert --discard``
   AVANT l'encode, sinon le BL seul produit un visuel SDR.
-- Pour P5 : convertir P5→P8 via ``dovi_tool -m 3 convert``.
+- Pour P5 : signaler qu'une conversion du base layer IPT vers HDR10 est
+  nécessaire. ``dovi_tool -m 3`` ne convertit que le RPU et ne suffit pas.
 - Pour P8.x : pipeline tel quel.
 
 Sources d'info
@@ -54,6 +55,7 @@ class DoviSubProfile(Enum):
     """Pas de DV ou détection impossible."""
 
     P5 = "p5"
+    """Profile 5 : base layer IPT, non compatible HDR10 sans réencodage couleur."""
     """Profile 5 — mono-layer non-HDR10-compat (IPTPQc2). Convert → P8 requis."""
 
     P7_FEL = "p7_fel"
@@ -76,7 +78,11 @@ class DoviSubProfile(Enum):
 
     @property
     def needs_p8_conversion(self) -> bool:
-        """True si une conversion ``dovi_tool convert`` vers P8.1 est nécessaire."""
+        """True si une préparation vers P8.1 est nécessaire.
+
+        Pour P5, cela inclut obligatoirement une conversion colorimétrique du
+        base layer ; le seul traitement RPU de ``dovi_tool`` n'est pas suffisant.
+        """
         return self in {DoviSubProfile.P5, DoviSubProfile.P7_FEL, DoviSubProfile.P7_MEL}
 
     @property
@@ -85,7 +91,7 @@ class DoviSubProfile(Enum):
         if self in {DoviSubProfile.P7_FEL, DoviSubProfile.P7_MEL}:
             return "2"  # P7 → P8.1
         if self == DoviSubProfile.P5:
-            return "3"  # P5 → P8
+            return "3"  # RPU P5 → P8.1 seulement ; BL à convertir séparément.
         return None
 
     @property
