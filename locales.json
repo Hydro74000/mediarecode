@@ -3762,5 +3762,13 @@
   "default, !forced": {
     "fra": "default, !forced",
     "eng": "default, !forced"
+  },
+  "Sélectionner une playlist Blu-ray": {
+    "fra": "Sélectionner une playlist Blu-ray",
+    "eng": "Select a Blu-ray playlist"
+  },
+  "Playlist :": {
+    "fra": "Playlist :",
+    "eng": "Playlist:"
   }
 }

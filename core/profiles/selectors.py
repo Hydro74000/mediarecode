@@ -303,12 +303,13 @@ def track_selector_for_entry(
         "codec": track.orig_codec or track.codec,
         "language": normalize_lang(track.orig_language or track.language, track.orig_title or track.title),
     }
-    channels = _channels_from_display(track.orig_display_info or track.display_info)
-    if channels:
-        selector["channels"] = channels
-    audio_object = _audio_object_from_display(track.orig_display_info or track.display_info)
-    if audio_object:
-        selector["audio_object"] = audio_object
+    if track.track_type == "audio":
+        channels = _channels_from_display(track.orig_display_info or track.display_info)
+        if channels:
+            selector["channels"] = channels
+        audio_object = _audio_object_from_display(track.orig_display_info or track.display_info)
+        if audio_object:
+            selector["audio_object"] = audio_object
     if track.track_type == "video":
         resolution = _video_resolution_payload(track)
         if resolution:
