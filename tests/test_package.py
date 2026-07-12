@@ -7,6 +7,7 @@ import subprocess
 import struct
 import zlib
 from pathlib import Path
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import package as package_mod
@@ -59,6 +60,22 @@ def test_pyinstaller_frontend_flag_uses_windowed_on_windows():
 
 def test_pyinstaller_frontend_flag_keeps_console_on_linux():
     assert package_mod._pyinstaller_frontend_flag("Linux") == "--console"
+
+
+def test_github_latest_asset_uses_ci_token_when_available(monkeypatch):
+    response = MagicMock()
+    response.read.return_value = json.dumps({
+        "assets": [{"name": "dovi-x86_64", "browser_download_url": "https://example.test/dovi"}],
+    }).encode()
+    response.__enter__.return_value = response
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    with patch.object(package_appimage_mod.urllib.request, "urlopen", return_value=response) as urlopen:
+        url = package_appimage_mod._gh_latest_asset("owner/repo", "x86_64")
+
+    assert url == "https://example.test/dovi"
+    request = urlopen.call_args.args[0]
+    assert request.get_header("Authorization") == "Bearer test-token"
 
 
 def test_desktop_entries_advertise_file_open_support():

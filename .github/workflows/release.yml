@@ -148,6 +148,7 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           MUXIVEO_APPIMAGE_UPDATE_RELEASE: ${{ needs.release-metadata.outputs.appimage_update_release }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python package_appimage.py --allinc --version "${{ needs.release-metadata.outputs.package_version }}"
 

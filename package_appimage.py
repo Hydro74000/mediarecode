@@ -563,9 +563,19 @@ _APPRUN_ALLINC = textwrap.dedent("""\
 def _gh_latest_asset(repo: str, *patterns: str) -> str:
     """Retourne l'URL du premier asset GitHub dont le nom contient un des patterns."""
     url = f"https://api.github.com/repos/{repo}/releases/latest"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Muxiveo-builder",
+    }
+    # Les builds CI peuvent dépasser rapidement la limite anonyme de l'API
+    # GitHub en téléchargeant les outils embarqués. Un token est facultatif
+    # pour conserver le script utilisable hors GitHub Actions.
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         url,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "Muxiveo-builder"},
+        headers=headers,
     )
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
