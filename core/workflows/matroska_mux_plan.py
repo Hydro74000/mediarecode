@@ -27,6 +27,10 @@ class MatroskaMuxTrack:
     flag_enabled: bool = True
     flag_default: bool = False
     flag_forced: bool = False
+    flag_hearing_impaired: bool = False
+    flag_visual_impaired: bool = False
+    flag_original: bool = False
+    flag_commentary: bool = False
 
 
 @dataclass(frozen=True)

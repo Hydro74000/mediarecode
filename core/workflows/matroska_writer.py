@@ -13,7 +13,9 @@ from core.workflows.matroska_element_ids import (
     ATTACHMENTS_ID, ATTACHED_FILE_ID,
     BLOCK_ADDITIONS_ID, BLOCK_DURATION_ID, BLOCK_GROUP_ID, BLOCK_ID,
     CLUSTER_ID, CODEC_STATE_ID, CUES_ID, DISCARD_PADDING_ID,
-    FLAG_DEFAULT_ID, FLAG_ENABLED_ID, INFO_ID, LANGUAGE_BCP47_ID,
+    FLAG_COMMENTARY_ID, FLAG_DEFAULT_ID, FLAG_ENABLED_ID, FLAG_FORCED_ID,
+    FLAG_HEARING_IMPAIRED_ID, FLAG_ORIGINAL_ID, FLAG_VISUAL_IMPAIRED_ID,
+    INFO_ID, LANGUAGE_BCP47_ID,
     LANGUAGE_ID, NAME_ID, REFERENCE_BLOCK_ID, SEGMENT_ID, SIMPLE_BLOCK_ID,
     CHAPTERS_ID, CHAPTER_ATOM_ID, CHAPTER_DISPLAY_ID, CHAPTER_TIME_START_ID,
     CHAPTER_UID_ID, CHAP_LANGUAGE_ID, CHAP_STRING_ID, EDITION_ENTRY_ID,
@@ -22,14 +24,18 @@ from core.workflows.matroska_element_ids import (
     TIMESTAMP_ID, TRACK_ENTRY_ID, TRACK_NUMBER_ID, TRACK_UID_ID, TRACKS_ID,
 )
 from core.workflows.matroska_mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack
-from core.workflows.matroska_native_muxer import _build_ebml_header, _build_info
+from core.workflows.matroska_native_muxer import (
+    _ClusterRecord, _build_cues, _build_ebml_header, _build_info, _build_seek_head,
+)
 from core.workflows.matroska_reader import read_element
 from core.workflows.matroska_reader import MatroskaAttachment
 
 
 _PATCHED_TRACK_FIELDS = {
     TRACK_NUMBER_ID, TRACK_UID_ID, LANGUAGE_ID, LANGUAGE_BCP47_ID,
-    NAME_ID, FLAG_ENABLED_ID, FLAG_DEFAULT_ID,
+    NAME_ID, FLAG_ENABLED_ID, FLAG_DEFAULT_ID, FLAG_FORCED_ID,
+    FLAG_HEARING_IMPAIRED_ID, FLAG_VISUAL_IMPAIRED_ID, FLAG_ORIGINAL_ID,
+    FLAG_COMMENTARY_ID,
 }
 
 
@@ -54,6 +60,11 @@ def _track_entry(track: MatroskaMuxTrack) -> bytes:
         uint_element(TRACK_UID_ID, track.output_uid),
         uint_element(FLAG_ENABLED_ID, int(track.flag_enabled)),
         uint_element(FLAG_DEFAULT_ID, int(track.flag_default)),
+        uint_element(FLAG_FORCED_ID, int(track.flag_forced)),
+        uint_element(FLAG_HEARING_IMPAIRED_ID, int(track.flag_hearing_impaired)),
+        uint_element(FLAG_VISUAL_IMPAIRED_ID, int(track.flag_visual_impaired)),
+        uint_element(FLAG_ORIGINAL_ID, int(track.flag_original)),
+        uint_element(FLAG_COMMENTARY_ID, int(track.flag_commentary)),
         string_element(LANGUAGE_ID, track.language or "und"),
         string_element(LANGUAGE_BCP47_ID, track.language_bcp47) if track.language_bcp47 else b"",
         string_element(NAME_ID, track.name) if track.name else b"",
@@ -126,13 +137,20 @@ class MatroskaWriter:
         with partial.open("wb") as fh:
             fh.write(_build_ebml_header())
             fh.write(SEGMENT_ID + encode_unknown_size_marker(length=8))
+            payload_start = fh.tell()
+            seek_reserved = 512
+            fh.write(b"\0" * seek_reserved)
+            info_offset = fh.tell() - payload_start
             fh.write(info)
+            tracks_offset = fh.tell() - payload_start
             fh.write(tracks)
             # Metadata level-1 before the first Cluster is required by readers
             # that stop their metadata scan once media payload begins.
             for raw in plan.opaque_top_level:
                 fh.write(raw)
             index = 0
+            cluster_records: list[_ClusterRecord] = []
+            video_track = next((track.output_number for track in plan.tracks if track.source_track.track_type == 1), plan.tracks[0].output_number)
             while index < len(packets):
                 cluster_time = packets[index].block.timestamp_ms
                 group: list[MatroskaMuxPacket] = []
@@ -140,7 +158,19 @@ class MatroskaWriter:
                     group.append(packets[index]); index += 1
                 payload = uint_element(TIMESTAMP_ID, max(0, cluster_time))
                 payload += b"".join(_packet_element(packet, cluster_time) for packet in group)
+                cluster_offset = fh.tell() - payload_start
                 fh.write(element(CLUSTER_ID, payload))
+                key_packet = next((packet for packet in group if packet.output_track_number == video_track and packet.block.flags & 0x80), None)
+                if key_packet is not None:
+                    cluster_records.append(_ClusterRecord(cluster_offset, cluster_time, [(key_packet.block.timestamp_ms, 0)]))
+            cues_offset = fh.tell() - payload_start
+            fh.write(_build_cues(cluster_records, video_track))
+            seek = _build_seek_head(
+                [(INFO_ID, info_offset), (TRACKS_ID, tracks_offset), (CUES_ID, cues_offset)],
+                total_size=seek_reserved,
+            )
+            fh.seek(payload_start)
+            fh.write(seek)
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial.replace(destination)
         return destination

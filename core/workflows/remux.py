@@ -231,6 +231,7 @@ class RemuxWorkflow(QObject):
                 config,
                 log=self.log_message.emit,
                 log_step=self._log_step,
+                ffmpeg_bin=self._ffmpeg,
             )
         return RemuxRuntimeRunner(
             RemuxRuntimeRunnerCallbacks(

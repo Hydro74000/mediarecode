@@ -164,6 +164,7 @@ class MatroskaReader:
     INFO_ID = bytes.fromhex("1549a966")
     MUXING_APP_ID = bytes.fromhex("4d80")
     WRITING_APP_ID = bytes.fromhex("5741")
+    TIMESTAMP_SCALE_ID = bytes.fromhex("2ad7b1")
     ATTACHMENTS_ID = bytes.fromhex("1941a469")
     ATTACHED_FILE_ID = bytes.fromhex("61a7")
     FILE_DESCRIPTION_ID = bytes.fromhex("467e")
@@ -281,6 +282,18 @@ class MatroskaReader:
                     values[child.element_id] = self.payload(child).decode("utf-8", "replace").rstrip("\0")
         return values.get(self.MUXING_APP_ID, ""), values.get(self.WRITING_APP_ID, "")
 
+    def timestamp_scale_ns(self) -> int:
+        info = next((item for item in self.top_level() if item.element_id == self.INFO_ID), None)
+        if info is None:
+            return 1_000_000
+        size = self.path.stat().st_size
+        with self.path.open("rb") as fh:
+            fh.seek(info.payload_offset)
+            for child in iter_children(fh, info, file_size=size):
+                if child.element_id == self.TIMESTAMP_SCALE_ID and child.size is not None:
+                    return int.from_bytes(self.payload(child), "big") or 1_000_000
+        return 1_000_000
+
     @staticmethod
     def _decode_block(raw: bytes, cluster_timestamp: int, **metadata: object) -> tuple["MatroskaBlock", ...]:
         track_no, length = _read_vint_value(raw)
@@ -302,6 +315,7 @@ class MatroskaReader:
     def blocks(self) -> Iterator["MatroskaBlock"]:
         """Yield SimpleBlock and BlockGroup frames, including all lacing modes."""
         size = self.path.stat().st_size
+        scale_ns = self.timestamp_scale_ns()
         with self.path.open("rb") as fh:
             for cluster in self.top_level():
                 if cluster.element_id != self.CLUSTER_ID:
@@ -312,7 +326,12 @@ class MatroskaReader:
                     if child.element_id == self.TIMESTAMP_ID and child.size is not None:
                         timestamp = int.from_bytes(self.payload(child), "big")
                     elif child.element_id == self.SIMPLE_BLOCK_ID and child.size is not None:
-                        yield from self._decode_block(self.payload(child), timestamp)
+                        decoded = self._decode_block(self.payload(child), timestamp)
+                        for block in decoded:
+                            yield block.__class__(**{
+                                **block.__dict__,
+                                "timestamp_ms": round(block.timestamp_ms * scale_ns / 1_000_000),
+                            })
                     elif child.element_id == self.BLOCK_GROUP_ID and child.size is not None:
                         values: dict[bytes, list[bytes]] = {}
                         fh.seek(child.payload_offset)
@@ -324,14 +343,19 @@ class MatroskaReader:
                             raise ValueError("BlockGroup sans Block")
                         uint = lambda key: int.from_bytes(values.get(key, [b""])[0], "big") if values.get(key) else 0
                         sint_values = lambda key: tuple(int.from_bytes(item, "big", signed=True) for item in values.get(key, []))
-                        yield from self._decode_block(
+                        decoded = self._decode_block(
                             raw_blocks[0], timestamp,
-                            duration_ms=uint(self.BLOCK_DURATION_ID) or None,
-                            references=sint_values(self.REFERENCE_BLOCK_ID),
+                            duration_ms=(round(uint(self.BLOCK_DURATION_ID) * scale_ns / 1_000_000) if uint(self.BLOCK_DURATION_ID) else None),
+                            references=tuple(round(value * scale_ns / 1_000_000) for value in sint_values(self.REFERENCE_BLOCK_ID)),
                             discard_padding_ns=(sint_values(self.DISCARD_PADDING_ID) or (0,))[0],
                             codec_state=(values.get(self.CODEC_STATE_ID) or [b""])[0],
                             block_additions=(values.get(self.BLOCK_ADDITIONS_ID) or [b""])[0],
                         )
+                        for block in decoded:
+                            yield block.__class__(**{
+                                **block.__dict__,
+                                "timestamp_ms": round(block.timestamp_ms * scale_ns / 1_000_000),
+                            })
 
     def simple_blocks(self) -> Iterator["MatroskaBlock"]:
         """Compatibility alias for callers predating BlockGroup support."""

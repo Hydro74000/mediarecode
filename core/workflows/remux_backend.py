@@ -10,8 +10,11 @@ not yet been materialised by the native writer.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import mimetypes
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +30,7 @@ from core.workflows.remux_mapping import resolve_mapped_tracks
 from core.workflows.remux_mapping import normalized_language_value, resolved_global_tags
 from core.workflows.remux_models import RemuxConfig, normalize_mux_backend
 from core.version import APP_VERSION_LABEL
+from core.workdir import download_tmdb_cover
 
 
 @dataclass(frozen=True)
@@ -49,10 +53,6 @@ def native_capability_reasons(config: RemuxConfig) -> tuple[str, ...]:
     reasons: list[str] = []
     if config.output.suffix.lower() != ".mkv":
         reasons.append("le backend natif écrit uniquement des sorties .mkv")
-    if any(source.path.suffix.lower() not in {".mkv", ".webm"} for source in config.sources):
-        reasons.append("une source non-Matroska doit encore être canonicalisée")
-    if config.tmdb_cover is not None:
-        reasons.append("la cover TMDB distante doit être téléchargée avant le muxage natif")
     return tuple(reasons)
 
 
@@ -96,6 +96,10 @@ def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
             flag_enabled=item.track.flag_enabled,
             flag_default=item.track.flag_default,
             flag_forced=item.track.flag_forced,
+            flag_hearing_impaired=item.track.flag_hearing_impaired,
+            flag_visual_impaired=item.track.flag_visual_impaired,
+            flag_original=item.track.flag_original,
+            flag_commentary=item.track.flag_commentary,
         ))
         offset = int(item.track.time_shift_ms or 0)
         for block in block_cache[item.source_file_index]:
@@ -162,22 +166,58 @@ def run_native_remux(
     *,
     log: Callable[[str, str], None],
     log_step: Callable[[int, str], None],
+    ffmpeg_bin: str,
 ) -> TaskSignals:
     signals = TaskSignals()
 
     def task() -> None:
+        canonical_root: Path | None = None
         try:
             log("INFO", "Backend Matroska natif multi-pistes sélectionné (plan v1).")
-            log_step(2, "Construction du plan Matroska natif")
-            plan = build_native_plan(config)
-            log_step(3, "Écriture Matroska native multi-pistes")
+            run_config = config
+            if config.tmdb_cover is not None:
+                work_root = config.work_dir or Path(tempfile.gettempdir())
+                canonical_root = Path(tempfile.mkdtemp(prefix="Muxiveo_native_", dir=work_root))
+                cover_url, cover_name = config.tmdb_cover
+                cover = download_tmdb_cover(cover_url, cover_name, canonical_root / "attachments")
+                run_config = replace(run_config, extra_attachments=[*run_config.extra_attachments, cover], tmdb_cover=None)
+            non_matroska = [source for source in config.sources if source.path.suffix.lower() not in {".mkv", ".webm"}]
+            if non_matroska:
+                log_step(2, "Canonicalisation Matroska des sources non-MKV")
+                work_root = config.work_dir or Path(tempfile.gettempdir())
+                work_root.mkdir(parents=True, exist_ok=True)
+                if canonical_root is None:
+                    canonical_root = Path(tempfile.mkdtemp(prefix="Muxiveo_canonical_", dir=work_root))
+                replacements: dict[int, Path] = {}
+                for source in non_matroska:
+                    target = canonical_root / f"source_{source.file_index}.mkv"
+                    cmd = [
+                        ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                        "-i", str(source.path), "-map", "0", "-c", "copy", "-c:s", "srt", str(target),
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode:
+                        raise RuntimeError(
+                            f"Canonicalisation impossible pour {source.path.name}: {result.stderr or result.stdout}"
+                        )
+                    replacements[source.file_index] = target
+                run_config = replace(config, sources=[
+                    replace(source, path=replacements.get(source.file_index, source.path))
+                    for source in config.sources
+                ])
+            log_step(3, "Construction du plan Matroska natif")
+            plan = build_native_plan(run_config)
+            log_step(4, "Écriture Matroska native multi-pistes")
             MatroskaWriter().write(plan)
-            log_step(4, "Validation structure native terminée")
+            log_step(5, "Validation structure native terminée")
             MatroskaReader(config.output).segment()
             signals.finished.emit(str(config.output))
         except Exception as exc:
             config.output.with_suffix(config.output.suffix + ".partial").unlink(missing_ok=True)
             signals.failed.emit(str(exc), exc)
+        finally:
+            if canonical_root is not None:
+                shutil.rmtree(canonical_root, ignore_errors=True)
 
     executor = ThreadPoolExecutor(max_workers=1)
     executor.submit(task)

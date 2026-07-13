@@ -77,6 +77,10 @@ CODEC_PRIVATE_ID = _hex_to_bytes("0x63A2")
 TRACK_TIMESTAMP_SCALE_ID = _hex_to_bytes("0x23314F")
 NAME_ID = _hex_to_bytes("0x536E")
 FLAG_FORCED_ID = _hex_to_bytes("0x55AA")
+FLAG_HEARING_IMPAIRED_ID = _hex_to_bytes("0x55AB")
+FLAG_VISUAL_IMPAIRED_ID = _hex_to_bytes("0x55AC")
+FLAG_ORIGINAL_ID = _hex_to_bytes("0x55AE")
+FLAG_COMMENTARY_ID = _hex_to_bytes("0x55AF")
 
 # Video
 VIDEO_ID = _hex_to_bytes("0xE0")
@@ -206,6 +210,7 @@ __all__ = [
     "FLAG_DEFAULT_ID",
     "FLAG_ENABLED_ID",
     "FLAG_FORCED_ID",
+    "FLAG_HEARING_IMPAIRED_ID", "FLAG_VISUAL_IMPAIRED_ID", "FLAG_ORIGINAL_ID", "FLAG_COMMENTARY_ID",
     "FLAG_LACING_ID",
     "FILE_DATA_ID", "FILE_DESCRIPTION_ID", "FILE_MEDIA_TYPE_ID", "FILE_NAME_ID", "FILE_UID_ID",
     "INFO_ID",
