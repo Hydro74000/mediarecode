@@ -48,7 +48,6 @@ def _metadata_job_from_args(args: argparse.Namespace) -> dict:
         tmdb_apikey=str(getattr(args, "tmdb_apikey", "") or ""),
         no_cover=bool(getattr(args, "no_cover", False)),
         no_attach=bool(getattr(args, "no_attach", False)),
-        mux_backend=getattr(args, "mux_backend", None),
     )
     return job
 
@@ -245,6 +244,7 @@ def cmd_batch(args: argparse.Namespace, config: AppConfig, logger: Logger) -> in
         output_all=bool(getattr(args, "output_all", False)),
         no_cover=bool(getattr(args, "no_cover", False)),
         no_attach=bool(getattr(args, "no_attach", False)),
+        mux_backend=getattr(args, "mux_backend", None),
         config=config,
         options=common_options(args),
         logger=logger,

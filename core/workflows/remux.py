@@ -217,6 +217,10 @@ class RemuxWorkflow(QObject):
 
     def run(self, config: RemuxConfig) -> TaskSignals:
         decision = select_mux_backend(config)
+        self.log_message.emit(
+            "INFO",
+            f"MUX_BACKEND requested={decision.requested} selected={decision.selected} plan_version=1",
+        )
         if decision.requested == "native" and decision.native_reasons:
             raise RemuxError("\n".join(
                 f"Backend natif indisponible : {reason}." for reason in decision.native_reasons
@@ -232,6 +236,7 @@ class RemuxWorkflow(QObject):
                 log=self.log_message.emit,
                 log_step=self._log_step,
                 ffmpeg_bin=self._ffmpeg,
+                finalize=self._write_nfo,
             )
         return RemuxRuntimeRunner(
             RemuxRuntimeRunnerCallbacks(

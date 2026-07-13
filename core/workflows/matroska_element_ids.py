@@ -56,6 +56,7 @@ DURATION_ID = _hex_to_bytes("0x4489")
 MUXING_APP_ID = _hex_to_bytes("0x4D80")
 WRITING_APP_ID = _hex_to_bytes("0x5741")
 TITLE_ID = _hex_to_bytes("0x7BA9")
+SEGMENT_UID_ID = _hex_to_bytes("0x73A4")
 
 # ----------------------------------------------------------------------------
 # Tracks
@@ -226,6 +227,7 @@ __all__ = [
     "SEEK_ID_FIELD_ID",
     "SEEK_POSITION_ID",
     "SEGMENT_ID",
+    "SEGMENT_UID_ID",
     "SIMPLE_BLOCK_FLAG_DISCARDABLE",
     "SIMPLE_BLOCK_FLAG_INVISIBLE",
     "SIMPLE_BLOCK_FLAG_KEYFRAME",

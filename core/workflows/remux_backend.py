@@ -167,6 +167,7 @@ def run_native_remux(
     log: Callable[[str, str], None],
     log_step: Callable[[int, str], None],
     ffmpeg_bin: str,
+    finalize: Callable[[Path], None] = lambda _path: None,
 ) -> TaskSignals:
     signals = TaskSignals()
 
@@ -211,6 +212,7 @@ def run_native_remux(
             MatroskaWriter().write(plan)
             log_step(5, "Validation structure native terminée")
             MatroskaReader(config.output).segment()
+            finalize(config.output)
             signals.finished.emit(str(config.output))
         except Exception as exc:
             config.output.with_suffix(config.output.suffix + ".partial").unlink(missing_ok=True)

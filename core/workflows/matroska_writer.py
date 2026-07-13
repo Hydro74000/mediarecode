@@ -6,8 +6,8 @@ from io import BytesIO
 from pathlib import Path
 
 from core.workflows.ebml_writer import (
-    element, encode_unknown_size_marker, encode_vint_size_minimal,
-    sint_element, string_element, uint_element,
+    binary_element, element, encode_unknown_size_marker, encode_vint_size_minimal,
+    float_element, sint_element, string_element, uint_element,
 )
 from core.workflows.matroska_element_ids import (
     ATTACHMENTS_ID, ATTACHED_FILE_ID,
@@ -15,17 +15,18 @@ from core.workflows.matroska_element_ids import (
     CLUSTER_ID, CODEC_STATE_ID, CUES_ID, DISCARD_PADDING_ID,
     FLAG_COMMENTARY_ID, FLAG_DEFAULT_ID, FLAG_ENABLED_ID, FLAG_FORCED_ID,
     FLAG_HEARING_IMPAIRED_ID, FLAG_ORIGINAL_ID, FLAG_VISUAL_IMPAIRED_ID,
-    INFO_ID, LANGUAGE_BCP47_ID,
+    DURATION_ID, INFO_ID, LANGUAGE_BCP47_ID, MUXING_APP_ID,
     LANGUAGE_ID, NAME_ID, REFERENCE_BLOCK_ID, SEGMENT_ID, SIMPLE_BLOCK_ID,
     CHAPTERS_ID, CHAPTER_ATOM_ID, CHAPTER_DISPLAY_ID, CHAPTER_TIME_START_ID,
     CHAPTER_UID_ID, CHAP_LANGUAGE_ID, CHAP_STRING_ID, EDITION_ENTRY_ID,
     FILE_DATA_ID, FILE_DESCRIPTION_ID, FILE_MEDIA_TYPE_ID, FILE_NAME_ID, FILE_UID_ID,
     SIMPLE_TAG_ID, TAGS_ID, TAG_ID, TAG_NAME_ID, TAG_STRING_ID, TARGETS_ID,
-    TIMESTAMP_ID, TRACK_ENTRY_ID, TRACK_NUMBER_ID, TRACK_UID_ID, TRACKS_ID,
+    SEGMENT_UID_ID, TIMESTAMP_ID, TIMESTAMP_SCALE_ID, TRACK_ENTRY_ID,
+    TRACK_NUMBER_ID, TRACK_UID_ID, TRACKS_ID, WRITING_APP_ID,
 )
 from core.workflows.matroska_mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack
 from core.workflows.matroska_native_muxer import (
-    _ClusterRecord, _build_cues, _build_ebml_header, _build_info, _build_seek_head,
+    _ClusterRecord, _build_cues, _build_ebml_header, _build_seek_head,
 )
 from core.workflows.matroska_reader import read_element
 from core.workflows.matroska_reader import MatroskaAttachment
@@ -125,6 +126,16 @@ def build_tags_element(tags: dict[str, str]) -> bytes:
     return element(TAGS_ID, element(TAG_ID, element(TARGETS_ID, b"") + b"".join(simple))) if simple else b""
 
 
+def _plan_info(plan: MatroskaMuxPlan, duration_ms: int) -> bytes:
+    return element(INFO_ID, b"".join((
+        uint_element(TIMESTAMP_SCALE_ID, plan.timestamp_scale_ns),
+        float_element(DURATION_ID, float(duration_ms)),
+        binary_element(SEGMENT_UID_ID, plan.segment_uid.to_bytes(16, "big")),
+        string_element(MUXING_APP_ID, plan.muxing_app),
+        string_element(WRITING_APP_ID, plan.writing_app),
+    )))
+
+
 class MatroskaWriter:
     def write(self, plan: MatroskaMuxPlan) -> Path:
         destination = Path(plan.output)
@@ -132,7 +143,7 @@ class MatroskaWriter:
         partial.unlink(missing_ok=True)
         packets = sorted(plan.packets, key=lambda item: (item.block.timestamp_ms, item.output_track_number, item.block.lace_index))
         duration = plan.duration_ms or max((item.block.timestamp_ms + (item.block.duration_ms or 0) for item in packets), default=0)
-        info = _build_info(duration_ms=float(duration), muxing_app=plan.muxing_app, writing_app=plan.writing_app)
+        info = _plan_info(plan, duration)
         tracks = element(TRACKS_ID, b"".join(_track_entry(track) for track in plan.tracks))
         with partial.open("wb") as fh:
             fh.write(_build_ebml_header())

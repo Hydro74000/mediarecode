@@ -2,6 +2,7 @@ from pathlib import Path
 
 from core.workflows.ebml_writer import ascii_element, uint_element
 from core.workflows.matroska_element_ids import CODEC_ID_ID, TRACK_NUMBER_ID, TRACK_TYPE_ID, TRACK_UID_ID
+from core.workflows.matroska_element_ids import CUES_ID, INFO_ID, SEEK_HEAD_ID, TRACKS_ID
 from core.workflows.matroska_mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack, deterministic_uid
 from core.workflows.matroska_reader import MatroskaBlock, MatroskaReader, MatroskaTrack
 from core.workflows.matroska_writer import MatroskaWriter
@@ -29,6 +30,9 @@ def test_writer_roundtrips_multiple_tracks_and_packets(tmp_path: Path) -> None:
     assert [(track.number, track.codec_id, track.language, track.name) for track in reader.tracks()] == [(1, "V_MPEG4/ISO/AVC", "und", "Video"), (2, "A_AAC", "fra", "Audio")]
     assert [(block.track_number, block.timestamp_ms, block.payload) for block in reader.blocks()] == [(1, 0, b"video"), (2, 5, b"audio")]
     assert not output.with_suffix(".mkv.partial").exists()
+    top_level_ids = [item.element_id for item in reader.top_level()]
+    assert top_level_ids[0] == SEEK_HEAD_ID
+    assert INFO_ID in top_level_ids and TRACKS_ID in top_level_ids and CUES_ID in top_level_ids
 
 
 def test_deterministic_uid_is_stable_and_nonzero() -> None:
