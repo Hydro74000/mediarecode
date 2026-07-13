@@ -829,7 +829,11 @@ def select_mux_backend(requested="auto"):
         if not available[requested]:
             raise ValueError(f"Backend demandé introuvable : {requested}")
         return requested
-    return "muxiveo" if available["muxiveo"] else "ffmpeg"
+    if available["muxiveo"]:
+        return "muxiveo"
+    if available["mkvmerge"]:
+        return "mkvmerge"
+    return "ffmpeg"
 
 
 def concat_videos(main_path, output_path, intro_path=None, outro_path=None, workdir=None, mode="crop", mux_backend="auto"):
