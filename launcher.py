@@ -139,6 +139,19 @@ def _needs_windows_post_install_setup() -> bool:
     return recorded != APP_VERSION
 
 
+def _windows_required_tools_missing() -> bool:
+    """Return whether a frozen Windows build needs dependency repair."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return False
+    try:
+        import setup as setup_mod  # noqa: PLC0415
+        report = setup_mod.check_windows_required_tools(setup_mod._default_prefix())
+        return not report.healthy
+    except Exception:
+        # A failed check must never validate the installation state.
+        return True
+
+
 def _windows_is_admin() -> bool:
     """Retourne True si le processus courant tourne en mode élevé (admin)."""
     if sys.platform != "win32":
@@ -231,6 +244,23 @@ def _windows_show_setup_error_popup(details: str) -> None:
     mb_topmost = 0x00040000
     try:
         ctypes.windll.user32.MessageBoxW(None, text, title, mb_ok | mb_icon_error | mb_topmost)
+    except Exception:
+        pass
+
+
+def _windows_show_missing_tools_popup(missing: tuple[str, ...]) -> None:
+    """Warn without blocking startup when a dependency repair did not succeed."""
+    if sys.platform != "win32" or not missing:
+        return
+    text = (
+        "Muxiveo démarre, mais certaines fonctions restent indisponibles.\n\n"
+        "Outils manquants : " + ", ".join(missing) + "\n\n"
+        "Une nouvelle tentative d'installation sera effectuée au prochain lancement."
+    )
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            None, text, "Muxiveo - Dépendances manquantes", 0x00000030 | 0x00040000
+        )
     except Exception:
         pass
 
@@ -339,6 +369,8 @@ def _run_first_time_setup(install_dir: Path) -> int:
     dry_run = False
     force = False
     cfa_result: dict[str, object] = {"status": "not_run"}
+    windows_report = None
+    requires_windows_repair = False
 
     try:
         install_dir.mkdir(parents=True, exist_ok=True)
@@ -346,14 +378,22 @@ def _run_first_time_setup(install_dir: Path) -> int:
         pass
 
     if _os == "Windows" and not allinc:
-        if _windows_ensure_admin():
+        windows_report = _setup.check_windows_required_tools(prefix)
+        requires_windows_repair = not windows_report.healthy
+        # A healthy install may only need its config marker refreshed: do not
+        # create an unnecessary UAC prompt in that case.
+        if requires_windows_repair and _windows_ensure_admin():
             print(
                 "\n  Ã‰lévation des privilÃ¨ges demandée."
                 "\n  Muxiveo va redémarrer avec les droits administrateur...\n"
             )
             return SETUP_RC_HANDOFF
 
-    setup_console_token = _windows_open_setup_console() if _os == "Windows" else None
+    setup_console_token = (
+        _windows_open_setup_console()
+        if _os == "Windows" and (allinc or requires_windows_repair)
+        else None
+    )
 
     try:
         if allinc:
@@ -385,13 +425,13 @@ def _run_first_time_setup(install_dir: Path) -> int:
                 _setup.check_tools_presence()
 
             elif _os == "Windows":
-                _setup.install_winget(dry_run, force=force)
-                _setup.install_github_tools(prefix, dry_run, force=force)
-                _setup.autofill_windows_config_ini(prefix, dry_run, force=force)
-                _setup.check_tools_presence(prefix)
-                cfa_result = _setup.offer_windows_controlled_folder_access_setup(
-                    prefix, dry_run, force=force
+                windows_report = _setup.ensure_windows_required_tools(
+                    prefix, dry_run=dry_run, force=force
                 )
+                if requires_windows_repair:
+                    cfa_result = _setup.offer_windows_controlled_folder_access_setup(
+                        prefix, dry_run, force=force
+                    )
 
             else:
                 print(f"  Plateforme inconnue '{_os}' â€” setup systÃ¨me ignoré.", file=sys.stderr)
@@ -434,11 +474,18 @@ def _run_first_time_setup(install_dir: Path) -> int:
 
     if _os == "Windows":
         setup_version_marker = _windows_setup_version_marker_path()
-        try:
-            setup_version_marker.parent.mkdir(parents=True, exist_ok=True)
-            setup_version_marker.write_text(APP_VERSION, encoding="utf-8")
-        except OSError:
-            pass
+        if windows_report is not None and windows_report.healthy:
+            try:
+                setup_version_marker.parent.mkdir(parents=True, exist_ok=True)
+                setup_version_marker.write_text(APP_VERSION, encoding="utf-8")
+            except OSError:
+                pass
+        else:
+            # Do not let an old success marker hide an incomplete repair.
+            try:
+                setup_version_marker.unlink()
+            except OSError:
+                pass
 
     if _os == "Windows" and str(cfa_result.get("status") or "") == "updated":
         print(
@@ -448,6 +495,10 @@ def _run_first_time_setup(install_dir: Path) -> int:
         _windows_show_restart_required_popup()
         _windows_close_setup_console(setup_console_token)
         return SETUP_RC_HANDOFF
+
+    if _os == "Windows" and windows_report is not None and not windows_report.healthy:
+        print("\n  Dépendances toujours manquantes : " + ", ".join(windows_report.missing))
+        _windows_show_missing_tools_popup(windows_report.missing)
 
     print("\n  Setup terminé. Démarrage de l'application...\n")
     _windows_close_setup_console(setup_console_token)
@@ -512,7 +563,11 @@ def main() -> int:
 
     config_path = _get_config_path()
 
-    if not config_path.exists() or _needs_windows_post_install_setup():
+    if (
+        not config_path.exists()
+        or _needs_windows_post_install_setup()
+        or _windows_required_tools_missing()
+    ):
         rc = _run_first_time_setup(config_path.parent)
         if rc == SETUP_RC_HANDOFF:
             return SETUP_RC_OK

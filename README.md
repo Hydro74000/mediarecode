@@ -112,6 +112,12 @@ Options utiles du script :
 
 `eac3to` est optionnel et non installable automatiquement. Il reste utile sous Windows pour certains traitements audio avancés.
 
+Dans le binaire Windows, chaque lancement vérifie `ffmpeg`, `ffprobe`, `mediainfo`,
+`dovi_tool` et `hdr10plus_tool`. Si l'un est absent, Muxiveo tente de le réparer
+automatiquement avant de démarrer, puis réessaie au lancement suivant en cas d'échec.
+`NVEncC` suit le même mécanisme uniquement lorsqu'un GPU NVIDIA est détecté ; `eac3to`
+reste hors de cette vérification.
+
 ### Lancer l'application
 
 ```bash

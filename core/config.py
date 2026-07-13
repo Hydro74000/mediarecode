@@ -294,10 +294,7 @@ def rerun_application_setup() -> None:
         setup_mod.install_github_tools(prefix, dry_run, force=force)
         setup_mod.check_tools_presence()
     elif os_name == "Windows":
-        setup_mod.install_winget(dry_run, force=force)
-        setup_mod.install_github_tools(prefix, dry_run, force=force)
-        setup_mod.autofill_windows_config_ini(prefix, dry_run, force=force)
-        setup_mod.check_tools_presence(prefix)
+        setup_mod.ensure_windows_required_tools(prefix, dry_run=dry_run, force=force)
         setup_mod.offer_windows_controlled_folder_access_setup(prefix, dry_run, force=force)
 
     setup_mod.initialize_config_ini_language(dry_run, force=force, ini_path=_INI_PATH)

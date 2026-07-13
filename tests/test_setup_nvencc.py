@@ -100,6 +100,58 @@ class TestCheckNvencAvailable:
                 assert setup_mod._check_nvenc_available() is False
 
 
+class TestWindowsRequiredTools:
+    def test_excludes_eac3to_and_includes_nvencc_only_with_nvidia(self, setup_mod):
+        with patch.object(setup_mod, "_check_nvenc_available", return_value=False):
+            assert setup_mod.windows_required_tool_names() == setup_mod.WINDOWS_REQUIRED_TOOLS
+        with patch.object(setup_mod, "_check_nvenc_available", return_value=True):
+            assert setup_mod.windows_required_tool_names() == (
+                *setup_mod.WINDOWS_REQUIRED_TOOLS, "nvencc"
+            )
+
+    def test_report_returns_only_required_missing_tools(self, setup_mod, tmp_path):
+        paths = {"ffmpeg": r"C:\\ffmpeg.exe", "eac3to": r"C:\\eac3to.exe"}
+        with patch.object(setup_mod, "_check_nvenc_available", return_value=False), \
+             patch.object(setup_mod, "_detect_tool_path", side_effect=lambda name, _prefix: paths.get(name)):
+            report = setup_mod.check_windows_required_tools(tmp_path)
+
+        assert report.found == {"ffmpeg": r"C:\\ffmpeg.exe"}
+        assert report.missing == ("ffprobe", "mediainfo", "dovi_tool", "hdr10plus_tool")
+        assert "eac3to" not in report.required
+
+    def test_report_honors_explicit_windows_tool_path(self, setup_mod, tmp_path):
+        ffmpeg = tmp_path / "ffmpeg.exe"
+        ffmpeg.write_text("placeholder", encoding="utf-8")
+        ini = tmp_path / "config.ini"
+        ini.write_text(f"[tools]\nffmpeg = {ffmpeg}\n", encoding="utf-8")
+        with patch.object(setup_mod, "OS", "Windows"), \
+             patch.object(setup_mod, "_check_nvenc_available", return_value=False), \
+             patch.object(setup_mod, "_config_ini_path", return_value=ini), \
+             patch.object(setup_mod, "_detect_windows_tool_path", return_value=None), \
+             patch.object(setup_mod.shutil, "which", return_value=None):
+            report = setup_mod.check_windows_required_tools(tmp_path)
+
+        assert report.found["ffmpeg"] == str(ffmpeg)
+
+    def test_ensure_installs_only_missing_groups(self, setup_mod, tmp_path):
+        missing = setup_mod.ToolPresenceReport(
+            setup_mod.WINDOWS_REQUIRED_TOOLS, {}, ("ffprobe", "dovi_tool")
+        )
+        healthy = setup_mod.ToolPresenceReport(
+            setup_mod.WINDOWS_REQUIRED_TOOLS, {"ffprobe": "x", "dovi_tool": "y"}, ()
+        )
+        with patch.object(setup_mod, "check_windows_required_tools", side_effect=[missing, healthy]), \
+             patch.object(setup_mod, "install_winget") as install_winget, \
+             patch.object(setup_mod, "install_github_tools") as install_github, \
+             patch.object(setup_mod, "autofill_windows_config_ini") as autofill:
+            report = setup_mod.ensure_windows_required_tools(tmp_path)
+
+        assert report.healthy
+        install_winget.assert_called_once_with(False, force=False, tool_names={"ffprobe"})
+        install_github.assert_called_once_with(tmp_path, False, force=False, tool_names={"dovi_tool"})
+        autofill.assert_called_once_with(tmp_path, False, force=False)
+
+
 # ---------------------------------------------------------------------------
 # _is_atomic_distro — skip natif install sur Silverblue/Kinoite
 # ---------------------------------------------------------------------------

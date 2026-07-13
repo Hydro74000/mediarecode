@@ -32,10 +32,7 @@ def test_rerun_application_setup_windows_calls_setup_sequence(tmp_path):
 
     fake_setup = SimpleNamespace(
         _default_prefix=lambda: tmp_path / "tools",
-        install_winget=MagicMock(),
-        install_github_tools=MagicMock(),
-        autofill_windows_config_ini=MagicMock(),
-        check_tools_presence=MagicMock(),
+        ensure_windows_required_tools=MagicMock(),
         offer_windows_controlled_folder_access_setup=MagicMock(),
         initialize_config_ini_language=MagicMock(),
         install_python_packages=MagicMock(),
@@ -48,10 +45,9 @@ def test_rerun_application_setup_windows_calls_setup_sequence(tmp_path):
          patch.dict(sys.modules, {"setup": fake_setup}):
         cfg_mod.rerun_application_setup()
 
-    fake_setup.install_winget.assert_called_once_with(False, force=False)
-    fake_setup.install_github_tools.assert_called_once_with(tmp_path / "tools", False, force=False)
-    fake_setup.autofill_windows_config_ini.assert_called_once_with(tmp_path / "tools", False, force=False)
-    fake_setup.check_tools_presence.assert_called_once_with(tmp_path / "tools")
+    fake_setup.ensure_windows_required_tools.assert_called_once_with(
+        tmp_path / "tools", dry_run=False, force=False
+    )
     fake_setup.offer_windows_controlled_folder_access_setup.assert_called_once_with(
         tmp_path / "tools", False, force=False
     )

@@ -33,10 +33,12 @@ class TestLauncherWindowsControlledFolderAccess:
     def test_first_time_setup_shows_popup_after_cfa_update(self, tmp_path):
         fake_setup = SimpleNamespace(
             _default_prefix=lambda: tmp_path / "tools",
-            install_winget=MagicMock(),
-            install_github_tools=MagicMock(),
-            autofill_windows_config_ini=MagicMock(),
-            check_tools_presence=MagicMock(),
+            check_windows_required_tools=MagicMock(
+                return_value=SimpleNamespace(healthy=False, missing=("ffmpeg",))
+            ),
+            ensure_windows_required_tools=MagicMock(
+                return_value=SimpleNamespace(healthy=True, missing=())
+            ),
             offer_windows_controlled_folder_access_setup=MagicMock(
                 return_value={"status": "updated", "added": [], "skipped": [], "message": ""}
             ),
@@ -118,6 +120,71 @@ class TestLauncherWindowsControlledFolderAccess:
         assert rc == 42
         mock_setup.assert_called_once_with(config_path.parent)
         fake_main.main.assert_called_once_with()
+
+    def test_main_skips_setup_when_windows_dependencies_are_healthy(self, tmp_path):
+        config_path = tmp_path / "config.ini"
+        config_path.write_text("", encoding="utf-8")
+        fake_main = SimpleNamespace(main=MagicMock(return_value=42))
+
+        with patch.object(launcher, "_get_config_path", return_value=config_path), \
+             patch.object(launcher, "_needs_windows_post_install_setup", return_value=False), \
+             patch.object(launcher, "_windows_required_tools_missing", return_value=False), \
+             patch.object(launcher, "_run_first_time_setup") as mock_setup, \
+             patch.dict(sys.modules, {"main": fake_main}):
+            assert launcher.main() == 42
+
+        mock_setup.assert_not_called()
+        fake_main.main.assert_called_once_with()
+
+    def test_incomplete_windows_repair_keeps_marker_invalid(self, tmp_path):
+        marker = tmp_path / "setup.version"
+        marker.write_text(launcher.APP_VERSION, encoding="utf-8")
+        missing = SimpleNamespace(healthy=False, missing=("mediainfo",))
+        fake_setup = SimpleNamespace(
+            _default_prefix=lambda: tmp_path / "tools",
+            check_windows_required_tools=MagicMock(return_value=missing),
+            ensure_windows_required_tools=MagicMock(return_value=missing),
+            offer_windows_controlled_folder_access_setup=MagicMock(return_value={"status": "not_run"}),
+            initialize_config_ini_language=MagicMock(),
+            install_python_packages=MagicMock(),
+        )
+
+        with patch("platform.system", return_value="Windows"), \
+             patch.object(launcher, "_is_allinc", return_value=False), \
+             patch.object(launcher, "_windows_ensure_admin", return_value=False), \
+             patch.object(launcher, "_windows_setup_version_marker_path", return_value=marker), \
+             patch.object(launcher, "_windows_open_setup_console", return_value=None), \
+             patch.object(launcher, "_windows_show_missing_tools_popup") as popup, \
+             patch.dict(sys.modules, {"setup": fake_setup}):
+            assert launcher._run_first_time_setup(tmp_path) == launcher.SETUP_RC_OK
+
+        assert not marker.exists()
+        fake_setup.ensure_windows_required_tools.assert_called_once_with(
+            tmp_path / "tools", dry_run=False, force=False
+        )
+        popup.assert_called_once_with(("mediainfo",))
+
+    def test_healthy_windows_setup_does_not_request_elevation(self, tmp_path):
+        healthy = SimpleNamespace(healthy=True, missing=())
+        fake_setup = SimpleNamespace(
+            _default_prefix=lambda: tmp_path / "tools",
+            check_windows_required_tools=MagicMock(return_value=healthy),
+            ensure_windows_required_tools=MagicMock(return_value=healthy),
+            offer_windows_controlled_folder_access_setup=MagicMock(),
+            initialize_config_ini_language=MagicMock(),
+            install_python_packages=MagicMock(),
+        )
+
+        with patch("platform.system", return_value="Windows"), \
+             patch.object(launcher, "_is_allinc", return_value=False), \
+             patch.object(launcher, "_windows_ensure_admin") as ensure_admin, \
+             patch.object(launcher, "_windows_open_setup_console") as open_console, \
+             patch.dict(sys.modules, {"setup": fake_setup}):
+            assert launcher._run_first_time_setup(tmp_path) == launcher.SETUP_RC_OK
+
+        ensure_admin.assert_not_called()
+        open_console.assert_not_called()
+        fake_setup.offer_windows_controlled_folder_access_setup.assert_not_called()
 
     def test_main_requires_explicit_cli_flag(self, tmp_path):
         fake_cli = SimpleNamespace(main=MagicMock(return_value=17))

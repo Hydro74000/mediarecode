@@ -41,6 +41,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -145,6 +146,7 @@ WINDOWS_TOOL_FILENAMES: dict[str, tuple[str, ...]] = {
     "dovi_tool": ("dovi_tool.exe",),
     "hdr10plus_tool": ("hdr10plus_tool.exe",),
     "eac3to": ("eac3to.exe",),
+    "nvencc": ("NVEncC64.exe", "NVEncC.exe"),
 }
 
 WINDOWS_WINGET_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -166,6 +168,30 @@ WINDOWS_CONFIG_TOOL_ORDER: tuple[str, ...] = (
 WINDOWS_CFA_WRITER_TOOLS: tuple[str, ...] = (
     "ffmpeg",
 )
+
+# Dépendances nécessaires aux fonctions principales de Muxiveo sous Windows.
+# eac3to reste volontairement facultatif. NVEncC n'est requis que lorsqu'un
+# matériel NVIDIA compatible est disponible.
+WINDOWS_REQUIRED_TOOLS: tuple[str, ...] = (
+    "ffmpeg",
+    "ffprobe",
+    "mediainfo",
+    "dovi_tool",
+    "hdr10plus_tool",
+)
+
+
+@dataclass(frozen=True)
+class ToolPresenceReport:
+    """Résultat structuré d'une vérification d'outils externes."""
+
+    required: tuple[str, ...]
+    found: dict[str, str]
+    missing: tuple[str, ...]
+
+    @property
+    def healthy(self) -> bool:
+        return not self.missing
 
 def detect_linux_distro() -> str:
     """Return 'debian', 'fedora', or 'unknown'."""
@@ -1340,7 +1366,11 @@ def install_brew(dry_run: bool, force: bool = False) -> None:
 # Step 2d — System packages: winget (Windows)
 # ---------------------------------------------------------------------------
 
-def install_winget(dry_run: bool, force: bool = False) -> None:
+def install_winget(
+    dry_run: bool,
+    force: bool = False,
+    tool_names: set[str] | None = None,
+) -> None:
     title("Step 2 — System packages (winget / Windows)")
 
     winget = shutil.which("winget")
@@ -1355,6 +1385,8 @@ def install_winget(dry_run: bool, force: bool = False) -> None:
     already_seen: set[str] = set()
     to_install: list[str] = []
     for exe, meta in SYSTEM_TOOLS.items():
+        if tool_names is not None and exe not in tool_names:
+            continue
         winget_id = meta.get("winget", "")
         if not winget_id or winget_id in already_seen:
             continue
@@ -2149,7 +2181,75 @@ def _check_nvenc_available() -> bool:
         return Path("/dev/nvidia0").exists()
     return False
 
-def install_github_tools(prefix: Path, dry_run: bool, force: bool = False) -> None:
+
+def windows_required_tool_names() -> tuple[str, ...]:
+    """Return the Windows tools required for the features available here."""
+    required = list(WINDOWS_REQUIRED_TOOLS)
+    if _check_nvenc_available():
+        required.append("nvencc")
+    return tuple(required)
+
+
+def _detect_tool_path(tool_name: str, prefix: Path | None = None) -> str | None:
+    """Find a tool using the same resolution rules as the runtime."""
+    if OS == "Windows":
+        configured = _existing_ini_tool_values(_config_ini_path()).get(tool_name.lower(), "")
+        if configured and Path(configured).is_file():
+            return configured
+    path = shutil.which(tool_name)
+    if path:
+        return path
+    if OS == "Windows" and prefix is not None and tool_name in WINDOWS_TOOL_FILENAMES:
+        return _detect_windows_tool_path(tool_name, prefix)
+    if OS != "Windows":
+        return _detect_non_windows_tool_path(tool_name, prefix)
+    return None
+
+
+def check_windows_required_tools(prefix: Path) -> ToolPresenceReport:
+    """Report the health of Muxiveo's required Windows dependencies.
+
+    This deliberately excludes optional eac3to and all setup-only helpers.
+    """
+    required = windows_required_tool_names()
+    found: dict[str, str] = {}
+    missing: list[str] = []
+    for tool_name in required:
+        path = _detect_tool_path(tool_name, prefix)
+        if path:
+            found[tool_name] = path
+        else:
+            missing.append(tool_name)
+    return ToolPresenceReport(required, found, tuple(missing))
+
+
+def ensure_windows_required_tools(
+    prefix: Path,
+    dry_run: bool = False,
+    force: bool = False,
+    install_github: bool = True,
+) -> ToolPresenceReport:
+    """Install only missing required Windows dependencies and re-check them."""
+    report = check_windows_required_tools(prefix)
+    if report.healthy and not force:
+        return report
+
+    candidates = set(report.required if force else report.missing)
+    system_missing = candidates.intersection(SYSTEM_TOOLS)
+    github_missing = candidates.intersection(GITHUB_TOOLS) if install_github else set()
+    if system_missing:
+        install_winget(dry_run, force=force, tool_names=system_missing)
+    if github_missing:
+        install_github_tools(prefix, dry_run, force=force, tool_names=github_missing)
+    autofill_windows_config_ini(prefix, dry_run, force=force)
+    return check_windows_required_tools(prefix)
+
+def install_github_tools(
+    prefix: Path,
+    dry_run: bool,
+    force: bool = False,
+    tool_names: set[str] | None = None,
+) -> None:
     title("Step 3 — GitHub binary tools (dovi_tool, hdr10plus_tool)")
 
     arch = _arch_key()
@@ -2170,6 +2270,8 @@ def install_github_tools(prefix: Path, dry_run: bool, force: bool = False) -> No
     detected_tool_paths: dict[str, str] = {}
 
     for exe, meta in GITHUB_TOOLS.items():
+        if tool_names is not None and exe not in tool_names:
+            continue
         # Skip silencieux si la plateforme n'est pas dans la liste blanche du tool.
         platforms = meta.get("platforms")
         if platforms and OS not in platforms:
@@ -2482,25 +2584,11 @@ def main() -> None:
 
     elif OS == "Windows":
         try:
-            install_winget(dry_run, force=force)
+            ensure_windows_required_tools(
+                prefix, dry_run=dry_run, force=force, install_github=not args.no_github
+            )
         except Exception as e:
-            error(f"winget install failed: {e}")
-
-        if not args.no_github:
-            try:
-                install_github_tools(prefix, dry_run, force=force)
-            except Exception as e:
-                error(f"GitHub tool installation failed: {e}")
-                warn("Install dovi_tool and hdr10plus_tool manually:")
-                warn("  → https://github.com/quietvoid/dovi_tool/releases")
-                warn("  → https://github.com/quietvoid/hdr10plus_tool/releases")
-        else:
-            info("Skipping GitHub tools (--no-github)")
-
-        try:
-            autofill_windows_config_ini(prefix, dry_run, force=force)
-        except Exception as e:
-            error(f"config.ini auto-fill failed: {e}")
+            error(f"Windows dependency installation failed: {e}")
 
         title("Final tool verification")
         check_tools_presence(prefix)
