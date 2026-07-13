@@ -30,3 +30,13 @@ def test_reader_extracts_track_entry_fields(tmp_path: Path) -> None:
     result = MatroskaReader(path).tracks()
     assert len(result) == 1
     assert (result[0].number, result[0].uid, result[0].codec_id, result[0].language, result[0].name) == (1, 2, "V_MPEGH/ISO/HEVC", "fra", "Vidéo")
+
+
+def test_reader_extracts_simple_block_timestamp(tmp_path: Path) -> None:
+    cluster, timestamp, block = bytes.fromhex("1f43b675"), bytes.fromhex("e7"), bytes.fromhex("a3")
+    payload = element(timestamp, b"\x64") + element(block, b"\x81\x00\x05\x80payload")
+    path = tmp_path / "blocks.mkv"
+    path.write_bytes(element(EBML_HEADER_ID, b"") + SEGMENT_ID + b"\xff" + element(cluster, payload))
+    blocks = list(MatroskaReader(path).simple_blocks())
+    assert len(blocks) == 1
+    assert (blocks[0].track_number, blocks[0].timestamp_ms, blocks[0].payload) == (1, 105, b"payload")

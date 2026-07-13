@@ -89,6 +89,9 @@ class MatroskaReader:
     LANGUAGE = bytes.fromhex("22b59c")
     LANGUAGE_BCP47 = bytes.fromhex("22b59d")
     NAME = bytes.fromhex("536e")
+    CLUSTER_ID = bytes.fromhex("1f43b675")
+    TIMESTAMP_ID = bytes.fromhex("e7")
+    SIMPLE_BLOCK_ID = bytes.fromhex("a3")
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -152,6 +155,33 @@ class MatroskaReader:
                 ))
         return out
 
+    def simple_blocks(self) -> Iterator["MatroskaBlock"]:
+        """Yield non-laced SimpleBlocks with absolute millisecond timestamps.
+
+        Laced and BlockGroup packets are deliberately rejected here instead of
+        being silently corrupted; the planner can select the FFmpeg fallback.
+        """
+        size = self.path.stat().st_size
+        with self.path.open("rb") as fh:
+            for cluster in self.top_level():
+                if cluster.element_id != self.CLUSTER_ID:
+                    continue
+                timestamp = 0
+                fh.seek(cluster.payload_offset)
+                for child in iter_children(fh, cluster, file_size=size):
+                    if child.element_id == self.TIMESTAMP_ID and child.size is not None:
+                        timestamp = int.from_bytes(self.payload(child), "big")
+                    elif child.element_id == self.SIMPLE_BLOCK_ID and child.size is not None:
+                        raw = self.payload(child)
+                        length = _vint_length(raw[0])
+                        track_no = raw[0] & (0xFF >> length)
+                        for byte in raw[1:length]: track_no = (track_no << 8) | byte
+                        if len(raw) < length + 3: raise ValueError("SimpleBlock tronqué")
+                        relative = int.from_bytes(raw[length:length + 2], "big", signed=True)
+                        flags = raw[length + 2]
+                        if flags & 0x06: raise ValueError("Lacing SimpleBlock non encore supporté")
+                        yield MatroskaBlock(track_number=track_no, timestamp_ms=timestamp + relative, flags=flags, payload=raw[length + 3:])
+
 
 @dataclass(frozen=True)
 class MatroskaTrack:
@@ -165,5 +195,12 @@ class MatroskaTrack:
     name: str
     raw_entry: bytes
 
+@dataclass(frozen=True)
+class MatroskaBlock:
+    track_number: int
+    timestamp_ms: int
+    flags: int
+    payload: bytes
 
-__all__ = ["EbmlElement", "MatroskaReader", "MatroskaTrack", "iter_children", "read_element"]
+
+__all__ = ["EbmlElement", "MatroskaBlock", "MatroskaReader", "MatroskaTrack", "iter_children", "read_element"]
