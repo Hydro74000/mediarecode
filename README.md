@@ -29,7 +29,7 @@ Cette documentation correspond à **Muxiveo v3.1.0**.
   - [Outils configurables](#outils-configurables)
 - [Workflows](#workflows)
   - [Conteneur & Encodage — Routage global](#conteneur--encodage--routage-global)
-  - [Backend remux `ffmpeg` — Branches internes](#backend-remux-ffmpeg--branches-internes)
+  - [Backends remux Matroska — Branches internes](#backends-remux-matroska--branches-internes)
   - [Encode workflow — Branches internes](#encode-workflow--branches-internes)
   - [Fusion DoVi / HDR10+](#fusion-dovi--hdr10-1)
   - [Inspection d'un fichier (ffprobe + mediainfo)](#inspection-dun-fichier-ffprobe--mediainfo)
@@ -177,14 +177,16 @@ Le workflow unifié permet de :
 - **offload matériel complet** : décodage GPU activé automatiquement quand un encodeur matériel compatible est sélectionné (`cuda` pour NVENC, `qsv` pour QSV, `vaapi` pour VAAPI, `d3d11va` pour AMF Windows) — le CPU n'est plus sollicité pour le décodage en chemin pur hardware
 - configuration VAAPI optimisée : `rc_mode CQP/VBR` selon le mode qualité, `compression_level` exposé via preset, `async_depth 4` pour maximiser le pipeline GPU
 - precheck `force-8bit` pour les cibles **H.264** afin d'eviter certains chemins incompatibles
-- backend de remux nominal : `ffmpeg`
+- backend de remux nominal : writer Matroska natif, avec sélection `auto`, `native` ou `ffmpeg`
 
 Modes d'exécution :
 
 | Condition | Mode | Outils utilisés |
 |-----------|------|-----------------|
-| vidéo en `copy`, audio en `copy`, aucune transformation HDR | **Remuxage pur** | `ffmpeg` (langues BCP47 via tag `language`, purge `language-ietf`, chapitres, tags globaux, pièces jointes, champ `Muxing Application`) |
-| tout autre cas | **Encodage** | `ffmpeg` en passe de sortie unique (encodage/remux final + chapitres, tags, langue/titre de pistes, `Muxing Application`) |
+| plan compatible natif | **Remuxage Matroska natif** | lecteur/writer EBML interne ; FFmpeg intervient seulement pour canonicaliser ou préparer une source si nécessaire |
+| fonction non transposable en mode `auto` | **Repli compatible** | backend `ffmpeg`, avec motif explicite dans les logs |
+| backend `native` forcé et fonction non transposable | **Échec strict** | aucune sortie finale et suppression du fichier `.partial` |
+| encodage demandé | **Encodage** | FFmpeg ou l'encodeur choisi prépare les pistes ; le plan de conteneur reste distinct |
 
 Les fichiers **SRT** peuvent être ajoutés comme sources séparées de sous-titres. Ils sont détectés automatiquement et intégrés dans le remux final avec le format correct (`srt`).
 
@@ -200,7 +202,16 @@ Synchronisation audio automatisée en multi-source :
 
 Cette synchronisation audio est un outil utilisateur pour **calculer le bon décalage entre sources**. Elle complète la synchronisation timeline interne du backend `ffmpeg`, qui intervient plus tard pendant l'exécution pour sécuriser le muxage multi-source et les offsets déjà définis.
 
-Backend remux `ffmpeg` (par défaut) :
+Backend remux Matroska natif (par défaut via `auto`) :
+
+- écrit exclusivement des sorties `.mkv` multi-pistes avec ordre, timecodes et payloads conservés ;
+- conserve les propriétés imbriquées des pistes, le lacing, les BlockGroups, HDR10/HDR10+/Dolby Vision, chapitres, tags ciblés et pièces jointes lorsque le plan les sélectionne ;
+- produit des UIDs stables et écrit d'abord `sortie.mkv.partial`, validé par le lecteur interne et `ffprobe`, avant renommage atomique ;
+- ne cherche, n'embarque et n'exécute jamais `mkvmerge` ;
+- canonicalise les conteneurs non Matroska en MKV temporaire par copie de flux avec FFmpeg ;
+- en mode `auto`, replie sur FFmpeg lorsque le diagnostic natif annonce une fonction non transposable ; `native` interdit ce repli.
+
+Backend remux `ffmpeg` (forçable avec `mux_backend: "ffmpeg"`) :
 
 - sortie limitée à `MKV`
 - écrit la langue de piste en BCP47 sur `language` (ex. `fr-FR`) et purge le champ legacy `language-ietf` pour éviter les doublons incohérents
@@ -214,11 +225,17 @@ Backend remux `ffmpeg` (par défaut) :
 - n'écrit plus le tag libre `MUXING_APPLICATION` via `-metadata`
 - applique un patch binaire post-action (sans MKVToolNix) sur le header Matroska pour écrire **MuxingApp** (`0x4D80`) à la valeur unique `Muxiveo {version}` ; **WritingApp** (`0x5741`) reste intact
 
-Limites connues du backend remux `ffmpeg` :
+Limites diagnostiquées :
 
-- pas de support des structures XML avancées de tags Matroska (cibles hiérarchiques fines)
-- pas d'édition du flag Matroska `track-enabled` (non exposé par FFmpeg)
-- la réécriture post-action reconstruit l'EBML du header si la valeur MuxingApp est plus longue que le champ existant ; en cas d'échec, le patch est ignoré avec warning
+- une piste chiffrée, une structure EBML illisible ou un sous-titre nécessitant OCR est refusé en `native` ;
+- une réécriture de synchronisation avancée encore matérialisée par FFmpeg déclenche le repli en `auto` ;
+- le backend FFmpeg historique ne garantit pas les structures avancées de tags ciblés ni `track-enabled` ;
+- l'équivalence annoncée avec MKVToolNix est sémantique, jamais octet à octet.
+
+Le script autonome `scripts/concat_video.py` est l'unique exception : `--mkvmerge`
+force MKVToolNix et, sans option, la sélection est Muxiveo puis `mkvmerge` puis
+FFmpeg. Cette compatibilité standalone n'ajoute aucune dépendance MKVToolNix au
+runtime ou au packaging de Muxiveo. Voir [le contrat détaillé](docs/remux-native.md).
 
 Les options HDR disponibles côté encodage sont :
 
@@ -705,7 +722,7 @@ flowchart TD
     E1 --> Z
 ```
 
-### Backend remux `ffmpeg` — Branches internes
+### Backends remux Matroska — Branches internes
 
 ```mermaid
 flowchart TD
