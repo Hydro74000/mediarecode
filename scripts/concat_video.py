@@ -79,6 +79,20 @@ MEDIAINFO = find_tool("mediainfo", MEDIAINFO_PATH)
 MKVMERGE = find_tool("mkvmerge", MKVMERGE_PATH)
 MUXIVEO = find_tool("muxiveo", MUXIVEO_PATH)
 
+
+def get_muxiveo_tool_paths(muxiveo_path):
+    """Interroge Muxiveo afin de partager exactement sa résolution d'outils."""
+    try:
+        result = subprocess.run(
+            [muxiveo_path, "--cli", "tools"],
+            capture_output=True, text=True, check=True,
+        )
+        tools = json.loads(result.stdout).get("tools", {})
+        return {str(key): str(value) for key, value in tools.items() if value}
+    except Exception as exc:
+        print(f"[Warning] Impossible de lire les outils configurés par Muxiveo : {exc}")
+        return {}
+
 def parse_fraction(val):
     if not val:
         return 0.0
@@ -837,6 +851,14 @@ def select_mux_backend(requested="auto"):
 
 
 def concat_videos(main_path, output_path, intro_path=None, outro_path=None, workdir=None, mode="crop", mux_backend="auto"):
+    global FFMPEG, FFPROBE, MEDIAINFO, DOVI_TOOL, HDR10PLUS_TOOL
+    if str(mux_backend or "auto").lower() != "mkvmerge" and is_tool_available(MUXIVEO):
+        muxiveo_tools = get_muxiveo_tool_paths(MUXIVEO)
+        FFMPEG = muxiveo_tools.get("ffmpeg", FFMPEG)
+        FFPROBE = muxiveo_tools.get("ffprobe", FFPROBE)
+        MEDIAINFO = muxiveo_tools.get("mediainfo", MEDIAINFO)
+        DOVI_TOOL = muxiveo_tools.get("dovi_tool", DOVI_TOOL)
+        HDR10PLUS_TOOL = muxiveo_tools.get("hdr10plus_tool", HDR10PLUS_TOOL)
     # Vérification des outils indispensables de base
     for tool_name, tool_path in [("ffmpeg", FFMPEG), ("ffprobe", FFPROBE), ("mediainfo", MEDIAINFO)]:
         if not is_tool_available(tool_path):

@@ -76,7 +76,10 @@ def test_cli_inspect_validate_preview_on_synthetic_media(tmp_path: Path) -> None
     preview_payload = json.loads(preview_json.stdout)
     assert preview_payload["valid"] is True
     assert preview_payload["command"][0] == "ffmpeg"
-    assert preview_payload["command_text"].startswith("ffmpeg")
+    assert preview_payload["command_text"].startswith("# Backend: native Matroska")
+    assert preview_payload["selected_backend"] == "native"
+    assert preview_payload["plan_version"] == 1
+    assert preview_payload["execution_preview"]["action"] == "internal_matroska_write"
 
 
 def test_cli_remux_dry_run_refuses_invalid_json_before_inspection(tmp_path: Path) -> None:
@@ -183,6 +186,15 @@ def test_cli_profile_preview_on_synthetic_media(tmp_path: Path) -> None:
     assert payload["valid"] is True
     assert payload["profile_report"]["applied_rules"] >= 1
     assert any(track["type"] == "audio" and track["title"] for track in payload["tracks"])
+
+    forced = _run_cli(
+        root, "preview", "--profile", str(profile), "-i", str(src), "-o", str(out),
+        "--mux-backend", "ffmpeg", "--json",
+    )
+    assert forced.returncode == 0, forced.stderr
+    forced_payload = json.loads(forced.stdout)
+    assert forced_payload["selected_backend"] == "ffmpeg"
+    assert forced_payload["mux_backend"] == "ffmpeg"
 
 
 def test_cli_profile_argument_falls_back_to_user_profile_dir_without_json_suffix(tmp_path: Path) -> None:

@@ -77,7 +77,7 @@ def current_config(panel: "RemuxPanel") -> RemuxConfig | None:
         file_title=panel._file_title_edit.text().strip(),
         tag_overrides=merged_tag_overrides,
         tmdb_cover=panel._attachment_panel.get_pending_tmdb_cover(),
-        mux_backend=panel._config.remux_mux_backend,
+        mux_backend=str(panel._mux_backend_combo.currentData() or panel._config.remux_mux_backend),
     )
 
 

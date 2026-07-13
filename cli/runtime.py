@@ -49,6 +49,12 @@ def run_remux_config(
         raise CliError(f"Sortie déjà existante : {remux_config.output} (utiliser --force)", EXIT_EXISTS)
     wf = workflow(config, options, logger)
     wf.log_message.connect(logger.workflow_log)
+    wf.backend_event.connect(
+        lambda report: logger.emit(
+            "info", "Sélection du backend de remuxage.",
+            event="mux_backend", **dict(report),
+        )
+    )
     signals = wf.run(remux_config)
     loop = QEventLoop()
     state_exit = {"value": EXIT_OK}

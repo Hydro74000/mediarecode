@@ -3074,3 +3074,15 @@ class TestRemuxWorkflowPostMetadata:
                     time.sleep(0.01)
 
         assert patch_hook.called
+
+
+def test_remux_panel_backend_selector_is_initialized_but_job_local(qt_app):
+    config = AppConfig()
+    config.remux_mux_backend = "native"
+    panel = RemuxPanel(config)
+
+    assert panel._mux_backend_combo.currentData() == "native"
+    panel._mux_backend_combo.setCurrentIndex(panel._mux_backend_combo.findData("ffmpeg"))
+
+    assert panel._mux_backend_combo.currentData() == "ffmpeg"
+    assert config.remux_mux_backend == "native"

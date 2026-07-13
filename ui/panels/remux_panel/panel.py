@@ -177,6 +177,7 @@ class RemuxPanel(QWidget):
         self._attachment_panel: _AttachmentPanel
         self._chapter_panel: _ChapterPanel
         self._output_edit: QLineEdit
+        self._mux_backend_combo: QComboBox
         self._cmd_preview: QPlainTextEdit
 
         self._workflow.log_message.connect(
@@ -391,6 +392,23 @@ class RemuxPanel(QWidget):
         content_layout.addWidget(_separator())
 
         content_layout.addWidget(_section_label("FICHIER DE SORTIE"))
+        backend_row = QHBoxLayout()
+        backend_row.setSpacing(_scale(8))
+        backend_label = QLabel(translate_text("Backend de muxage"))
+        backend_label.setStyleSheet(f"color: {_C.TEXT_SEC}; background: transparent;")
+        self._mux_backend_combo = QComboBox()
+        for value, label in (
+            ("auto", "Auto"), ("native", "Natif Matroska"), ("ffmpeg", "FFmpeg"),
+        ):
+            self._mux_backend_combo.addItem(translate_text(label), value)
+        selected_backend = self._mux_backend_combo.findData(self._config.remux_mux_backend)
+        self._mux_backend_combo.setCurrentIndex(max(0, selected_backend))
+        self._mux_backend_combo.setStyleSheet(_input_style())
+        self._mux_backend_combo.currentIndexChanged.connect(self._rebuild_preview)
+        backend_row.addWidget(backend_label)
+        backend_row.addWidget(self._mux_backend_combo)
+        backend_row.addStretch()
+        content_layout.addLayout(backend_row)
         out_row = QHBoxLayout()
         out_row.setSpacing(_scale(8))
 
@@ -729,7 +747,7 @@ class RemuxPanel(QWidget):
             track_order=track_order,
             keep_chapters=True,
             work_dir=self._config.work_dir,
-            mux_backend=self._config.remux_mux_backend,
+            mux_backend=str(self._mux_backend_combo.currentData() or self._config.remux_mux_backend),
         )
 
     def _export_exact_json(self) -> None:

@@ -42,3 +42,33 @@ def test_mkvmerge_warning_exit_code_is_accepted(monkeypatch) -> None:
 
     monkeypatch.setattr(concat_video.subprocess, "run", lambda *_args, **_kwargs: Result())
     assert concat_video.run_command(["mkvmerge", "-o", "out.mkv", "in.mkv"]).returncode == 1
+
+
+def test_muxiveo_tools_are_loaded_from_structured_cli(monkeypatch) -> None:
+    class Result:
+        stdout = '{"version": 1, "tools": {"ffmpeg": "/bundle/ffmpeg", "ffprobe": "/bundle/ffprobe"}}'
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return Result()
+
+    monkeypatch.setattr(concat_video.subprocess, "run", fake_run)
+
+    assert concat_video.get_muxiveo_tool_paths("/app/muxiveo") == {
+        "ffmpeg": "/bundle/ffmpeg",
+        "ffprobe": "/bundle/ffprobe",
+    }
+    assert calls[0][0] == ["/app/muxiveo", "--cli", "tools"]
+    assert calls[0][1]["check"] is True
+
+
+def test_muxiveo_tools_failure_keeps_standalone_resolution(monkeypatch, capsys) -> None:
+    def fail(*_args, **_kwargs):
+        raise OSError("not executable")
+
+    monkeypatch.setattr(concat_video.subprocess, "run", fail)
+
+    assert concat_video.get_muxiveo_tool_paths("muxiveo") == {}
+    assert "Impossible de lire les outils" in capsys.readouterr().out

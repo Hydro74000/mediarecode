@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import cli.main
+from cli.commands import cmd_tools
 from cli.batch import discover_direct_batch_jobs, run_batch
 from cli.contract import validate_batch_contract, validate_job_contract
 from cli.errors import CliError, ContractError
@@ -76,6 +77,31 @@ def test_cli_parser_exposes_expected_subcommands() -> None:
     assert args.json_output is True
     assert args.tmdb_id == 123
     assert args.no_attach is True
+    args = parser.parse_args(["tools"])
+    assert args.command == "tools"
+    assert args.func is cmd_tools
+
+
+def test_cli_tools_exposes_resolved_commands_as_structured_json(capsys) -> None:
+    config = SimpleNamespace(
+        tool_commands=lambda: {
+            "ffmpeg": "/opt/muxiveo/ffmpeg",
+            "ffprobe": "/opt/muxiveo/ffprobe",
+            "mediainfo": "/opt/muxiveo/mediainfo",
+        }
+    )
+
+    assert cmd_tools(SimpleNamespace(), config, SimpleNamespace()) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "version": 1,
+        "tools": {
+            "ffmpeg": "/opt/muxiveo/ffmpeg",
+            "ffprobe": "/opt/muxiveo/ffprobe",
+            "mediainfo": "/opt/muxiveo/mediainfo",
+        },
+    }
 
 
 def test_cli_main_only_exposes_entrypoint() -> None:
