@@ -64,6 +64,13 @@ def test_muxiveo_tools_are_loaded_from_structured_cli(monkeypatch) -> None:
     assert calls[0][1]["check"] is True
 
 
+def test_python_muxiveo_entrypoint_uses_current_interpreter() -> None:
+    assert concat_video.muxiveo_command("/workspace/main.py") == [
+        concat_video.sys.executable, "/workspace/main.py",
+    ]
+    assert concat_video.muxiveo_command("Muxiveo.exe") == ["Muxiveo.exe"]
+
+
 def test_muxiveo_tools_failure_keeps_standalone_resolution(monkeypatch, capsys) -> None:
     def fail(*_args, **_kwargs):
         raise OSError("not executable")

@@ -70,6 +70,9 @@ def _resolve_ini_path() -> Path:
     Sur Linux/macOS, on utilise toujours le chemin XDG — y compris en mode
     développement — car setup.py y écrit les chemins absolus des outils détectés.
     """
+    explicit_config_home = os.environ.get("MUXIVEO_CONFIG_HOME")
+    if explicit_config_home:
+        return Path(explicit_config_home).expanduser() / "config.ini"
     if sys.platform != "win32":
         xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         return xdg / APP_CONFIG_DIR_NAME / "config.ini"

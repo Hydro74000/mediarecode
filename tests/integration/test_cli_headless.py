@@ -213,7 +213,11 @@ def test_cli_profile_argument_falls_back_to_user_profile_dir_without_json_suffix
         ),
         encoding="utf-8",
     )
-    env = {**os.environ, "XDG_CONFIG_HOME": str(xdg_home)}
+    env = {
+        **os.environ,
+        "XDG_CONFIG_HOME": str(xdg_home),
+        "MUXIVEO_CONFIG_HOME": str(xdg_home / "muxiveo"),
+    }
 
     result = _run_cli(root, "validate", "--profile", "SavedProfile", "--json", env=env)
 

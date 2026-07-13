@@ -80,11 +80,19 @@ MKVMERGE = find_tool("mkvmerge", MKVMERGE_PATH)
 MUXIVEO = find_tool("muxiveo", MUXIVEO_PATH)
 
 
+def muxiveo_command(muxiveo_path):
+    """Return a cross-platform invocation for an installed binary or source entrypoint."""
+    path = str(muxiveo_path)
+    if Path(path).suffix.lower() == ".py":
+        return [sys.executable, path]
+    return [path]
+
+
 def get_muxiveo_tool_paths(muxiveo_path):
     """Interroge Muxiveo afin de partager exactement sa résolution d'outils."""
     try:
         result = subprocess.run(
-            [muxiveo_path, "--cli", "tools"],
+            [*muxiveo_command(muxiveo_path), "--cli", "tools"],
             capture_output=True, text=True, check=True,
         )
         tools = json.loads(result.stdout).get("tools", {})
@@ -1704,7 +1712,7 @@ def concat_videos(main_path, output_path, intro_path=None, outro_path=None, work
             
             # Exécuter la commande Muxiveo
             muxiveo_cmd = [
-                MUXIVEO, "--cli", "run",
+                *muxiveo_command(MUXIVEO), "--cli", "run",
                 "--config", job_file.name,
                 "--force"
             ]
