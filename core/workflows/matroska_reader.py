@@ -161,6 +161,16 @@ class MatroskaReader:
     DISCARD_PADDING_ID = bytes.fromhex("75a2")
     CODEC_STATE_ID = bytes.fromhex("a4")
     BLOCK_ADDITIONS_ID = bytes.fromhex("75a1")
+    INFO_ID = bytes.fromhex("1549a966")
+    MUXING_APP_ID = bytes.fromhex("4d80")
+    WRITING_APP_ID = bytes.fromhex("5741")
+    ATTACHMENTS_ID = bytes.fromhex("1941a469")
+    ATTACHED_FILE_ID = bytes.fromhex("61a7")
+    FILE_DESCRIPTION_ID = bytes.fromhex("467e")
+    FILE_NAME_ID = bytes.fromhex("466e")
+    FILE_MEDIA_TYPE_ID = bytes.fromhex("4660")
+    FILE_DATA_ID = bytes.fromhex("465c")
+    FILE_UID_ID = bytes.fromhex("46ae")
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -189,6 +199,40 @@ class MatroskaReader:
         with self.path.open("rb") as fh:
             fh.seek(element.payload_offset)
             return _read_exact(fh, element.size)
+
+    def raw_element(self, element: EbmlElement) -> bytes:
+        if element.size is None:
+            raise ValueError("Copie brute impossible pour une taille inconnue")
+        with self.path.open("rb") as fh:
+            fh.seek(element.offset)
+            return _read_exact(fh, element.header_size + element.size)
+
+    def raw_top_level(self, element_id: bytes) -> tuple[bytes, ...]:
+        return tuple(self.raw_element(item) for item in self.top_level() if item.element_id == element_id)
+
+    def attachments(self) -> list["MatroskaAttachment"]:
+        root = next((item for item in self.top_level() if item.element_id == self.ATTACHMENTS_ID), None)
+        if root is None:
+            return []
+        result: list[MatroskaAttachment] = []
+        size = self.path.stat().st_size
+        with self.path.open("rb") as fh:
+            fh.seek(root.payload_offset)
+            for attached in iter_children(fh, root, file_size=size):
+                if attached.element_id != self.ATTACHED_FILE_ID:
+                    continue
+                values: dict[bytes, bytes] = {}
+                fh.seek(attached.payload_offset)
+                for child in iter_children(fh, attached, file_size=size):
+                    if child.size is not None:
+                        values[child.element_id] = self.payload(child)
+                text = lambda key: values.get(key, b"").decode("utf-8", "replace").rstrip("\0")
+                result.append(MatroskaAttachment(
+                    uid=int.from_bytes(values.get(self.FILE_UID_ID, b"\0"), "big"),
+                    name=text(self.FILE_NAME_ID), media_type=text(self.FILE_MEDIA_TYPE_ID),
+                    description=text(self.FILE_DESCRIPTION_ID), data=values.get(self.FILE_DATA_ID, b""),
+                ))
+        return result
 
     def tracks(self) -> list["MatroskaTrack"]:
         """Return core TrackEntry metadata while retaining its raw EBML body."""
@@ -223,6 +267,19 @@ class MatroskaReader:
                     name=text(self.NAME), raw_entry=self.payload(entry),
                 ))
         return out
+
+    def segment_info_apps(self) -> tuple[str, str]:
+        info = next((item for item in self.top_level() if item.element_id == self.INFO_ID), None)
+        if info is None:
+            return "", ""
+        values: dict[bytes, str] = {}
+        size = self.path.stat().st_size
+        with self.path.open("rb") as fh:
+            fh.seek(info.payload_offset)
+            for child in iter_children(fh, info, file_size=size):
+                if child.element_id in {self.MUXING_APP_ID, self.WRITING_APP_ID} and child.size is not None:
+                    values[child.element_id] = self.payload(child).decode("utf-8", "replace").rstrip("\0")
+        return values.get(self.MUXING_APP_ID, ""), values.get(self.WRITING_APP_ID, "")
 
     @staticmethod
     def _decode_block(raw: bytes, cluster_timestamp: int, **metadata: object) -> tuple["MatroskaBlock", ...]:
@@ -308,4 +365,13 @@ class MatroskaBlock:
     block_additions: bytes = b""
 
 
-__all__ = ["EbmlElement", "MatroskaBlock", "MatroskaReader", "MatroskaTrack", "iter_children", "read_element"]
+@dataclass(frozen=True)
+class MatroskaAttachment:
+    uid: int
+    name: str
+    media_type: str
+    description: str
+    data: bytes
+
+
+__all__ = ["EbmlElement", "MatroskaAttachment", "MatroskaBlock", "MatroskaReader", "MatroskaTrack", "iter_children", "read_element"]

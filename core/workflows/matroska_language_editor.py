@@ -49,6 +49,12 @@ _ISO639_2_T_TO_B: dict[str, str] = {
 }
 
 
+def matroska_legacy_language(tag: str) -> str:
+    """Return the ISO 639-2/B value used by Matroska ``Language``."""
+    iso_t = LangTags.to_iso639_2(str(tag or "")) or "und"
+    return _ISO639_2_T_TO_B.get(iso_t, iso_t)
+
+
 def _canonicalize_bcp47(tag: str) -> str:
     """Normalise un tag BCP-47 à la forme canonique (RFC 5646 §2.1.1).
 
