@@ -1,0 +1,90 @@
+name: Native Matroska Backend
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "core/workflows/matroska_*.py"
+      - "core/workflows/ebml_writer.py"
+      - "core/workflows/remux*.py"
+      - "cli/**"
+      - "scripts/concat_video.py"
+      - "scripts/matroska_semantic_report.py"
+      - "tests/corpus/matroska/**"
+      - "tests/test_matroska*.py"
+      - "tests/integration/test_remux_filetypes.py"
+      - ".github/workflows/ci-matroska-native.yml"
+  push:
+    branches: [devel-mkv]
+
+jobs:
+  native:
+    name: Native / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux media tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg mediainfo libegl1 libgl1 libglib2.0-0 libdbus-1-3 libxcb-cursor0
+      - name: Install macOS media tools
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg media-info
+      - name: Install Windows media tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ffmpeg mediainfo-cli --yes --no-progress
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pytest pytest-qt PySide6
+      - name: Assert MKVToolNix is absent
+        shell: bash
+        run: |
+          if command -v mkvmerge >/dev/null 2>&1; then
+            echo "mkvmerge must not be present in native runtime jobs" >&2
+            exit 1
+          fi
+      - name: Verify checked-in corpus
+        run: python scripts/generate_matroska_corpus.py
+      - name: Run native unit and integration tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -q
+          tests/test_matroska_corpus.py
+          tests/test_matroska_reader.py
+          tests/test_matroska_writer.py
+          tests/test_matroska_native_muxer.py
+          tests/test_remux_backend.py
+          tests/integration/test_remux_filetypes.py
+          tests/integration/test_cli_headless.py
+          tests/test_concat_video_standalone_backend.py
+
+  oracle:
+    name: MKVToolNix semantic oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install oracle-only dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg mediainfo mkvtoolnix libegl1 libgl1 libglib2.0-0 libdbus-1-3 libxcb-cursor0
+          python -m pip install --upgrade pytest pytest-qt PySide6
+      - name: Verify corpus and compare normalized reports
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python scripts/generate_matroska_corpus.py
+          python -m pytest -q tests/oracle/test_matroska_oracle.py

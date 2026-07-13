@@ -46,6 +46,9 @@ from core.version import APP_VERSION_LABEL
 from core.workdir import download_tmdb_cover
 
 
+MATROSKA_EXTENSIONS = frozenset({".mkv", ".webm", ".mka", ".mks", ".mk3d"})
+
+
 @dataclass(frozen=True)
 class MuxBackendDecision:
     requested: str
@@ -139,7 +142,7 @@ def native_capability_reasons(config: RemuxConfig) -> tuple[str, ...]:
                 reasons.append(
                     f"{source.path.name}: réécriture de synchronisation avancée à matérialiser par FFmpeg"
                 )
-        if source.path.suffix.lower() not in {".mkv", ".webm", ".mka", ".mks", ".mk3d"}:
+        if source.path.suffix.lower() not in MATROSKA_EXTENSIONS:
             continue
         if not source.path.is_file():
             continue
@@ -172,7 +175,7 @@ def select_mux_backend(config: RemuxConfig) -> MuxBackendDecision:
 def native_preparation_commands(config: RemuxConfig, ffmpeg_bin: str) -> list[list[str]]:
     commands: list[list[str]] = []
     for source in config.sources:
-        if source.path.suffix.lower() in {".mkv", ".webm", ".mka", ".mks", ".mk3d"}:
+        if source.path.suffix.lower() in MATROSKA_EXTENSIONS:
             continue
         commands.append(build_canonicalization_command(
             source, Path(f"<temporary>/source_{source.file_index}.mkv"), ffmpeg_bin,
@@ -268,7 +271,7 @@ def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
             flag_commentary=item.track.flag_commentary,
         ))
         offset = int(item.track.time_shift_ms or 0)
-        for block in block_cache[item.source_file_index]:
+        for source_sequence, block in enumerate(block_cache[item.source_file_index]):
             if block.track_number == source_track.number:
                 if block.lace_count > 1 and block.lace_index > 0:
                     continue
@@ -281,7 +284,7 @@ def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
                     "timestamp_ms": round(shifted_timestamp_ns / 1_000_000),
                     "timestamp_ns": shifted_timestamp_ns,
                 })
-                output_packets.append(MatroskaMuxPacket(output_index, shifted))
+                output_packets.append(MatroskaMuxPacket(output_index, shifted, source_sequence))
     duration_ns = max((
         (packet.block.timestamp_ns if packet.block.timestamp_ns is not None else packet.block.timestamp_ms * 1_000_000)
         + (packet.block.duration_ns if packet.block.duration_ns is not None else (packet.block.duration_ms or 0) * 1_000_000)
@@ -349,12 +352,13 @@ def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
                 opaque.append(title_tag)
     first_reader = readers[config.sources[0].file_index]
     _, source_writing_app = first_reader.segment_info_apps()
+    segment_title = config.file_title.strip() or first_reader.segment_title()
     return MatroskaMuxPlan(
         config.output, tuple(output_tracks), tuple(output_packets), duration_ms=duration,
         duration_ns=duration_ns, timestamp_scale_ns=timestamp_scale_ns,
         muxing_app=f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}",
         writing_app=source_writing_app or "Muxiveo",
-        title=config.file_title.strip(),
+        title=segment_title,
         opaque_top_level=tuple(opaque),
     )
 
@@ -388,7 +392,10 @@ def run_native_remux(
                 cover_url, cover_name = config.tmdb_cover
                 cover = download_tmdb_cover(cover_url, cover_name, canonical_root / "attachments")
                 run_config = replace(run_config, extra_attachments=[*run_config.extra_attachments, cover], tmdb_cover=None)
-            non_matroska = [source for source in config.sources if source.path.suffix.lower() not in {".mkv", ".webm"}]
+            non_matroska = [
+                source for source in config.sources
+                if source.path.suffix.lower() not in MATROSKA_EXTENSIONS
+            ]
             if non_matroska:
                 log_step(2, "Canonicalisation Matroska des sources non-MKV")
                 work_root = config.work_dir or Path(tempfile.gettempdir())
@@ -512,6 +519,7 @@ __all__ = [
     "FfmpegRemuxBackend", "MuxBackendDecision", "NativeMatroskaBackend",
     "RemuxBackend", "build_native_plan", "mux_backend_report",
     "build_canonicalization_command",
+    "MATROSKA_EXTENSIONS",
     "native_capability_reasons", "native_preparation_commands",
     "run_native_remux", "select_mux_backend",
 ]

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from core.workflows.remux_backend import select_mux_backend
+from core.workflows.remux_backend import native_preparation_commands, select_mux_backend
 from core.workflows.remux_models import RemuxConfig, SourceInput, TrackEntry
 from core.workflows.ebml_writer import ascii_element, element, uint_element
 from core.workflows.matroska_element_ids import (
@@ -52,3 +52,10 @@ def test_auto_falls_back_for_unreadable_matroska(tmp_path: Path) -> None:
     decision = select_mux_backend(cfg)
     assert decision.selected == "ffmpeg"
     assert "illisible" in decision.native_reasons[0]
+
+
+def test_all_matroska_family_extensions_are_consumed_directly(tmp_path: Path) -> None:
+    cfg = config(tmp_path, suffix=".mp4")
+    for suffix in (".mkv", ".webm", ".mka", ".mks", ".mk3d"):
+        cfg.sources[0].path = tmp_path / f"source{suffix}"
+        assert native_preparation_commands(cfg, "ffmpeg") == []

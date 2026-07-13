@@ -57,6 +57,9 @@ class MatroskaMuxTrack:
 class MatroskaMuxPacket:
     output_track_number: int
     block: MatroskaBlock
+    # Ordre de décodage dans la source. Il ne doit jamais être remplacé par un
+    # tri PTS : les flux avec B-frames ont volontairement des PTS non monotones.
+    source_sequence: int = 0
 
 
 @dataclass(frozen=True)

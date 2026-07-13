@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 from io import BytesIO
 from pathlib import Path
 from typing import Callable
@@ -135,6 +136,36 @@ def _timestamp_ns(packet: MatroskaMuxPacket) -> int:
     return block.timestamp_ns if block.timestamp_ns is not None else block.timestamp_ms * 1_000_000
 
 
+def _interleave_packets(packets: tuple[MatroskaMuxPacket, ...]) -> list[MatroskaMuxPacket]:
+    """Interleave tracks without ever changing one track's decode order."""
+    per_track: dict[int, list[MatroskaMuxPacket]] = {}
+    track_order: list[int] = []
+    for packet in packets:
+        if packet.output_track_number not in per_track:
+            per_track[packet.output_track_number] = []
+            track_order.append(packet.output_track_number)
+        per_track[packet.output_track_number].append(packet)
+    for values in per_track.values():
+        values.sort(key=lambda item: item.source_sequence)
+    positions = {track_number: 0 for track_number in track_order}
+    heap: list[tuple[int, int, int, MatroskaMuxPacket]] = []
+    for stable_order, track_number in enumerate(track_order):
+        packet = per_track[track_number][0]
+        heapq.heappush(heap, (_timestamp_ns(packet), stable_order, track_number, packet))
+    output: list[MatroskaMuxPacket] = []
+    while heap:
+        _timestamp, stable_order, track_number, packet = heapq.heappop(heap)
+        output.append(packet)
+        positions[track_number] += 1
+        position = positions[track_number]
+        if position < len(per_track[track_number]):
+            next_packet = per_track[track_number][position]
+            heapq.heappush(
+                heap, (_timestamp_ns(next_packet), stable_order, track_number, next_packet),
+            )
+    return output
+
+
 def _exact_ticks(value_ns: int, scale_ns: int, *, label: str) -> int:
     ticks, remainder = divmod(value_ns, scale_ns)
     if remainder:
@@ -249,7 +280,7 @@ class MatroskaWriter:
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".partial")
         partial.unlink(missing_ok=True)
-        packets = sorted(plan.packets, key=lambda item: (_timestamp_ns(item), item.output_track_number, item.block.lace_index))
+        packets = _interleave_packets(plan.packets)
         duration_ns = plan.duration_ns or (plan.duration_ms * 1_000_000) or max((
             _timestamp_ns(item)
             + (item.block.duration_ns if item.block.duration_ns is not None else (item.block.duration_ms or 0) * 1_000_000)
@@ -276,14 +307,22 @@ class MatroskaWriter:
                 cluster_records: list[_ClusterRecord] = []
                 video_track = next((track.output_number for track in plan.tracks if track.source_track.track_type == 1), plan.tracks[0].output_number)
                 while index < len(packets):
-                    cluster_time = _exact_ticks(_timestamp_ns(packets[index]), plan.timestamp_scale_ns, label="Cluster.Timestamp")
                     group: list[MatroskaMuxPacket] = []
-                    max_cluster_ticks = min(30_000, max(1, 30_000_000_000 // plan.timestamp_scale_ns))
+                    group_min_ns = group_max_ns = _timestamp_ns(packets[index])
+                    max_cluster_ns = min(
+                        30_000_000_000,
+                        32767 * plan.timestamp_scale_ns,
+                    )
                     while index < len(packets):
-                        packet_ticks = _exact_ticks(_timestamp_ns(packets[index]), plan.timestamp_scale_ns, label="Block timestamp")
-                        if packet_ticks - cluster_time > max_cluster_ticks:
+                        packet_ns = _timestamp_ns(packets[index])
+                        candidate_min = min(group_min_ns, packet_ns)
+                        candidate_max = max(group_max_ns, packet_ns)
+                        if group and candidate_max - candidate_min > max_cluster_ns:
                             break
-                        group.append(packets[index]); index += 1
+                        group.append(packets[index])
+                        group_min_ns, group_max_ns = candidate_min, candidate_max
+                        index += 1
+                    cluster_time = _exact_ticks(group_min_ns, plan.timestamp_scale_ns, label="Cluster.Timestamp")
                     timestamp_element = uint_element(TIMESTAMP_ID, max(0, cluster_time))
                     packet_elements = [
                         _packet_element(packet, cluster_time, plan.timestamp_scale_ns)
