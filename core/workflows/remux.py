@@ -43,7 +43,7 @@ from core.workflows.remux_models import (
     TrackEntry,
     tracks_from_file_info,
 )
-from core.workflows.remux_backend import select_mux_backend
+from core.workflows.remux_backend import run_native_single_hevc, select_mux_backend
 from core.workflows.remux_sync import (
     bind_temp_cleanup as _bind_temp_cleanup_helper,
     decide_strict_interleave_with_prescan as _decide_strict_interleave_with_prescan_helper,
@@ -227,10 +227,12 @@ class RemuxWorkflow(QObject):
                 "Backend natif non applicable ; repli FFmpeg : " + "; ".join(decision.native_reasons),
             )
         elif decision.selected == "native":
-            # The native writer is wired in a dedicated runtime increment.  Do
-            # not silently claim native output until it owns the final write.
-            raise RemuxError(
-                "Le backend Matroska natif est sélectionné mais son exécuteur n'est pas encore disponible."
+            return run_native_single_hevc(
+                config,
+                ffmpeg_bin=self._ffmpeg,
+                ffprobe_bin=self._ffprobe,
+                log=self.log_message.emit,
+                log_step=self._log_step,
             )
         return RemuxRuntimeRunner(
             RemuxRuntimeRunnerCallbacks(
