@@ -6,9 +6,10 @@ raw payloads so the native remux planner can preserve packet bytes verbatim.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
+import struct
 from typing import BinaryIO, Iterator
 
 
@@ -169,6 +170,11 @@ class MatroskaReader:
     LANGUAGE = bytes.fromhex("22b59c")
     LANGUAGE_BCP47 = bytes.fromhex("22b59d")
     NAME = bytes.fromhex("536e")
+    VIDEO_ID = bytes.fromhex("e0")
+    AUDIO_ID = bytes.fromhex("e1")
+    COLOUR_ID = bytes.fromhex("55b0")
+    MASTERING_METADATA_ID = bytes.fromhex("55d0")
+    BLOCK_ADDITION_MAPPING_ID = bytes.fromhex("41e4")
     CLUSTER_ID = bytes.fromhex("1f43b675")
     TIMESTAMP_ID = bytes.fromhex("e7")
     SIMPLE_BLOCK_ID = bytes.fromhex("a3")
@@ -405,12 +411,99 @@ class MatroskaReader:
                     return int.from_bytes(fields.get(key, b""), "big") if fields.get(key) else default
                 def text(key: bytes) -> str:
                     return fields.get(key, b"").decode("utf-8", "replace").rstrip("\0")
+                nested = {child_id: value for child_id, value in payload_children(self.payload(entry))}
+                video: dict[str, int | float] = {}
+                audio: dict[str, int | float] = {}
+                block_addition_mappings: list[dict[str, int | str | bytes]] = []
+
+                def uint_values(payload: bytes, names: dict[bytes, str]) -> dict[str, int]:
+                    return {
+                        names[element_id]: int.from_bytes(value, "big")
+                        for element_id, value in payload_children(payload)
+                        if element_id in names
+                    }
+
+                def float_value(value: bytes) -> float:
+                    if len(value) == 4:
+                        return float(struct.unpack(">f", value)[0])
+                    if len(value) == 8:
+                        return float(struct.unpack(">d", value)[0])
+                    raise ValueError("Float EBML de taille invalide")
+
+                video_names = {
+                    bytes.fromhex(key): name for key, name in {
+                        "b0": "pixel_width", "ba": "pixel_height",
+                        "54b0": "display_width", "54ba": "display_height",
+                        "54b2": "display_unit", "54b3": "aspect_ratio_type",
+                        "9a": "flag_interlaced", "9d": "field_order",
+                        "53b8": "stereo_mode", "53c0": "alpha_mode",
+                        "54aa": "pixel_crop_bottom", "54bb": "pixel_crop_top",
+                        "54cc": "pixel_crop_left", "54dd": "pixel_crop_right",
+                    }.items()
+                }
+                colour_names = {
+                    bytes.fromhex(key): name for key, name in {
+                        "55b1": "matrix_coefficients", "55b2": "bits_per_channel",
+                        "55b3": "chroma_subsampling_horz", "55b4": "chroma_subsampling_vert",
+                        "55b5": "cb_subsampling_horz", "55b6": "cb_subsampling_vert",
+                        "55b7": "chroma_siting_horz", "55b8": "chroma_siting_vert",
+                        "55b9": "range", "55ba": "transfer_characteristics",
+                        "55bb": "primaries", "55bc": "max_cll", "55bd": "max_fall",
+                    }.items()
+                }
+                mastering_names = {
+                    bytes.fromhex(key): name for key, name in {
+                        "55d1": "primary_r_x", "55d2": "primary_r_y",
+                        "55d3": "primary_g_x", "55d4": "primary_g_y",
+                        "55d5": "primary_b_x", "55d6": "primary_b_y",
+                        "55d7": "white_point_x", "55d8": "white_point_y",
+                        "55d9": "luminance_max", "55da": "luminance_min",
+                    }.items()
+                }
+                if self.VIDEO_ID in nested:
+                    video.update(uint_values(nested[self.VIDEO_ID], video_names))
+                    video_children = dict(payload_children(nested[self.VIDEO_ID]))
+                    colour_payload = video_children.get(self.COLOUR_ID)
+                    if colour_payload is not None:
+                        video.update(uint_values(colour_payload, colour_names))
+                        colour_children = dict(payload_children(colour_payload))
+                        mastering = colour_children.get(self.MASTERING_METADATA_ID)
+                        if mastering is not None:
+                            for element_id, value in payload_children(mastering):
+                                if element_id in mastering_names:
+                                    video[mastering_names[element_id]] = float_value(value)
+                if self.AUDIO_ID in nested:
+                    audio_names = {
+                        bytes.fromhex("9f"): "channels", bytes.fromhex("6264"): "bit_depth",
+                    }
+                    audio.update(uint_values(nested[self.AUDIO_ID], audio_names))
+                    for element_id, value in payload_children(nested[self.AUDIO_ID]):
+                        if element_id == bytes.fromhex("b5"):
+                            audio["sampling_frequency"] = float_value(value)
+                        elif element_id == bytes.fromhex("78b5"):
+                            audio["output_sampling_frequency"] = float_value(value)
+                for element_id, value in payload_children(self.payload(entry)):
+                    if element_id != self.BLOCK_ADDITION_MAPPING_ID:
+                        continue
+                    mapping: dict[str, int | str | bytes] = {}
+                    for mapping_id, mapping_value in payload_children(value):
+                        if mapping_id == bytes.fromhex("41f0"):
+                            mapping["value"] = int.from_bytes(mapping_value, "big")
+                        elif mapping_id == bytes.fromhex("41a4"):
+                            mapping["name"] = mapping_value.decode("utf-8", "replace").rstrip("\0")
+                        elif mapping_id == bytes.fromhex("41e7"):
+                            mapping["type"] = int.from_bytes(mapping_value, "big")
+                        elif mapping_id == bytes.fromhex("41ed"):
+                            mapping["extra_data"] = mapping_value
+                    block_addition_mappings.append(mapping)
                 out.append(MatroskaTrack(
                     number=uint(self.TRACK_NUMBER_ID), uid=uint(self.TRACK_UID_ID),
                     track_type=uint(self.TRACK_TYPE_ID), codec_id=text(self.CODEC_ID),
                     codec_private=fields.get(self.CODEC_PRIVATE, b""),
                     language_bcp47=text(self.LANGUAGE_BCP47), language=text(self.LANGUAGE) or "und",
                     name=text(self.NAME), raw_entry=self.payload(entry),
+                    video=video, audio=audio,
+                    block_addition_mappings=tuple(block_addition_mappings),
                 ))
         return out
 
@@ -579,6 +672,9 @@ class MatroskaTrack:
     language: str
     name: str
     raw_entry: bytes
+    video: dict[str, int | float] = field(default_factory=dict)
+    audio: dict[str, int | float] = field(default_factory=dict)
+    block_addition_mappings: tuple[dict[str, int | str | bytes], ...] = ()
 
 @dataclass(frozen=True)
 class MatroskaBlock:

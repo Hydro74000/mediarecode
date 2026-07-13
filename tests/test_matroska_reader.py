@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from core.workflows.ebml_writer import element
+from core.workflows.ebml_writer import element, float_element
 from core.workflows.matroska_element_ids import EBML_HEADER_ID, INFO_ID, SEGMENT_ID
 from core.workflows.matroska_reader import MatroskaReader
 
@@ -81,3 +81,60 @@ def test_reader_resumes_after_unknown_size_clusters(tmp_path: Path) -> None:
     reader = MatroskaReader(path)
     assert [item.element_id for item in reader.top_level()] == [cluster, cluster]
     assert [(item.timestamp_ms, item.payload) for item in reader.blocks()] == [(0, b"a"), (10, b"b")]
+
+
+def test_reader_models_nested_video_audio_colour_and_dovi_mapping(tmp_path: Path) -> None:
+    track_entry = element(bytes.fromhex("ae"), b"".join((
+        element(bytes.fromhex("d7"), b"\x01"),
+        element(bytes.fromhex("73c5"), b"\x02"),
+        element(bytes.fromhex("83"), b"\x01"),
+        element(bytes.fromhex("86"), b"V_MPEGH/ISO/HEVC"),
+        element(bytes.fromhex("e0"), b"".join((
+            element(bytes.fromhex("b0"), b"\x07\x80"),
+            element(bytes.fromhex("ba"), b"\x04\x38"),
+            element(bytes.fromhex("55b0"), b"".join((
+                element(bytes.fromhex("55bb"), b"\x09"),
+                element(bytes.fromhex("55ba"), b"\x10"),
+                element(bytes.fromhex("55bc"), b"\x03\xe8"),
+                element(bytes.fromhex("55d0"), float_element(bytes.fromhex("55d9"), 1000.0)),
+            ))),
+        ))),
+        element(bytes.fromhex("41e4"), b"".join((
+            element(bytes.fromhex("41f0"), b"\x01"),
+            element(bytes.fromhex("41a4"), b"Dolby Vision configuration"),
+            element(bytes.fromhex("41e7"), b"\x07"),
+            element(bytes.fromhex("41ed"), b"\x01\x08\x06"),
+        ))),
+    )))
+    path = tmp_path / "metadata.mkv"
+    path.write_bytes(
+        element(EBML_HEADER_ID, b"") + SEGMENT_ID + b"\xff"
+        + element(bytes.fromhex("1654ae6b"), track_entry)
+    )
+
+    track = MatroskaReader(path).tracks()[0]
+
+    assert track.video["pixel_width"] == 1920
+    assert track.video["pixel_height"] == 1080
+    assert track.video["primaries"] == 9
+    assert track.video["transfer_characteristics"] == 16
+    assert track.video["max_cll"] == 1000
+    assert track.video["luminance_max"] == 1000.0
+    assert track.block_addition_mappings[0]["name"] == "Dolby Vision configuration"
+    assert track.block_addition_mappings[0]["extra_data"] == b"\x01\x08\x06"
+
+
+def test_reader_reports_content_encryption_as_native_blocker(tmp_path: Path) -> None:
+    encoded = element(bytes.fromhex("6d80"), element(
+        bytes.fromhex("6240"), element(bytes.fromhex("5035"), b"\x01"),
+    ))
+    track = element(bytes.fromhex("ae"), b"".join((
+        element(bytes.fromhex("d7"), b"\x01"), element(bytes.fromhex("73c5"), b"\x02"),
+        element(bytes.fromhex("83"), b"\x02"), element(bytes.fromhex("86"), b"A_AAC"), encoded,
+    )))
+    path = tmp_path / "encrypted.mka"
+    path.write_bytes(
+        element(EBML_HEADER_ID, b"") + SEGMENT_ID + b"\xff"
+        + element(bytes.fromhex("1654ae6b"), track)
+    )
+    assert MatroskaReader(path).content_encoding_capabilities() == (False, True)
