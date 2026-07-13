@@ -829,11 +829,7 @@ def select_mux_backend(requested="auto"):
         if not available[requested]:
             raise ValueError(f"Backend demandé introuvable : {requested}")
         return requested
-    if available["muxiveo"]:
-        return "muxiveo"
-    if available["mkvmerge"]:
-        return "mkvmerge"
-    return "ffmpeg"
+    return "muxiveo" if available["muxiveo"] else "ffmpeg"
 
 
 def concat_videos(main_path, output_path, intro_path=None, outro_path=None, workdir=None, mode="crop", mux_backend="auto"):
@@ -1836,13 +1832,9 @@ if __name__ == "__main__":
     parser.add_argument("-w", "--workdir", help="Dossier de travail temporaire (par défaut: dossier de sortie sous Linux, %%temp%% sous Windows)")
     parser.add_argument("-m", "--mode", choices=["crop", "pad"], default="crop", help="Mode d'adaptation de l'intro : crop (recadrer en coupant) ou pad (bandes noires). Par défaut : crop.")
     parser.add_argument(
-        "--mux-backend",
-        choices=["auto", "muxiveo", "mkvmerge", "ffmpeg"],
-        default="auto",
-        help=(
-            "Muxeur final standalone. auto préfère Muxiveo, puis mkvmerge, puis FFmpeg ; "
-            "mkvmerge n'est utilisé que par ce script."
-        ),
+        "--mkvmerge",
+        action="store_true",
+        help="Force mkvmerge pour le réassemblage standalone final.",
     )
     
     args = parser.parse_args()
@@ -1862,5 +1854,6 @@ if __name__ == "__main__":
 
     concat_videos(
         main_path, output_path, intro_path=intro_path, outro_path=args.outro,
-        workdir=args.workdir, mode=args.mode, mux_backend=args.mux_backend,
+        workdir=args.workdir, mode=args.mode,
+        mux_backend="mkvmerge" if args.mkvmerge else "auto",
     )

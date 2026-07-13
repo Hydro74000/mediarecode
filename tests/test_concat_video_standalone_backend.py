@@ -24,13 +24,11 @@ def test_explicit_mkvmerge_backend_is_available_only_when_binary_exists(monkeypa
         concat_video.select_mux_backend("muxiveo")
 
 
-def test_auto_prefers_muxiveo_then_mkvmerge_then_ffmpeg(monkeypatch) -> None:
+def test_auto_prefers_muxiveo_then_ffmpeg_without_implicitly_using_mkvmerge(monkeypatch) -> None:
     available = {concat_video.MUXIVEO, concat_video.MKVMERGE, concat_video.FFMPEG}
     monkeypatch.setattr(concat_video, "is_tool_available", lambda path: path in available)
     assert concat_video.select_mux_backend("auto") == "muxiveo"
     available.remove(concat_video.MUXIVEO)
-    assert concat_video.select_mux_backend("auto") == "mkvmerge"
-    available.remove(concat_video.MKVMERGE)
     assert concat_video.select_mux_backend("auto") == "ffmpeg"
 
 
