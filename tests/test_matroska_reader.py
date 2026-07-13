@@ -60,7 +60,9 @@ def test_reader_decodes_fixed_and_xiph_lacing(tmp_path: Path) -> None:
     fixed = _blocks_file(tmp_path, b"\x81\x00\x00\x84\x01aabb")  # 2 frames fixed
     assert [b.payload for b in MatroskaReader(fixed).blocks()] == [b"aa", b"bb"]
     xiph = _blocks_file(tmp_path, b"\x81\x00\x00\x82\x01\x01abb")
-    assert [b.payload for b in MatroskaReader(xiph).blocks()] == [b"a", b"bb"]
+    xiph_blocks = list(MatroskaReader(xiph).blocks())
+    assert [b.payload for b in xiph_blocks] == [b"a", b"bb"]
+    assert [b.timestamp_ns for b in xiph_blocks] == [0, None]
 
 
 def test_reader_decodes_ebml_lacing_and_block_group(tmp_path: Path) -> None:

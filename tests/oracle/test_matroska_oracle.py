@@ -45,5 +45,11 @@ def test_native_output_matches_mkvmerge_oracle(tmp_path: Path, source: Path) -> 
         capture_output=True, text=True,
     )
     assert oracle_result.returncode in {0, 1}, oracle_result.stderr
-    failures = compare_reports(semantic_report(oracle), semantic_report(native))
+    # mkvmerge relace l'audio sur une échelle milliseconde et peut répartir
+    # ses arrondis d'une frame à l'autre. Deux millisecondes constituent ici
+    # la tolérance oracle ; le round-trip source→natif reste comparé strictement.
+    failures = compare_reports(
+        semantic_report(oracle), semantic_report(native),
+        timestamp_tolerance_ns=2_000_000,
+    )
     assert not failures, "\n".join(failures[:100])

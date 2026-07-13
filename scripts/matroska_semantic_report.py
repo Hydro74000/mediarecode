@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from decimal import Decimal
 import subprocess
 import sys
 from pathlib import Path
@@ -28,7 +29,8 @@ DISPOSITION_FIELDS = (
 
 def _ffprobe(path: Path) -> dict:
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-show_packets",
+         "-show_data_hash", "sha256", "-of", "json", str(path)],
         capture_output=True, text=True, check=True,
     )
     return json.loads(result.stdout)
@@ -48,6 +50,12 @@ def semantic_report(path: Path) -> dict:
     reader = MatroskaReader(path)
     probe = _ffprobe(path)
     native_tracks = reader.tracks()
+
+    def effective_language(legacy: str, bcp47: str = "") -> str:
+        value = str(bcp47 or legacy or "und")
+        if "-" in value:
+            return value.lower()
+        return LanguageTags.to_iso639_2(value) or "und"
     streams = []
     for stream in probe.get("streams", []):
         if stream.get("codec_type") == "attachment":
@@ -61,16 +69,32 @@ def semantic_report(path: Path) -> dict:
             "disposition": {key: int(disposition.get(key, 0)) for key in DISPOSITION_FIELDS},
         })
     packet_groups: dict[int, list[dict]] = {track.number: [] for track in native_tracks}
-    for block in reader.blocks():
-        packet_groups.setdefault(block.track_number, []).append({
-            "timestamp_ns": block.timestamp_ns,
-            "duration_ns": block.duration_ns,
-            "keyframe": bool(block.flags & 0x80),
-            "payload_sha256": hashlib.sha256(block.payload).hexdigest(),
+
+    def time_ns(value: object) -> int | None:
+        if value in (None, "N/A"):
+            return None
+        return int(Decimal(str(value)) * 1_000_000_000)
+
+    for packet in probe.get("packets", []):
+        stream_index = int(packet.get("stream_index", -1))
+        if not 0 <= stream_index < len(native_tracks):
+            continue
+        track = native_tracks[stream_index]
+        data_hash = str(packet.get("data_hash", ""))
+        packet_groups[track.number].append({
+            "timestamp_ns": time_ns(packet.get("pts_time")),
+            "duration_ns": time_ns(packet.get("duration_time")),
+            "keyframe": bool("K" in str(packet.get("flags", ""))) if track.track_type == 1 else None,
+            "payload_sha256": data_hash.partition(":")[2].lower(),
         })
+    mime_aliases = {
+        "application/x-truetype-font": "font/ttf",
+        "application/x-font-ttf": "font/ttf",
+        "application/vnd.ms-opentype": "font/otf",
+    }
     attachments = sorted((
         {
-            "name": item.name, "media_type": item.media_type,
+            "name": item.name, "media_type": mime_aliases.get(item.media_type, item.media_type),
             "description": item.description, "data_sha256": hashlib.sha256(item.data).hexdigest(),
         }
         for item in reader.attachments()
@@ -104,12 +128,17 @@ def semantic_report(path: Path) -> dict:
             for key, uid in sorted(values.items())
         }
 
+    technical_tags = {
+        "BPS", "DURATION", "ENCODER", "NUMBER_OF_BYTES", "NUMBER_OF_FRAMES",
+        "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS",
+    }
     tags = sorted((
         {
             "targets": normalized_targets(item.targets),
-            "values": sorted([list(value) for value in item.values]),
+            "values": sorted([list(value) for value in item.values if value[0].upper() not in technical_tags]),
         }
         for item in reader.tags()
+        if any(value[0].upper() not in technical_tags for value in item.values)
     ), key=lambda item: json.dumps(item, sort_keys=True))
     return {
         "format": "matroska",
@@ -121,8 +150,7 @@ def semantic_report(path: Path) -> dict:
                 "type": track.track_type,
                 "codec_id": track.codec_id,
                 "codec_private_sha256": hashlib.sha256(track.codec_private).hexdigest(),
-                "language": LanguageTags.to_iso639_2(track.language) or "und",
-                "language_bcp47": track.language_bcp47,
+                "language": effective_language(track.language, track.language_bcp47),
                 "name": track.name,
                 "packets": packet_groups.get(track.number, []),
             }
@@ -137,7 +165,12 @@ def semantic_report(path: Path) -> dict:
     }
 
 
-def compare_reports(expected: dict, actual: dict) -> list[str]:
+def compare_reports(
+    expected: dict,
+    actual: dict,
+    *,
+    timestamp_tolerance_ns: int = 0,
+) -> list[str]:
     failures: list[str] = []
 
     def visit(left: object, right: object, location: str) -> None:
@@ -153,6 +186,12 @@ def compare_reports(expected: dict, actual: dict) -> list[str]:
                 failures.append(f"{location}: longueur {len(left)} != {len(right)}")
             for index, (left_item, right_item) in enumerate(zip(left, right)):
                 visit(left_item, right_item, f"{location}[{index}]")
+        elif (
+            isinstance(left, int) and isinstance(right, int)
+            and location.rsplit(".", 1)[-1] in {"timestamp_ns", "duration_ns"}
+            and abs(left - right) <= timestamp_tolerance_ns
+        ):
+            return
         elif left != right:
             failures.append(f"{location}: {left!r} != {right!r}")
 

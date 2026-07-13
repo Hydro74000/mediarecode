@@ -623,10 +623,15 @@ class MatroskaReader:
                     elif child.element_id == self.SIMPLE_BLOCK_ID and child.size is not None:
                         decoded = self._decode_block(self.payload(child), timestamp)
                         for block in decoded:
+                            timestamp_ns = block.timestamp_ms * scale_ns if block.lace_index == 0 else None
                             yield block.__class__(**{
                                 **block.__dict__,
                                 "timestamp_ms": round(block.timestamp_ms * scale_ns / 1_000_000),
-                                "timestamp_ns": block.timestamp_ms * scale_ns,
+                                # Une frame secondaire lacée n'a pas de timestamp
+                                # EBML propre. Conserver None évite d'inventer des
+                                # timestamps superposés ; le codec ou ffprobe peut
+                                # reconstruire sa cadence lors d'un rapport média.
+                                "timestamp_ns": timestamp_ns,
                             })
                     elif child.element_id == self.BLOCK_GROUP_ID and child.size is not None:
                         values: dict[bytes, list[bytes]] = {}
@@ -650,10 +655,11 @@ class MatroskaReader:
                             block_additions=(values.get(self.BLOCK_ADDITIONS_ID) or [b""])[0],
                         )
                         for block in decoded:
+                            timestamp_ns = block.timestamp_ms * scale_ns if block.lace_index == 0 else None
                             yield block.__class__(**{
                                 **block.__dict__,
                                 "timestamp_ms": round(block.timestamp_ms * scale_ns / 1_000_000),
-                                "timestamp_ns": block.timestamp_ms * scale_ns,
+                                "timestamp_ns": timestamp_ns,
                             })
 
     def simple_blocks(self) -> Iterator["MatroskaBlock"]:
