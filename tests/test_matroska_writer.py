@@ -137,3 +137,21 @@ def test_writer_preserves_xiph_lacing_as_one_block(tmp_path: Path) -> None:
     decoded = list(MatroskaReader(output).blocks())
     assert [item.payload for item in decoded] == [b"a", b"bb"]
     assert {item.lacing_mode for item in decoded} == {1}
+
+
+def test_block_group_without_reference_is_indexed_as_keyframe(tmp_path: Path) -> None:
+    source = source_track(1, 10, "V_MPEG4/ISO/AVC", 1)
+    output = tmp_path / "block-group-keyframe.mkv"
+    packet = MatroskaMuxPacket(
+        1,
+        MatroskaBlock(1, 0, 0, b"intra", duration_ms=40, is_keyframe=True),
+    )
+    MatroskaWriter().write(MatroskaMuxPlan(
+        output,
+        (MatroskaMuxTrack(Path("v.mkv"), source, 1, 20),),
+        (packet,),
+    ))
+    reader = MatroskaReader(output)
+    decoded = list(reader.blocks())
+    assert decoded[0].is_keyframe is True
+    assert reader.raw_top_level(CUES_ID)

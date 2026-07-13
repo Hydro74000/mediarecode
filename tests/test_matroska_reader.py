@@ -72,6 +72,7 @@ def test_reader_decodes_ebml_lacing_and_block_group(tmp_path: Path) -> None:
     assert grouped[0].timestamp_ms == 5
     assert grouped[0].duration_ms == 40
     assert grouped[0].references == (-1,)
+    assert grouped[0].is_keyframe is False
 
 
 def test_reader_resumes_after_unknown_size_clusters(tmp_path: Path) -> None:

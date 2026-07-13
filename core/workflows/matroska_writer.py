@@ -136,6 +136,11 @@ def _timestamp_ns(packet: MatroskaMuxPacket) -> int:
     return block.timestamp_ns if block.timestamp_ns is not None else block.timestamp_ms * 1_000_000
 
 
+def _is_keyframe(packet: MatroskaMuxPacket) -> bool:
+    value = packet.block.is_keyframe
+    return bool(packet.block.flags & 0x80) if value is None else value
+
+
 def _interleave_packets(packets: tuple[MatroskaMuxPacket, ...]) -> list[MatroskaMuxPacket]:
     """Interleave tracks without ever changing one track's decode order."""
     per_track: dict[int, list[MatroskaMuxPacket]] = {}
@@ -336,7 +341,7 @@ class MatroskaWriter:
                     relative_position = cluster_header_size + len(timestamp_element)
                     cue_points: list[tuple[int, int]] = []
                     for packet, packet_raw in zip(group, packet_elements):
-                        if packet.output_track_number == video_track and packet.block.flags & 0x80:
+                        if packet.output_track_number == video_track and _is_keyframe(packet):
                             key_time = _exact_ticks(_timestamp_ns(packet), plan.timestamp_scale_ns, label="CueTime")
                             cue_points.append((key_time, relative_position))
                         relative_position += len(packet_raw)

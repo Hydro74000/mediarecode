@@ -605,6 +605,7 @@ class MatroskaReader:
             references_ns=tuple(metadata.get("references_ns", ())),
             lacing_mode=(flags >> 1) & 0x03,
             encoded_frames_payload=encoded_frames_payload,
+            is_keyframe=bool(metadata.get("is_keyframe", flags & 0x80)),
         ) for index, frame in enumerate(frames))
 
     def blocks(self) -> Iterator["MatroskaBlock"]:
@@ -644,12 +645,14 @@ class MatroskaReader:
                             raise ValueError("BlockGroup sans Block")
                         uint = lambda key: int.from_bytes(values.get(key, [b""])[0], "big") if values.get(key) else 0
                         sint_values = lambda key: tuple(int.from_bytes(item, "big", signed=True) for item in values.get(key, []))
+                        references = sint_values(self.REFERENCE_BLOCK_ID)
                         decoded = self._decode_block(
                             raw_blocks[0], timestamp,
                             duration_ms=(round(uint(self.BLOCK_DURATION_ID) * scale_ns / 1_000_000) if uint(self.BLOCK_DURATION_ID) else None),
                             duration_ns=(uint(self.BLOCK_DURATION_ID) * scale_ns if uint(self.BLOCK_DURATION_ID) else None),
-                            references=tuple(round(value * scale_ns / 1_000_000) for value in sint_values(self.REFERENCE_BLOCK_ID)),
-                            references_ns=tuple(value * scale_ns for value in sint_values(self.REFERENCE_BLOCK_ID)),
+                            references=tuple(round(value * scale_ns / 1_000_000) for value in references),
+                            references_ns=tuple(value * scale_ns for value in references),
+                            is_keyframe=not references,
                             discard_padding_ns=(sint_values(self.DISCARD_PADDING_ID) or (0,))[0],
                             codec_state=(values.get(self.CODEC_STATE_ID) or [b""])[0],
                             block_additions=(values.get(self.BLOCK_ADDITIONS_ID) or [b""])[0],
@@ -700,6 +703,8 @@ class MatroskaBlock:
     references_ns: tuple[int, ...] = ()
     lacing_mode: int = 0
     encoded_frames_payload: bytes = b""
+    # SimpleBlock: bit keyframe. BlockGroup: absence de ReferenceBlock.
+    is_keyframe: bool | None = None
 
 
 @dataclass(frozen=True)
