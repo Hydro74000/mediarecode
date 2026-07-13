@@ -43,6 +43,7 @@ from core.workflows.remux_models import (
     TrackEntry,
     tracks_from_file_info,
 )
+from core.workflows.remux_backend import select_mux_backend
 from core.workflows.remux_sync import (
     bind_temp_cleanup as _bind_temp_cleanup_helper,
     decide_strict_interleave_with_prescan as _decide_strict_interleave_with_prescan_helper,
@@ -215,6 +216,22 @@ class RemuxWorkflow(QObject):
         self.log_message.emit("INFO", f"STEP {step_index} - {step_name}")
 
     def run(self, config: RemuxConfig) -> TaskSignals:
+        decision = select_mux_backend(config)
+        if decision.requested == "native" and decision.native_reasons:
+            raise RemuxError("\n".join(
+                f"Backend natif indisponible : {reason}." for reason in decision.native_reasons
+            ))
+        if decision.uses_fallback:
+            self.log_message.emit(
+                "WARN",
+                "Backend natif non applicable ; repli FFmpeg : " + "; ".join(decision.native_reasons),
+            )
+        elif decision.selected == "native":
+            # The native writer is wired in a dedicated runtime increment.  Do
+            # not silently claim native output until it owns the final write.
+            raise RemuxError(
+                "Le backend Matroska natif est sélectionné mais son exécuteur n'est pas encore disponible."
+            )
         return RemuxRuntimeRunner(
             RemuxRuntimeRunnerCallbacks(
                 ffmpeg_bin=self._ffmpeg,

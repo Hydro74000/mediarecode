@@ -52,6 +52,7 @@ class JobOverrides:
     output_all: bool = False
     no_cover: bool = False
     no_attach: bool = False
+    mux_backend: str | None = None
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "JobOverrides":
@@ -68,6 +69,7 @@ class JobOverrides:
             output_all=bool(getattr(args, "output_all", False)),
             no_cover=bool(getattr(args, "no_cover", False)),
             no_attach=bool(getattr(args, "no_attach", False)),
+            mux_backend=getattr(args, "mux_backend", None),
         )
 
 

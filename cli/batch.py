@@ -243,6 +243,7 @@ def run_batch(
     output_all: bool = False,
     no_cover: bool = False,
     no_attach: bool = False,
+    mux_backend: str | None = None,
 ) -> int:
     direct_mode = bool(cli_inputs or input_dirs or recursive or include_patterns or exclude_patterns)
     if batch_path and direct_mode:
@@ -292,6 +293,8 @@ def run_batch(
         job_index = total
         total += 1
         job = deep_merge(template, item)
+        if mux_backend:
+            job["mux_backend"] = mux_backend
         if str(template.get("kind") or "") == "exact-job":
             job["_relaxed_selectors"] = True
         apply_metadata_overrides(

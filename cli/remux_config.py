@@ -15,7 +15,9 @@ from core.media_info_fetcher import (
     extract_year_from_filename,
 )
 from core.version import APP_CONFIG_DIR_NAME, APP_ENV_PREFIX
-from core.workflows.remux_models import RemuxConfig, SourceInput, TrackEntry, clone_track_entry
+from core.workflows.remux_models import (
+    RemuxConfig, SourceInput, TrackEntry, clone_track_entry, normalize_mux_backend,
+)
 from core.profiles.selectors import (
     SelectorResolutionError,
     apply_track_spec,
@@ -478,6 +480,7 @@ def build_remux_config(
         tag_overrides=tag_overrides if isinstance(tag_overrides, dict) else None,
         tmdb_cover=tmdb_cover,
         allow_missing_output_dir=bool(job.get("_allow_missing_output_dir", False)),
+        mux_backend=normalize_mux_backend(str(job.get("mux_backend", config.remux_mux_backend))),
     )
 
 
@@ -488,6 +491,7 @@ def config_to_template(job: dict[str, Any], *, include_output: bool = False) -> 
         "chapters": job.get("chapters", {}),
         "tmdb": job.get("tmdb", False),
         "extra_attachments": job.get("extra_attachments", []),
+        "mux_backend": job.get("mux_backend", "auto"),
         "tag_overrides": job.get("tag_overrides", None),
     }
     if include_output and job.get("output"):

@@ -8,6 +8,7 @@ from typing import Callable
 from core.bluray import validate_bluray_source
 from core.workflows.common.metadata import STREAM_SPEC_BY_TRACK_TYPE
 from core.workflows.remux_models import RemuxConfig, TrackEntry
+from core.workflows.remux_backend import select_mux_backend
 
 
 TrackOrderItem = tuple[int, int] | tuple[int, int, str]
@@ -22,6 +23,13 @@ def validate_remux_config(
     dir_writable: DirWritable,
 ) -> list[str]:
     errors: list[str] = []
+
+    try:
+        decision = select_mux_backend(config)
+    except ValueError as exc:
+        return [str(exc)]
+    if decision.requested == "native" and decision.native_reasons:
+        errors.extend(f"Backend natif indisponible : {reason}." for reason in decision.native_reasons)
 
     if not config.sources:
         errors.append("Aucun fichier source.")

@@ -808,6 +808,13 @@ INI_FIELD_GROUPS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "section": "remux",
+        "title": "Remux Matroska",
+        "fields": (
+            {"key": "mux_backend", "attr": "remux_mux_backend", "kind": "choice", "label": "Backend de muxage", "description": "Auto privilégie le muxeur Matroska natif et journalise un repli FFmpeg lorsque nécessaire.", "options": (("auto", "Auto"), ("native", "Natif Matroska"), ("ffmpeg", "FFmpeg"))},
+        ),
+    },
+    {
         "section": "sync",
         "title": "Synchronisation",
         "fields": (
@@ -1093,6 +1100,8 @@ class AppConfig:
             "sync/advanced_audio_rewrite_enabled",
             False,
         )
+        raw_mux_backend = self._resolve_text("remux", "mux_backend", "remux/mux_backend", "auto").lower()
+        self.remux_mux_backend = raw_mux_backend if raw_mux_backend in {"auto", "native", "ffmpeg"} else "auto"
 
         self.language = _normalize_language_code(
             self._resolve_text("ui", "language", "ui/language", _default_language_code())
@@ -1194,6 +1203,7 @@ class AppConfig:
             "sync/advanced_audio_rewrite_enabled",
             "true" if self.sync_advanced_audio_rewrite_enabled else "false",
         )
+        s.setValue("remux/mux_backend", self.remux_mux_backend)
 
         s.setValue("ui/language", self.language)
         s.setValue("ui/log_max_lines", self.log_max_lines)
@@ -1374,6 +1384,7 @@ class AppConfig:
                 "rewrite_enabled": self.sync_rewrite_enabled,
                 "advanced_audio_rewrite_enabled": self.sync_advanced_audio_rewrite_enabled,
             },
+            "remux": {"mux_backend": self.remux_mux_backend},
             "ui": {
                 "language": self.language,
                 "log_max_lines": self.log_max_lines,

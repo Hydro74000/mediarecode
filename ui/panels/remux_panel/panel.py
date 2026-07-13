@@ -729,6 +729,7 @@ class RemuxPanel(QWidget):
             track_order=track_order,
             keep_chapters=True,
             work_dir=self._config.work_dir,
+            mux_backend=self._config.remux_mux_backend,
         )
 
     def _export_exact_json(self) -> None:

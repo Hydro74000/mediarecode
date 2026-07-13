@@ -37,6 +37,9 @@ def _metadata_job_from_args(args: argparse.Namespace) -> dict:
         job["output_template"] = output_template
     if bool(getattr(args, "output_all", False)):
         job["output_all"] = True
+    mux_backend = getattr(args, "mux_backend", None)
+    if mux_backend:
+        job["mux_backend"] = mux_backend
     apply_metadata_overrides(
         job,
         auto_tmdb=bool(getattr(args, "auto_tmdb", False)),
@@ -45,6 +48,7 @@ def _metadata_job_from_args(args: argparse.Namespace) -> dict:
         tmdb_apikey=str(getattr(args, "tmdb_apikey", "") or ""),
         no_cover=bool(getattr(args, "no_cover", False)),
         no_attach=bool(getattr(args, "no_attach", False)),
+        mux_backend=getattr(args, "mux_backend", None),
     )
     return job
 

@@ -127,6 +127,7 @@ def build_cli_json_schema() -> dict[str, Any]:
             "output_template": {"type": "string"},
             "output_all": {"type": "boolean"},
             "work_dir": {"type": "string"},
+            "mux_backend": {"enum": ["auto", "native", "ffmpeg"]},
             "file_title": {"type": "string"},
             "variables": _variables_schema(),
             "tracks": {"type": "array", "items": {"$ref": "#/$defs/track_edit"}},

@@ -16,6 +16,10 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--work-dir", help="Répertoire de travail override.")
     parser.add_argument("--threads", type=int, help="Nombre de threads ffmpeg.")
     parser.add_argument(
+        "--mux-backend", choices=("auto", "native", "ffmpeg"), default=None,
+        help="Backend MKV : auto (défaut), native ou ffmpeg. Prioritaire sur le job.",
+    )
+    parser.add_argument(
         "--output-template",
         dest="output_template",
         default="",
