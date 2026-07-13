@@ -82,6 +82,10 @@ FLAG_HEARING_IMPAIRED_ID = _hex_to_bytes("0x55AB")
 FLAG_VISUAL_IMPAIRED_ID = _hex_to_bytes("0x55AC")
 FLAG_ORIGINAL_ID = _hex_to_bytes("0x55AE")
 FLAG_COMMENTARY_ID = _hex_to_bytes("0x55AF")
+CONTENT_ENCODINGS_ID = _hex_to_bytes("0x6D80")
+CONTENT_ENCODING_ID = _hex_to_bytes("0x6240")
+CONTENT_COMPRESSION_ID = _hex_to_bytes("0x5034")
+CONTENT_ENCRYPTION_ID = _hex_to_bytes("0x5035")
 
 # Video
 VIDEO_ID = _hex_to_bytes("0xE0")
@@ -148,6 +152,10 @@ CHAP_LANGUAGE_ID = _hex_to_bytes("0x437C")
 TAGS_ID = _hex_to_bytes("0x1254C367")
 TAG_ID = _hex_to_bytes("0x7373")
 TARGETS_ID = _hex_to_bytes("0x63C0")
+TAG_TRACK_UID_ID = _hex_to_bytes("0x63C5")
+TAG_EDITION_UID_ID = _hex_to_bytes("0x63C9")
+TAG_CHAPTER_UID_ID = _hex_to_bytes("0x63C4")
+TAG_ATTACHMENT_UID_ID = _hex_to_bytes("0x63C6")
 SIMPLE_TAG_ID = _hex_to_bytes("0x67C8")
 TAG_NAME_ID = _hex_to_bytes("0x45A3")
 TAG_STRING_ID = _hex_to_bytes("0x4487")
@@ -185,6 +193,7 @@ __all__ = [
     "CODEC_ID_ID",
     "CODEC_PRIVATE_ID",
     "CODEC_STATE_ID",
+    "CONTENT_ENCODINGS_ID", "CONTENT_ENCODING_ID", "CONTENT_COMPRESSION_ID", "CONTENT_ENCRYPTION_ID",
     "CRC32_ID",
     "CUES_ID",
     "CUE_CLUSTER_POSITION_ID",
@@ -235,6 +244,7 @@ __all__ = [
     "TIMESTAMP_ID",
     "TIMESTAMP_SCALE_ID",
     "TAGS_ID", "TAG_ID", "TAG_NAME_ID", "TAG_STRING_ID", "TARGETS_ID", "SIMPLE_TAG_ID", "TITLE_ID",
+    "TAG_TRACK_UID_ID", "TAG_EDITION_UID_ID", "TAG_CHAPTER_UID_ID", "TAG_ATTACHMENT_UID_ID",
     "TRACKS_ID",
     "TRACK_ENTRY_ID",
     "TRACK_NUMBER_ID",

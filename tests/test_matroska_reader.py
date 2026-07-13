@@ -70,3 +70,14 @@ def test_reader_decodes_ebml_lacing_and_block_group(tmp_path: Path) -> None:
     assert grouped[0].timestamp_ms == 5
     assert grouped[0].duration_ms == 40
     assert grouped[0].references == (-1,)
+
+
+def test_reader_resumes_after_unknown_size_clusters(tmp_path: Path) -> None:
+    cluster, timestamp, block = bytes.fromhex("1f43b675"), bytes.fromhex("e7"), bytes.fromhex("a3")
+    first = cluster + b"\xff" + element(timestamp, b"\x00") + element(block, b"\x81\x00\x00\x80a")
+    second = cluster + b"\xff" + element(timestamp, b"\x0a") + element(block, b"\x81\x00\x00\x80b")
+    path = tmp_path / "unknown-clusters.mkv"
+    path.write_bytes(element(EBML_HEADER_ID, b"") + SEGMENT_ID + b"\xff" + first + second)
+    reader = MatroskaReader(path)
+    assert [item.element_id for item in reader.top_level()] == [cluster, cluster]
+    assert [(item.timestamp_ms, item.payload) for item in reader.blocks()] == [(0, b"a"), (10, b"b")]

@@ -111,3 +111,30 @@ def test_remux_rejects_non_mkv_output(tmp_path: Path) -> None:
 
     errors = wf.validate(cfg)
     assert any("mkv" in e.lower() for e in errors), f"Erreur mkv manquante : {errors}"
+
+
+def test_native_backend_materializes_audio_variant_before_final_mux(tmp_path: Path) -> None:
+    """Le MKV final doit être écrit nativement même lorsqu'une piste audio est encodée."""
+    src = tmp_path / "src.mkv"
+    make_av_container(src, vcodec="libx264", acodec="aac")
+    info = FileInspector().inspect(src)
+    tracks = tracks_from_file_info(info, file_id="src-0")
+    audio = next(track for track in tracks if track.track_type == "audio")
+    audio.codec = "AC3"
+    audio.display_info = "stereo · 192 kb/s"
+
+    out = tmp_path / "variant.mkv"
+    cfg = RemuxConfig(
+        sources=[SourceInput(path=src, file_index=0, tracks=tracks)],
+        output=out,
+        track_order=[(0, track.mkv_tid, track.entry_id) for track in tracks],
+        keep_chapters=False,
+        mux_backend="native",
+    )
+    state = wait_task(
+        RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe").run(cfg),
+        timeout=60.0,
+    )
+    assert state["failed"] is None, state["failed"]
+    probe = ffprobe_json(out)
+    assert [stream.get("codec_name") for stream in streams_of_type(probe, "audio")] == ["ac3"]

@@ -15,6 +15,26 @@ def deterministic_uid(*parts: object) -> int:
     return value or 1
 
 
+def deterministic_uid128(*parts: object) -> int:
+    raw = "\0".join(str(part) for part in parts).encode("utf-8")
+    value = int.from_bytes(hashlib.sha256(raw).digest()[:16], "big")
+    return value or 1
+
+
+def deterministic_source_identity(path: Path) -> str:
+    """Stable, bounded-cost identity independent from volatile job entry IDs."""
+    source = Path(path)
+    digest = hashlib.sha256()
+    stat = source.stat()
+    digest.update(str(stat.st_size).encode("ascii"))
+    with source.open("rb") as stream:
+        digest.update(stream.read(1024 * 1024))
+        if stat.st_size > 1024 * 1024:
+            stream.seek(max(0, stat.st_size - 1024 * 1024))
+            digest.update(stream.read(1024 * 1024))
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class MatroskaMuxTrack:
     source: Path
@@ -46,10 +66,12 @@ class MatroskaMuxPlan:
     packets: tuple[MatroskaMuxPacket, ...]
     timestamp_scale_ns: int = 1_000_000
     duration_ms: int = 0
+    duration_ns: int = 0
     segment_uid: int = 0
     opaque_top_level: tuple[bytes, ...] = field(default_factory=tuple)
     muxing_app: str = "Muxiveo"
     writing_app: str = "Muxiveo"
+    title: str = ""
 
     def __post_init__(self) -> None:
         if not self.tracks:
@@ -58,7 +80,11 @@ class MatroskaMuxPlan:
         if len(numbers) != len(set(numbers)) or any(number <= 0 for number in numbers):
             raise ValueError("Numéros de piste de sortie invalides ou dupliqués")
         if self.segment_uid == 0:
-            object.__setattr__(self, "segment_uid", deterministic_uid(self.output, *numbers))
+            track_identity = tuple((track.output_uid, track.output_number) for track in self.tracks)
+            object.__setattr__(self, "segment_uid", deterministic_uid128("segment", track_identity, self.title))
 
 
-__all__ = ["MatroskaMuxPacket", "MatroskaMuxPlan", "MatroskaMuxTrack", "deterministic_uid"]
+__all__ = [
+    "MatroskaMuxPacket", "MatroskaMuxPlan", "MatroskaMuxTrack",
+    "deterministic_source_identity", "deterministic_uid", "deterministic_uid128",
+]

@@ -3,6 +3,22 @@
     "fra": "Réglages",
     "eng": "Settings"
   },
+  "Remux Matroska": {
+    "fra": "Remux Matroska",
+    "eng": "Matroska remux"
+  },
+  "Backend de muxage": {
+    "fra": "Backend de muxage",
+    "eng": "Muxing backend"
+  },
+  "Natif Matroska": {
+    "fra": "Natif Matroska",
+    "eng": "Native Matroska"
+  },
+  "Auto privilégie le muxeur Matroska natif et journalise un repli FFmpeg lorsque nécessaire.": {
+    "fra": "Auto privilégie le muxeur Matroska natif et journalise un repli FFmpeg lorsque nécessaire.",
+    "eng": "Auto prefers the native Matroska muxer and logs an FFmpeg fallback when required."
+  },
   "Modifiez toutes les valeurs persistées dans config.ini. Les changements de langue sont appliqués aux textes maîtrisés par l'application ; un redémarrage reste conseillé pour repartir sur un état propre.": {
     "fra": "Modifiez toutes les valeurs persistées dans config.ini. Les changements de langue sont appliqués aux textes maîtrisés par l'application ; un redémarrage reste conseillé pour repartir sur un état propre.",
     "eng": "Edit every value stored in config.ini. Language changes are applied to UI text and internal messages controlled by the application; restarting is still recommended to start from a clean state."

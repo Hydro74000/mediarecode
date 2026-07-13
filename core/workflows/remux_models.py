@@ -198,6 +198,8 @@ class SourceInput:
     #: de cibler -map_chapters sur la bonne source quand keep_chapters=True et
     #: que la première source n'en contient pas.
     has_chapters:            bool                   = False
+    #: Identité stable de la source d'origine, conservée lors des matérialisations temporaires.
+    origin_identity:         str                    = field(default="", repr=False)
 
 
 # =============================================================================

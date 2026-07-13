@@ -43,7 +43,10 @@ from core.workflows.remux_models import (
     TrackEntry,
     tracks_from_file_info,
 )
-from core.workflows.remux_backend import run_native_remux, select_mux_backend
+from core.workflows.remux_backend import (
+    FfmpegRemuxBackend, NativeMatroskaBackend, mux_backend_report,
+    select_mux_backend,
+)
 from core.workflows.remux_sync import (
     bind_temp_cleanup as _bind_temp_cleanup_helper,
     decide_strict_interleave_with_prescan as _decide_strict_interleave_with_prescan_helper,
@@ -78,6 +81,7 @@ class RemuxWorkflow(QObject):
     """
 
     log_message = Signal(str, str)
+    backend_event = Signal(object)
 
     def __init__(
         self,
@@ -203,7 +207,37 @@ class RemuxWorkflow(QObject):
         )
 
     def preview_command(self, config: RemuxConfig) -> str:
-        return _preview_remux_command_helper(config, build_command=self.build_command)
+        reference = _preview_remux_command_helper(config, build_command=self.build_command)
+        report = self.backend_report(config)
+        if report["selected_backend"] == "ffmpeg":
+            return reference
+        preparations = report.get("preparation_commands") or []
+        prep_text = "\n".join(" ".join(map(str, command)) for command in preparations)
+        sections = [
+            f"# Backend: native Matroska (plan v{report['plan_version']})",
+            prep_text,
+            f"# Écriture interne Matroska -> {config.output}",
+            "# Référence FFmpeg compatible v1:",
+            reference,
+        ]
+        return "\n".join(section for section in sections if section)
+
+    def backend_report(self, config: RemuxConfig) -> dict[str, object]:
+        return mux_backend_report(config, ffmpeg_bin=self._ffmpeg)
+
+    def execution_preview(self, config: RemuxConfig) -> dict[str, object]:
+        report = self.backend_report(config)
+        if report["selected_backend"] == "ffmpeg":
+            return {
+                **report,
+                "action": "external_ffmpeg",
+                "command": self.build_command(config),
+            }
+        return {
+            **report,
+            "action": "internal_matroska_write",
+            "output": str(config.output),
+        }
 
     # ------------------------------------------------------------------
     # Exécution
@@ -217,6 +251,8 @@ class RemuxWorkflow(QObject):
 
     def run(self, config: RemuxConfig) -> TaskSignals:
         decision = select_mux_backend(config)
+        report = self.backend_report(config)
+        self.backend_event.emit(report)
         self.log_message.emit(
             "INFO",
             f"MUX_BACKEND requested={decision.requested} selected={decision.selected} plan_version=1",
@@ -230,14 +266,20 @@ class RemuxWorkflow(QObject):
                 "WARN",
                 "Backend natif non applicable ; repli FFmpeg : " + "; ".join(decision.native_reasons),
             )
-        elif decision.selected == "native":
-            return run_native_remux(
-                config,
-                log=self.log_message.emit,
-                log_step=self._log_step,
-                ffmpeg_bin=self._ffmpeg,
-                finalize=self._write_nfo,
-            )
+        native_backend = NativeMatroskaBackend(
+            log=self.log_message.emit, log_step=self._log_step,
+            ffmpeg_bin=self._ffmpeg, ffprobe_bin=self._ffprobe,
+            finalize=self._write_nfo,
+        )
+        ffmpeg_backend = FfmpegRemuxBackend(
+            execute_callback=self._run_ffmpeg,
+            preview_callback=lambda item: _preview_remux_command_helper(item, build_command=self.build_command),
+            command_callback=self.build_command,
+        )
+        backend = native_backend if decision.selected == "native" else ffmpeg_backend
+        return backend.execute(config)
+
+    def _run_ffmpeg(self, config: RemuxConfig) -> TaskSignals:
         return RemuxRuntimeRunner(
             RemuxRuntimeRunnerCallbacks(
                 ffmpeg_bin=self._ffmpeg,

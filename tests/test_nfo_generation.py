@@ -129,11 +129,11 @@ class TestAppConfigGenerateNfo:
         keys = [f["key"] for f in metadata_group["fields"]]
         assert "generate_nfo" in keys
 
-    def test_ini_field_groups_no_remux_section(self):
-        """La section 'remux' a été supprimée de INI_FIELD_GROUPS."""
+    def test_ini_field_groups_includes_mux_backend(self):
+        """La section remux expose le backend Matroska persistant."""
         from core.config import INI_FIELD_GROUPS
-        sections = [g["section"] for g in INI_FIELD_GROUPS]
-        assert "remux" not in sections
+        remux_group = next(g for g in INI_FIELD_GROUPS if g["section"] == "remux")
+        assert [field["key"] for field in remux_group["fields"]] == ["mux_backend"]
 
 
 # ===========================================================================

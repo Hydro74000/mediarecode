@@ -73,6 +73,7 @@ from core.workflows.matroska_element_ids import (
     CUES_ID,
     CUE_CLUSTER_POSITION_ID,
     CUE_POINT_ID,
+    CUE_RELATIVE_POSITION_ID,
     CUE_TIME_ID,
     CUE_TRACK_ID,
     CUE_TRACK_POSITIONS_ID,
@@ -391,10 +392,11 @@ def _build_cues(clusters: list[_ClusterRecord], track_number: int) -> bytes:
     """
     points: list[bytes] = []
     for cluster in clusters:
-        for frame_ms, _rel in cluster.cue_points:
+        for frame_ms, relative_position in cluster.cue_points:
             cue_track_pos = element(CUE_TRACK_POSITIONS_ID, b"".join([
                 uint_element(CUE_TRACK_ID, track_number),
                 uint_element(CUE_CLUSTER_POSITION_ID, cluster.relative_offset),
+                uint_element(CUE_RELATIVE_POSITION_ID, relative_position),
             ]))
             point = element(CUE_POINT_ID, b"".join([
                 uint_element(CUE_TIME_ID, frame_ms),
@@ -562,7 +564,14 @@ class MatroskaNativeMuxer:
         track_uid: int,
         language: str,
     ) -> MatroskaNativeMuxResult:
-        track_entry = _build_video_track_entry(
+        # Compatibility façade: build the historical HEVC TrackEntry, then
+        # delegate the document to the generic deterministic writer.
+        from io import BytesIO
+        from core.workflows.matroska_mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack
+        from core.workflows.matroska_reader import MatroskaBlock, MatroskaReader, MatroskaTrack, read_element
+        from core.workflows.matroska_writer import MatroskaWriter
+
+        track_entry_raw = _build_video_track_entry(
             track_number=track_number,
             track_uid=track_uid,
             codec_private=codec_private,
@@ -571,71 +580,50 @@ class MatroskaNativeMuxer:
             dovi_record=dovi_record,
             language=language,
         )
-        tracks = _build_tracks(track_entry)
-        info = _build_info(
-            duration_ms=float(pts_seq.total_duration_ms),
-            muxing_app=self._muxing_app,
-            writing_app=self._writing_app,
+        stream = BytesIO(track_entry_raw)
+        entry_element = read_element(stream, limit=len(track_entry_raw))
+        if entry_element is None or entry_element.size is None:
+            raise RuntimeError("TrackEntry HEVC natif invalide")
+        raw_entry = track_entry_raw[entry_element.payload_offset:entry_element.end]
+        source_track = MatroskaTrack(
+            number=track_number, uid=track_uid, track_type=TRACK_TYPE_VIDEO,
+            codec_id="V_MPEGH/ISO/HEVC", codec_private=codec_private,
+            language_bcp47="", language=language, name="", raw_entry=raw_entry,
         )
-
-        # On écrit le Segment avec une taille "unknown" (8 octets de FF) :
-        # de nombreux démuxeurs (ffmpeg, mpv, vlc) le supportent et c'est
-        # plus simple qu'une réécriture de la taille à la fin.
-        ebml_header = _build_ebml_header()
-        segment_id_with_unknown_size = SEGMENT_ID + encode_unknown_size_marker(length=8)
-
-        with output.open("wb") as fh:
-            fh.write(ebml_header)
-            segment_start = fh.tell()
-            fh.write(segment_id_with_unknown_size)
-            payload_start = fh.tell()  # début du payload Segment
-
-            # Réserve l'emplacement du SeekHead (rempli en fin).
-            seek_head_offset_in_segment = fh.tell() - payload_start
-            fh.write(b"\x00" * _SEEK_HEAD_RESERVED_BYTES)
-
-            # Info — sa taille est connue à l'avance.
-            info_offset_in_segment = fh.tell() - payload_start
-            fh.write(info)
-
-            # Tracks
-            tracks_offset_in_segment = fh.tell() - payload_start
-            fh.write(tracks)
-
-            # Clusters + collecte des Cues
-            clusters: list[_ClusterRecord] = []
-            self._write_clusters(
-                fh=fh,
-                payload_start=payload_start,
-                access_units=access_units,
-                pts_seq=pts_seq,
-                track_number=track_number,
-                clusters=clusters,
+        mux_track = MatroskaMuxTrack(
+            source=output, source_track=source_track,
+            output_number=track_number, output_uid=track_uid,
+            language=language, flag_default=True,
+        )
+        packets = tuple(
+            MatroskaMuxPacket(
+                track_number,
+                MatroskaBlock(
+                    track_number=track_number,
+                    timestamp_ms=pts,
+                    flags=SIMPLE_BLOCK_FLAG_KEYFRAME if access_unit.is_keyframe else 0,
+                    payload=access_unit.payload,
+                    duration_ms=duration,
+                    timestamp_ns=pts * 1_000_000,
+                    duration_ns=duration * 1_000_000,
+                ),
             )
-
-            # Cues
-            cues_offset_in_segment = fh.tell() - payload_start
-            cues = _build_cues(clusters, track_number=track_number)
-            fh.write(cues)
-
-            # Réécrit le SeekHead avec les vrais offsets relatifs.
-            seek_entries: list[tuple[bytes, int]] = [
-                (INFO_ID, info_offset_in_segment),
-                (TRACKS_ID, tracks_offset_in_segment),
-                (CUES_ID, cues_offset_in_segment),
-            ]
-            seek_head_bytes = _build_seek_head(seek_entries, total_size=_SEEK_HEAD_RESERVED_BYTES)
-            fh.seek(payload_start + seek_head_offset_in_segment)
-            fh.write(seek_head_bytes)
-
-            fh.flush()
-
-        _ = segment_start  # peut servir au debug
+            for access_unit, pts, duration in zip(access_units, pts_seq.pts_ms, pts_seq.durations_ms)
+        )
+        MatroskaWriter().write(MatroskaMuxPlan(
+            output=output, tracks=(mux_track,), packets=packets,
+            duration_ms=pts_seq.total_duration_ms,
+            duration_ns=pts_seq.total_duration_ms * 1_000_000,
+            muxing_app=self._muxing_app, writing_app=self._writing_app,
+        ))
+        cluster_count = sum(
+            item.element_id == CLUSTER_ID for item in MatroskaReader(output).top_level()
+        )
         return MatroskaNativeMuxResult(
             output_path=output,
             track_number=track_number,
             frames_written=len(access_units),
-            cluster_count=len(clusters),
+            cluster_count=cluster_count,
             duration_ms=pts_seq.total_duration_ms,
         )
 

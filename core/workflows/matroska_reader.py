@@ -7,8 +7,15 @@ raw payloads so the native remux planner can preserve packet bytes verbatim.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO, Iterator
+
+
+_CONTENT_ENCODINGS_ID = bytes.fromhex("6d80")
+_CONTENT_ENCODING_ID = bytes.fromhex("6240")
+_CONTENT_COMPRESSION_ID = bytes.fromhex("5034")
+_CONTENT_ENCRYPTION_ID = bytes.fromhex("5035")
 
 
 @dataclass(frozen=True)
@@ -137,6 +144,17 @@ def iter_children(fh: BinaryIO, parent: EbmlElement, *, file_size: int) -> Itera
         fh.seek(child_end)
 
 
+def payload_children(payload: bytes) -> Iterator[tuple[bytes, bytes]]:
+    stream = BytesIO(payload)
+    while stream.tell() < len(payload):
+        child = read_element(stream, limit=len(payload))
+        if child is None or child.size is None:
+            raise ValueError("Conteneur EBML invalide")
+        stream.seek(child.payload_offset)
+        yield child.element_id, _read_exact(stream, child.size)
+        stream.seek(child.end)
+
+
 class MatroskaReader:
     """Read top-level Matroska elements without loading media payloads."""
 
@@ -164,6 +182,7 @@ class MatroskaReader:
     INFO_ID = bytes.fromhex("1549a966")
     MUXING_APP_ID = bytes.fromhex("4d80")
     WRITING_APP_ID = bytes.fromhex("5741")
+    TITLE_ID = bytes.fromhex("7ba9")
     TIMESTAMP_SCALE_ID = bytes.fromhex("2ad7b1")
     ATTACHMENTS_ID = bytes.fromhex("1941a469")
     ATTACHED_FILE_ID = bytes.fromhex("61a7")
@@ -172,6 +191,28 @@ class MatroskaReader:
     FILE_MEDIA_TYPE_ID = bytes.fromhex("4660")
     FILE_DATA_ID = bytes.fromhex("465c")
     FILE_UID_ID = bytes.fromhex("46ae")
+    CHAPTERS_ID = bytes.fromhex("1043a770")
+    EDITION_ENTRY_ID = bytes.fromhex("45b9")
+    EDITION_UID_ID = bytes.fromhex("45bc")
+    CHAPTER_ATOM_ID = bytes.fromhex("b6")
+    CHAPTER_UID_ID = bytes.fromhex("73c4")
+    CHAPTER_TIME_START_ID = bytes.fromhex("91")
+    CHAPTER_TIME_END_ID = bytes.fromhex("92")
+    CHAPTER_DISPLAY_ID = bytes.fromhex("80")
+    CHAP_STRING_ID = bytes.fromhex("85")
+    CHAP_LANGUAGE_ID = bytes.fromhex("437c")
+    TAGS_ID = bytes.fromhex("1254c367")
+    TAG_ID = bytes.fromhex("7373")
+    TARGETS_ID = bytes.fromhex("63c0")
+    SIMPLE_TAG_ID = bytes.fromhex("67c8")
+    TAG_NAME_ID = bytes.fromhex("45a3")
+    TAG_STRING_ID = bytes.fromhex("4487")
+    LEVEL1_IDS = frozenset({
+        bytes.fromhex(value) for value in (
+            "114d9b74", "1549a966", "1654ae6b", "1f43b675",
+            "1c53bb6b", "1941a469", "1043a770", "1254c367",
+        )
+    })
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -192,7 +233,39 @@ class MatroskaReader:
         with self.path.open("rb") as fh:
             segment = self.segment()
             fh.seek(segment.payload_offset)
-            yield from iter_children(fh, segment, file_size=size)
+            segment_end = segment.end if segment.end is not None else size
+            while fh.tell() < segment_end:
+                item = read_element(fh, limit=segment_end)
+                if item is None:
+                    return
+                if item.size is not None:
+                    yield item
+                    fh.seek(item.end)
+                    continue
+                if item.element_id != self.CLUSTER_ID:
+                    yield item
+                    return
+                # Unknown-size Clusters end at the next level-1 element.
+                cursor = item.payload_offset
+                boundary = segment_end
+                fh.seek(cursor)
+                while fh.tell() < segment_end:
+                    child_offset = fh.tell()
+                    child = read_element(fh, limit=segment_end)
+                    if child is None:
+                        break
+                    if child.element_id in self.LEVEL1_IDS:
+                        boundary = child_offset
+                        break
+                    if child.end is None:
+                        boundary = segment_end
+                        break
+                    fh.seek(child.end)
+                yield EbmlElement(
+                    item.element_id, item.offset, item.payload_offset,
+                    boundary - item.payload_offset, item.header_size,
+                )
+                fh.seek(boundary)
 
     def payload(self, element: EbmlElement) -> bytes:
         if element.size is None:
@@ -235,6 +308,78 @@ class MatroskaReader:
                 ))
         return result
 
+    def chapter_editions(self) -> tuple["MatroskaEdition", ...]:
+        editions: list[MatroskaEdition] = []
+
+        def parse_atom(payload: bytes) -> MatroskaChapter:
+            uid = start = 0
+            end: int | None = None
+            displays: list[tuple[str, str]] = []
+            children: list[MatroskaChapter] = []
+            for element_id, value in payload_children(payload):
+                if element_id == self.CHAPTER_UID_ID:
+                    uid = int.from_bytes(value, "big")
+                elif element_id == self.CHAPTER_TIME_START_ID:
+                    start = int.from_bytes(value, "big")
+                elif element_id == self.CHAPTER_TIME_END_ID:
+                    end = int.from_bytes(value, "big")
+                elif element_id == self.CHAPTER_DISPLAY_ID:
+                    name = ""
+                    language = "und"
+                    for display_id, display_value in payload_children(value):
+                        if display_id == self.CHAP_STRING_ID:
+                            name = display_value.decode("utf-8", "replace").rstrip("\0")
+                        elif display_id == self.CHAP_LANGUAGE_ID:
+                            language = display_value.decode("ascii", "replace").rstrip("\0")
+                    displays.append((name, language))
+                elif element_id == self.CHAPTER_ATOM_ID:
+                    children.append(parse_atom(value))
+            return MatroskaChapter(uid, start, end, tuple(displays), tuple(children))
+
+        for raw in self.raw_top_level(self.CHAPTERS_ID):
+            for element_id, value in payload_children(self._raw_payload(raw)):
+                if element_id != self.EDITION_ENTRY_ID:
+                    continue
+                uid = 0
+                chapters: list[MatroskaChapter] = []
+                for edition_id, edition_value in payload_children(value):
+                    if edition_id == self.EDITION_UID_ID:
+                        uid = int.from_bytes(edition_value, "big")
+                    elif edition_id == self.CHAPTER_ATOM_ID:
+                        chapters.append(parse_atom(edition_value))
+                editions.append(MatroskaEdition(uid, tuple(chapters)))
+        return tuple(editions)
+
+    @staticmethod
+    def _raw_payload(raw: bytes) -> bytes:
+        stream = BytesIO(raw)
+        element = read_element(stream, limit=len(raw))
+        if element is None or element.size is None:
+            raise ValueError("Élément EBML brut invalide")
+        return raw[element.payload_offset:element.end]
+
+    def tags(self) -> tuple["MatroskaTag", ...]:
+        tags: list[MatroskaTag] = []
+        for raw in self.raw_top_level(self.TAGS_ID):
+            for element_id, tag_payload in payload_children(self._raw_payload(raw)):
+                if element_id != self.TAG_ID:
+                    continue
+                targets: dict[str, int] = {}
+                values: list[tuple[str, str]] = []
+                for tag_id, value in payload_children(tag_payload):
+                    if tag_id == self.TARGETS_ID:
+                        targets.update({child_id.hex(): int.from_bytes(child_value, "big") for child_id, child_value in payload_children(value)})
+                    elif tag_id == self.SIMPLE_TAG_ID:
+                        name = text = ""
+                        for simple_id, simple_value in payload_children(value):
+                            if simple_id == self.TAG_NAME_ID:
+                                name = simple_value.decode("utf-8", "replace").rstrip("\0")
+                            elif simple_id == self.TAG_STRING_ID:
+                                text = simple_value.decode("utf-8", "replace").rstrip("\0")
+                        values.append((name, text))
+                tags.append(MatroskaTag(targets, tuple(values)))
+        return tuple(tags)
+
     def tracks(self) -> list["MatroskaTrack"]:
         """Return core TrackEntry metadata while retaining its raw EBML body."""
         tracks_element = next((item for item in self.top_level() if item.element_id == self.TRACKS_ID), None)
@@ -269,6 +414,46 @@ class MatroskaReader:
                 ))
         return out
 
+    def content_encoding_capabilities(self) -> tuple[bool, bool]:
+        """Return ``(uses_compression, uses_encryption)`` for all tracks."""
+        compression = False
+        encryption = False
+        container_ids = {_CONTENT_ENCODINGS_ID, _CONTENT_ENCODING_ID}
+
+        def inspect(payload: bytes) -> None:
+            nonlocal compression, encryption
+            from io import BytesIO
+
+            stream = BytesIO(payload)
+            while stream.tell() < len(payload):
+                child = read_element(stream, limit=len(payload))
+                if child is None or child.size is None:
+                    raise ValueError("ContentEncodings EBML invalide")
+                stream.seek(child.payload_offset)
+                child_payload = _read_exact(stream, child.size)
+                if child.element_id == _CONTENT_COMPRESSION_ID:
+                    compression = True
+                elif child.element_id == _CONTENT_ENCRYPTION_ID:
+                    encryption = True
+                elif child.element_id in container_ids:
+                    inspect(child_payload)
+                stream.seek(child.end)
+
+        for track in self.tracks():
+            stream_payload = track.raw_entry
+            from io import BytesIO
+
+            stream = BytesIO(stream_payload)
+            while stream.tell() < len(stream_payload):
+                child = read_element(stream, limit=len(stream_payload))
+                if child is None or child.size is None:
+                    raise ValueError("TrackEntry EBML invalide")
+                if child.element_id == _CONTENT_ENCODINGS_ID:
+                    stream.seek(child.payload_offset)
+                    inspect(_read_exact(stream, child.size))
+                stream.seek(child.end)
+        return compression, encryption
+
     def segment_info_apps(self) -> tuple[str, str]:
         info = next((item for item in self.top_level() if item.element_id == self.INFO_ID), None)
         if info is None:
@@ -281,6 +466,18 @@ class MatroskaReader:
                 if child.element_id in {self.MUXING_APP_ID, self.WRITING_APP_ID} and child.size is not None:
                     values[child.element_id] = self.payload(child).decode("utf-8", "replace").rstrip("\0")
         return values.get(self.MUXING_APP_ID, ""), values.get(self.WRITING_APP_ID, "")
+
+    def segment_title(self) -> str:
+        info = next((item for item in self.top_level() if item.element_id == self.INFO_ID), None)
+        if info is None:
+            return ""
+        size = self.path.stat().st_size
+        with self.path.open("rb") as fh:
+            fh.seek(info.payload_offset)
+            for child in iter_children(fh, info, file_size=size):
+                if child.element_id == self.TITLE_ID and child.size is not None:
+                    return self.payload(child).decode("utf-8", "replace").rstrip("\0")
+        return ""
 
     def timestamp_scale_ns(self) -> int:
         info = next((item for item in self.top_level() if item.element_id == self.INFO_ID), None)
@@ -301,7 +498,8 @@ class MatroskaReader:
             raise ValueError("Block Matroska tronqué")
         relative = int.from_bytes(raw[length:length + 2], "big", signed=True)
         flags = raw[length + 2]
-        frames = _split_laces(raw[length + 3:], flags)
+        encoded_frames_payload = raw[length + 3:]
+        frames = _split_laces(encoded_frames_payload, flags)
         return tuple(MatroskaBlock(
             track_number=track_no, timestamp_ms=cluster_timestamp + relative,
             flags=flags, payload=frame, lace_index=index, lace_count=len(frames),
@@ -310,6 +508,10 @@ class MatroskaReader:
             discard_padding_ns=int(metadata.get("discard_padding_ns", 0)),
             codec_state=bytes(metadata.get("codec_state", b"")),
             block_additions=bytes(metadata.get("block_additions", b"")),
+            duration_ns=metadata.get("duration_ns"),
+            references_ns=tuple(metadata.get("references_ns", ())),
+            lacing_mode=(flags >> 1) & 0x03,
+            encoded_frames_payload=encoded_frames_payload,
         ) for index, frame in enumerate(frames))
 
     def blocks(self) -> Iterator["MatroskaBlock"]:
@@ -331,6 +533,7 @@ class MatroskaReader:
                             yield block.__class__(**{
                                 **block.__dict__,
                                 "timestamp_ms": round(block.timestamp_ms * scale_ns / 1_000_000),
+                                "timestamp_ns": block.timestamp_ms * scale_ns,
                             })
                     elif child.element_id == self.BLOCK_GROUP_ID and child.size is not None:
                         values: dict[bytes, list[bytes]] = {}
@@ -346,7 +549,9 @@ class MatroskaReader:
                         decoded = self._decode_block(
                             raw_blocks[0], timestamp,
                             duration_ms=(round(uint(self.BLOCK_DURATION_ID) * scale_ns / 1_000_000) if uint(self.BLOCK_DURATION_ID) else None),
+                            duration_ns=(uint(self.BLOCK_DURATION_ID) * scale_ns if uint(self.BLOCK_DURATION_ID) else None),
                             references=tuple(round(value * scale_ns / 1_000_000) for value in sint_values(self.REFERENCE_BLOCK_ID)),
+                            references_ns=tuple(value * scale_ns for value in sint_values(self.REFERENCE_BLOCK_ID)),
                             discard_padding_ns=(sint_values(self.DISCARD_PADDING_ID) or (0,))[0],
                             codec_state=(values.get(self.CODEC_STATE_ID) or [b""])[0],
                             block_additions=(values.get(self.BLOCK_ADDITIONS_ID) or [b""])[0],
@@ -355,6 +560,7 @@ class MatroskaReader:
                             yield block.__class__(**{
                                 **block.__dict__,
                                 "timestamp_ms": round(block.timestamp_ms * scale_ns / 1_000_000),
+                                "timestamp_ns": block.timestamp_ms * scale_ns,
                             })
 
     def simple_blocks(self) -> Iterator["MatroskaBlock"]:
@@ -387,6 +593,11 @@ class MatroskaBlock:
     discard_padding_ns: int = 0
     codec_state: bytes = b""
     block_additions: bytes = b""
+    timestamp_ns: int | None = None
+    duration_ns: int | None = None
+    references_ns: tuple[int, ...] = ()
+    lacing_mode: int = 0
+    encoded_frames_payload: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -398,4 +609,29 @@ class MatroskaAttachment:
     data: bytes
 
 
-__all__ = ["EbmlElement", "MatroskaAttachment", "MatroskaBlock", "MatroskaReader", "MatroskaTrack", "iter_children", "read_element"]
+@dataclass(frozen=True)
+class MatroskaChapter:
+    uid: int
+    start_ns: int
+    end_ns: int | None
+    displays: tuple[tuple[str, str], ...]
+    children: tuple["MatroskaChapter", ...] = ()
+
+
+@dataclass(frozen=True)
+class MatroskaEdition:
+    uid: int
+    chapters: tuple[MatroskaChapter, ...]
+
+
+@dataclass(frozen=True)
+class MatroskaTag:
+    targets: dict[str, int]
+    values: tuple[tuple[str, str], ...]
+
+
+__all__ = [
+    "EbmlElement", "MatroskaAttachment", "MatroskaBlock", "MatroskaChapter",
+    "MatroskaEdition", "MatroskaReader", "MatroskaTag", "MatroskaTrack",
+    "iter_children", "payload_children", "read_element",
+]
