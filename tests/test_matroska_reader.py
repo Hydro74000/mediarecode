@@ -40,3 +40,33 @@ def test_reader_extracts_simple_block_timestamp(tmp_path: Path) -> None:
     blocks = list(MatroskaReader(path).simple_blocks())
     assert len(blocks) == 1
     assert (blocks[0].track_number, blocks[0].timestamp_ms, blocks[0].payload) == (1, 105, b"payload")
+
+
+def _blocks_file(tmp_path: Path, block_payload: bytes, *, grouped: bool = False) -> Path:
+    cluster, timestamp = bytes.fromhex("1f43b675"), bytes.fromhex("e7")
+    if grouped:
+        body = element(bytes.fromhex("a1"), block_payload)
+        body += element(bytes.fromhex("9b"), b"\x28")
+        body += element(bytes.fromhex("fb"), b"\xff")
+        packet = element(bytes.fromhex("a0"), body)
+    else:
+        packet = element(bytes.fromhex("a3"), block_payload)
+    path = tmp_path / ("group.mkv" if grouped else "lace.mkv")
+    path.write_bytes(element(EBML_HEADER_ID, b"") + SEGMENT_ID + b"\xff" + element(cluster, element(timestamp, b"\x00") + packet))
+    return path
+
+
+def test_reader_decodes_fixed_and_xiph_lacing(tmp_path: Path) -> None:
+    fixed = _blocks_file(tmp_path, b"\x81\x00\x00\x84\x01aabb")  # 2 frames fixed
+    assert [b.payload for b in MatroskaReader(fixed).blocks()] == [b"aa", b"bb"]
+    xiph = _blocks_file(tmp_path, b"\x81\x00\x00\x82\x01\x01abb")
+    assert [b.payload for b in MatroskaReader(xiph).blocks()] == [b"a", b"bb"]
+
+
+def test_reader_decodes_ebml_lacing_and_block_group(tmp_path: Path) -> None:
+    ebml = _blocks_file(tmp_path, b"\x81\x00\x00\x86\x01\x81abb")
+    assert [b.payload for b in MatroskaReader(ebml).blocks()] == [b"a", b"bb"]
+    grouped = list(MatroskaReader(_blocks_file(tmp_path, b"\x81\x00\x05\x00frame", grouped=True)).blocks())
+    assert grouped[0].timestamp_ms == 5
+    assert grouped[0].duration_ms == 40
+    assert grouped[0].references == (-1,)

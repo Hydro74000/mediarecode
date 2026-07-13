@@ -38,6 +38,68 @@ def _read_exact(fh: BinaryIO, count: int) -> bytes:
     return value
 
 
+def _read_vint_value(data: bytes, offset: int = 0) -> tuple[int, int]:
+    if offset >= len(data):
+        raise ValueError("VINT absent")
+    length = _vint_length(data[offset])
+    if offset + length > len(data):
+        raise ValueError("VINT tronqué")
+    value = data[offset] & (0xFF >> length)
+    for byte in data[offset + 1:offset + length]:
+        value = (value << 8) | byte
+    return value, length
+
+
+def _split_laces(payload: bytes, flags: int) -> tuple[bytes, ...]:
+    mode = (flags >> 1) & 0x03
+    if mode == 0:
+        return (payload,)
+    if not payload:
+        raise ValueError("En-tête de lacing absent")
+    count = payload[0] + 1
+    cursor = 1
+    sizes: list[int] = []
+    if mode == 1:  # Xiph
+        for _ in range(count - 1):
+            size = 0
+            while True:
+                if cursor >= len(payload):
+                    raise ValueError("Lacing Xiph tronqué")
+                byte = payload[cursor]
+                cursor += 1
+                size += byte
+                if byte != 255:
+                    break
+            sizes.append(size)
+    elif mode == 2:  # fixed
+        remaining = len(payload) - cursor
+        if remaining % count:
+            raise ValueError("Lacing fixed de taille non divisible")
+        sizes = [remaining // count] * (count - 1)
+    else:  # EBML
+        first, length = _read_vint_value(payload, cursor)
+        cursor += length
+        sizes.append(first)
+        for _ in range(count - 2):
+            encoded, length = _read_vint_value(payload, cursor)
+            cursor += length
+            bias = (1 << (7 * length - 1)) - 1
+            sizes.append(sizes[-1] + encoded - bias)
+            if sizes[-1] < 0:
+                raise ValueError("Lacing EBML avec taille négative")
+    last = len(payload) - cursor - sum(sizes)
+    if last < 0:
+        raise ValueError("Tailles de lacing hors payload")
+    sizes.append(last)
+    frames: list[bytes] = []
+    for size in sizes:
+        frames.append(payload[cursor:cursor + size])
+        cursor += size
+    if cursor != len(payload):
+        raise ValueError("Payload de lacing incohérent")
+    return tuple(frames)
+
+
 def read_element(fh: BinaryIO, *, limit: int | None = None) -> EbmlElement | None:
     offset = fh.tell()
     if limit is not None and offset >= limit:
@@ -92,6 +154,13 @@ class MatroskaReader:
     CLUSTER_ID = bytes.fromhex("1f43b675")
     TIMESTAMP_ID = bytes.fromhex("e7")
     SIMPLE_BLOCK_ID = bytes.fromhex("a3")
+    BLOCK_GROUP_ID = bytes.fromhex("a0")
+    BLOCK_ID = bytes.fromhex("a1")
+    BLOCK_DURATION_ID = bytes.fromhex("9b")
+    REFERENCE_BLOCK_ID = bytes.fromhex("fb")
+    DISCARD_PADDING_ID = bytes.fromhex("75a2")
+    CODEC_STATE_ID = bytes.fromhex("a4")
+    BLOCK_ADDITIONS_ID = bytes.fromhex("75a1")
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -155,12 +224,26 @@ class MatroskaReader:
                 ))
         return out
 
-    def simple_blocks(self) -> Iterator["MatroskaBlock"]:
-        """Yield non-laced SimpleBlocks with absolute millisecond timestamps.
+    @staticmethod
+    def _decode_block(raw: bytes, cluster_timestamp: int, **metadata: object) -> tuple["MatroskaBlock", ...]:
+        track_no, length = _read_vint_value(raw)
+        if len(raw) < length + 3:
+            raise ValueError("Block Matroska tronqué")
+        relative = int.from_bytes(raw[length:length + 2], "big", signed=True)
+        flags = raw[length + 2]
+        frames = _split_laces(raw[length + 3:], flags)
+        return tuple(MatroskaBlock(
+            track_number=track_no, timestamp_ms=cluster_timestamp + relative,
+            flags=flags, payload=frame, lace_index=index, lace_count=len(frames),
+            duration_ms=metadata.get("duration_ms"),
+            references=tuple(metadata.get("references", ())),
+            discard_padding_ns=int(metadata.get("discard_padding_ns", 0)),
+            codec_state=bytes(metadata.get("codec_state", b"")),
+            block_additions=bytes(metadata.get("block_additions", b"")),
+        ) for index, frame in enumerate(frames))
 
-        Laced and BlockGroup packets are deliberately rejected here instead of
-        being silently corrupted; the planner can select the FFmpeg fallback.
-        """
+    def blocks(self) -> Iterator["MatroskaBlock"]:
+        """Yield SimpleBlock and BlockGroup frames, including all lacing modes."""
         size = self.path.stat().st_size
         with self.path.open("rb") as fh:
             for cluster in self.top_level():
@@ -172,15 +255,30 @@ class MatroskaReader:
                     if child.element_id == self.TIMESTAMP_ID and child.size is not None:
                         timestamp = int.from_bytes(self.payload(child), "big")
                     elif child.element_id == self.SIMPLE_BLOCK_ID and child.size is not None:
-                        raw = self.payload(child)
-                        length = _vint_length(raw[0])
-                        track_no = raw[0] & (0xFF >> length)
-                        for byte in raw[1:length]: track_no = (track_no << 8) | byte
-                        if len(raw) < length + 3: raise ValueError("SimpleBlock tronqué")
-                        relative = int.from_bytes(raw[length:length + 2], "big", signed=True)
-                        flags = raw[length + 2]
-                        if flags & 0x06: raise ValueError("Lacing SimpleBlock non encore supporté")
-                        yield MatroskaBlock(track_number=track_no, timestamp_ms=timestamp + relative, flags=flags, payload=raw[length + 3:])
+                        yield from self._decode_block(self.payload(child), timestamp)
+                    elif child.element_id == self.BLOCK_GROUP_ID and child.size is not None:
+                        values: dict[bytes, list[bytes]] = {}
+                        fh.seek(child.payload_offset)
+                        for part in iter_children(fh, child, file_size=size):
+                            if part.size is not None:
+                                values.setdefault(part.element_id, []).append(self.payload(part))
+                        raw_blocks = values.get(self.BLOCK_ID, [])
+                        if not raw_blocks:
+                            raise ValueError("BlockGroup sans Block")
+                        uint = lambda key: int.from_bytes(values.get(key, [b""])[0], "big") if values.get(key) else 0
+                        sint_values = lambda key: tuple(int.from_bytes(item, "big", signed=True) for item in values.get(key, []))
+                        yield from self._decode_block(
+                            raw_blocks[0], timestamp,
+                            duration_ms=uint(self.BLOCK_DURATION_ID) or None,
+                            references=sint_values(self.REFERENCE_BLOCK_ID),
+                            discard_padding_ns=(sint_values(self.DISCARD_PADDING_ID) or (0,))[0],
+                            codec_state=(values.get(self.CODEC_STATE_ID) or [b""])[0],
+                            block_additions=(values.get(self.BLOCK_ADDITIONS_ID) or [b""])[0],
+                        )
+
+    def simple_blocks(self) -> Iterator["MatroskaBlock"]:
+        """Compatibility alias for callers predating BlockGroup support."""
+        yield from self.blocks()
 
 
 @dataclass(frozen=True)
@@ -201,6 +299,13 @@ class MatroskaBlock:
     timestamp_ms: int
     flags: int
     payload: bytes
+    lace_index: int = 0
+    lace_count: int = 1
+    duration_ms: int | None = None
+    references: tuple[int, ...] = ()
+    discard_padding_ns: int = 0
+    codec_state: bytes = b""
+    block_additions: bytes = b""
 
 
 __all__ = ["EbmlElement", "MatroskaBlock", "MatroskaReader", "MatroskaTrack", "iter_children", "read_element"]
