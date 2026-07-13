@@ -34,6 +34,7 @@ FFPROBE_PATH = None
 DOVI_TOOL_PATH = None
 HDR10PLUS_TOOL_PATH = None
 MEDIAINFO_PATH = None
+MKVMERGE_PATH = None  # standalone uniquement ; jamais requis par Muxiveo
 MUXIVEO_PATH = None
 
 # --- CONFIGURATION DU DOSSIER DE TRAVAIL TEMPORAIRE (OPTIONNEL) ---
@@ -75,6 +76,7 @@ FFPROBE = find_tool("ffprobe", FFPROBE_PATH)
 DOVI_TOOL = find_tool("dovi_tool", DOVI_TOOL_PATH)
 HDR10PLUS_TOOL = find_tool("hdr10plus_tool", HDR10PLUS_TOOL_PATH)
 MEDIAINFO = find_tool("mediainfo", MEDIAINFO_PATH)
+MKVMERGE = find_tool("mkvmerge", MKVMERGE_PATH)
 MUXIVEO = find_tool("muxiveo", MUXIVEO_PATH)
 
 def parse_fraction(val):
@@ -195,6 +197,59 @@ def get_all_audio_tracks_ffprobe(ffprobe_path, file_path):
         return video_track_id, audio_tracks, subtitle_track_ids
     except Exception as e:
         print(f"   -> [Warning] Impossible d'analyser les pistes détaillées via ffprobe : {e}")
+        return None, [], []
+
+
+def get_all_audio_tracks_mkvmerge(mkvmerge_path, file_path):
+    """Inspecte les IDs Matroska utilisés ensuite par les options mkvmerge."""
+    try:
+        result = subprocess.run(
+            [mkvmerge_path, "-J", file_path], capture_output=True, text=True, check=True
+        )
+        data = json.loads(result.stdout)
+        audio_details = get_audio_details_mediainfo(file_path)
+        audio_tracks = []
+        video_track_id = None
+        subtitle_track_ids = []
+        audio_idx = 0
+        for track in data.get("tracks", []):
+            track_id = track.get("id")
+            track_type = track.get("type")
+            props = track.get("properties", {})
+            if track_type == "video" and video_track_id is None:
+                video_track_id = track_id
+            elif track_type == "audio":
+                raw_codec = str(track.get("codec", "")).lower()
+                codec = "aac"
+                for marker, value in (
+                    ("e-ac-3", "eac3"), ("eac3", "eac3"), ("ac-3", "ac3"),
+                    ("ac3", "ac3"), ("truehd", "truehd"), ("flac", "flac"),
+                    ("dts", "dts"), ("opus", "opus"), ("mp3", "mp3"),
+                    ("mpeg-1 layer 3", "mp3"),
+                ):
+                    if marker in raw_codec:
+                        codec = value
+                        break
+                details = audio_details[audio_idx] if audio_idx < len(audio_details) else {}
+                audio_tracks.append({
+                    "track_id": track_id,
+                    "stream_idx": audio_idx,
+                    "codec": codec,
+                    "channels": int(props.get("audio_channels", 2)),
+                    "sample_rate": int(props.get("audio_sampling_frequency", 48000)),
+                    "name": props.get("track_name") or f"Audio {audio_idx + 1}",
+                    "language": props.get("language", "und"),
+                    "default_track": bool(props.get("default_track", False)),
+                    "forced_track": bool(props.get("forced_track", False)),
+                    "bitrate": details.get("bitrate"),
+                    "is_atmos": bool(details.get("is_atmos", False)),
+                })
+                audio_idx += 1
+            elif track_type == "subtitles":
+                subtitle_track_ids.append(track_id)
+        return video_track_id, audio_tracks, subtitle_track_ids
+    except Exception as exc:
+        print(f"   -> [Warning] Impossible d'analyser les pistes via mkvmerge -J : {exc}")
         return None, [], []
 
 def get_video_audio_metadata(file_path):
@@ -747,7 +802,9 @@ def run_command(cmd, show_output=False):
     else:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         
-    if result.returncode != 0:
+    is_mkvmerge = any("mkvmerge" in str(part).lower() for part in cmd)
+    allowed_codes = {0, 1} if is_mkvmerge else {0}
+    if result.returncode not in allowed_codes:
         print(f"\n[Erreur] Commande échouée : {' '.join(cmd)}")
         if not show_output:
             if result.stdout:
@@ -757,7 +814,29 @@ def run_command(cmd, show_output=False):
         raise subprocess.CalledProcessError(result.returncode, cmd, output=getattr(result, 'stdout', None), stderr=getattr(result, 'stderr', None))
     return result
 
-def concat_videos(main_path, output_path, intro_path=None, outro_path=None, workdir=None, mode="crop"):
+
+def select_mux_backend(requested="auto"):
+    """Résout le muxeur final du script standalone, sans modifier Muxiveo."""
+    requested = str(requested or "auto").lower()
+    if requested not in {"auto", "muxiveo", "mkvmerge", "ffmpeg"}:
+        raise ValueError(f"Backend de concaténation invalide : {requested}")
+    available = {
+        "muxiveo": is_tool_available(MUXIVEO),
+        "mkvmerge": is_tool_available(MKVMERGE),
+        "ffmpeg": is_tool_available(FFMPEG),
+    }
+    if requested != "auto":
+        if not available[requested]:
+            raise ValueError(f"Backend demandé introuvable : {requested}")
+        return requested
+    if available["muxiveo"]:
+        return "muxiveo"
+    if available["mkvmerge"]:
+        return "mkvmerge"
+    return "ffmpeg"
+
+
+def concat_videos(main_path, output_path, intro_path=None, outro_path=None, workdir=None, mode="crop", mux_backend="auto"):
     # Vérification des outils indispensables de base
     for tool_name, tool_path in [("ffmpeg", FFMPEG), ("ffprobe", FFPROBE), ("mediainfo", MEDIAINFO)]:
         if not is_tool_available(tool_path):
@@ -765,10 +844,14 @@ def concat_videos(main_path, output_path, intro_path=None, outro_path=None, work
             print(f"Veuillez l'installer et l'ajouter à votre PATH ou configurer sa variable '{tool_name.upper()}_PATH' au début de ce script.")
             return False
 
-    use_muxiveo = is_tool_available(MUXIVEO)
-    if not use_muxiveo:
-        print("[Warning] Muxiveo est introuvable : utilisation du fallback FFmpeg.")
-        print("           Les pièces jointes et les pistes audio non concaténées ne pourront pas être conservées.")
+    try:
+        selected_mux_backend = select_mux_backend(mux_backend)
+    except ValueError as exc:
+        print(f"Erreur : {exc}")
+        return False
+    print(f"Backend de réassemblage final : {selected_mux_backend}")
+    if selected_mux_backend == "ffmpeg":
+        print("[Warning] Fallback FFmpeg : certaines métadonnées Matroska avancées peuvent être incomplètes.")
 
     temp_files = []
 
@@ -1111,9 +1194,13 @@ def concat_videos(main_path, output_path, intro_path=None, outro_path=None, work
         concatenated_audio_tracks = []
         delayed_track_ids = []
         
-        use_muxiveo = is_tool_available(MUXIVEO)
-        print("   -> Analyse des pistes audio de la vidéo principale via ffprobe...")
-        video_track_id, audio_tracks, subtitle_track_ids = get_all_audio_tracks_ffprobe(FFPROBE, main_path)
+        mkvmerge_path = MKVMERGE if selected_mux_backend == "mkvmerge" else None
+        if mkvmerge_path:
+            print("   -> Analyse des pistes audio de la vidéo principale via mkvmerge...")
+            video_track_id, audio_tracks, subtitle_track_ids = get_all_audio_tracks_mkvmerge(mkvmerge_path, main_path)
+        else:
+            print("   -> Analyse des pistes audio de la vidéo principale via ffprobe...")
+            video_track_id, audio_tracks, subtitle_track_ids = get_all_audio_tracks_ffprobe(FFPROBE, main_path)
         if not audio_tracks and audio_meta:
             audio_tracks.append({
                     "track_id": 1,
@@ -1454,10 +1541,8 @@ def concat_videos(main_path, output_path, intro_path=None, outro_path=None, work
                 else:
                     print("   -> Erreur : Aucun JSON HDR10+ valide n'a pu être extrait.")
                     
-        # Étape 5 : réassembler via Muxiveo natif, ou FFmpeg si Muxiveo est absent.
-        use_muxiveo = is_tool_available(MUXIVEO)
-        
-        if use_muxiveo:
+        # Étape 5 : le choix standalone reste indépendant du backend de Muxiveo.
+        if selected_mux_backend == "muxiveo":
             print("   -> Utilisation de Muxiveo pour le réassemblage final (génération de la configuration exact-job)...")
 
             # Muxiveo conserve implicitement certaines pistes d'une source.
@@ -1615,8 +1700,63 @@ def concat_videos(main_path, output_path, intro_path=None, outro_path=None, work
             # Lancer Muxiveo
             run_command(muxiveo_cmd)
             
+        elif selected_mux_backend == "mkvmerge":
+            print("   -> Utilisation standalone de mkvmerge pour le réassemblage final...")
+            delay_ms = intro_duration_ms
+            print(f"   -> Décalage calculé pour les pistes d'origine : {delay_ms} ms")
+            final_mux_cmd = [mkvmerge_path, "-o", output_path]
+            if working_video_is_raw and video_meta.get("fps"):
+                final_mux_cmd.extend(["--default-duration", f"0:{video_meta['fps']}fps"])
+
+            if video_meta.get("mastering_primaries") == "Display P3":
+                final_mux_cmd.extend([
+                    "--chromaticity-coordinates", "0:0.68,0.32,0.265,0.690,0.15,0.06",
+                    "--white-colour-coordinates", "0:0.3127,0.3290",
+                ])
+            elif video_meta.get("mastering_primaries") == "BT.2020":
+                final_mux_cmd.extend([
+                    "--chromaticity-coordinates", "0:0.708,0.292,0.170,0.797,0.131,0.046",
+                    "--white-colour-coordinates", "0:0.3127,0.3290",
+                ])
+            for option, key in (
+                ("--min-luminance", "mastering_min_lum"),
+                ("--max-luminance", "mastering_max_lum"),
+                ("--max-content-light", "max_cll"),
+                ("--max-frame-light", "max_fall"),
+            ):
+                if video_meta.get(key) is not None:
+                    final_mux_cmd.extend([option, f"0:{video_meta[key]}"])
+
+            final_mux_cmd.append(working_hevc)
+            for track_info in concatenated_audio_tracks:
+                final_mux_cmd.extend([
+                    "--track-name", f"0:{track_info['name']}",
+                    "--language", f"0:{track_info['language']}",
+                    "--default-track-flag", f"0:{'yes' if track_info['default_track'] else 'no'}",
+                    "--forced-display-flag", f"0:{'yes' if track_info['forced_track'] else 'no'}",
+                    track_info["file"],
+                ])
+
+            # Ces sources portent déjà les timestamps recalculés.
+            final_mux_cmd.extend(rewritten_subtitle_files)
+            main_movie_opts = ["--no-video", "--no-subtitles", "--no-chapters"]
+            if delayed_track_ids:
+                main_movie_opts.extend(["--audio-tracks", ",".join(str(tid) for tid in delayed_track_ids)])
+                for track_id in delayed_track_ids:
+                    main_movie_opts.extend(["--sync", f"{track_id}:{delay_ms}"])
+            else:
+                main_movie_opts.append("--no-audio")
+            if source_chapters:
+                chapter_file = write_shifted_matroska_chapters(
+                    source_chapters, intro_duration_ms, temp_dir, temp_files
+                )
+                final_mux_cmd.extend(["--chapters", chapter_file])
+            final_mux_cmd.extend(main_movie_opts)
+            final_mux_cmd.append(main_path)
+            run_command(final_mux_cmd)
+
         else:
-            print("   -> Muxiveo non trouvé. Fallback sur FFmpeg (métadonnées Matroska avancées potentiellement incomplètes)...")
+            print("   -> Utilisation du fallback FFmpeg (métadonnées Matroska avancées potentiellement incomplètes)...")
             temp_video_container = tempfile.NamedTemporaryFile(suffix=".mkv", delete=False, dir=temp_dir).name
             temp_files.append(temp_video_container)
             
@@ -1695,6 +1835,15 @@ if __name__ == "__main__":
     parser.add_argument("--outro", help="Chemin de la vidéo à ajouter à la fin")
     parser.add_argument("-w", "--workdir", help="Dossier de travail temporaire (par défaut: dossier de sortie sous Linux, %%temp%% sous Windows)")
     parser.add_argument("-m", "--mode", choices=["crop", "pad"], default="crop", help="Mode d'adaptation de l'intro : crop (recadrer en coupant) ou pad (bandes noires). Par défaut : crop.")
+    parser.add_argument(
+        "--mux-backend",
+        choices=["auto", "muxiveo", "mkvmerge", "ffmpeg"],
+        default="auto",
+        help=(
+            "Muxeur final standalone. auto préfère Muxiveo, puis mkvmerge, puis FFmpeg ; "
+            "mkvmerge n'est utilisé que par ce script."
+        ),
+    )
     
     args = parser.parse_args()
 
@@ -1711,4 +1860,7 @@ if __name__ == "__main__":
     if not intro_path and not args.outro:
         parser.error("au moins une option --intro ou --outro est requise")
 
-    concat_videos(main_path, output_path, intro_path=intro_path, outro_path=args.outro, workdir=args.workdir, mode=args.mode)
+    concat_videos(
+        main_path, output_path, intro_path=intro_path, outro_path=args.outro,
+        workdir=args.workdir, mode=args.mode, mux_backend=args.mux_backend,
+    )
