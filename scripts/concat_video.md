@@ -5,7 +5,7 @@
 `concat_video.py` ajoute une intro, une outro, ou les deux a une video
 principale. Il reencode uniquement les segments ajoutes pour les rendre
 compatibles avec la video principale, puis reconstitue un fichier final avec
-la video, les pistes audio, les sous-titres, les chapitres et, lorsque cela
+la video, les pistes audio (avec prise en charge de l'Atmos), les sous-titres, les chapitres et, lorsque cela
 s'applique, les metadonnees HDR dynamiques.
 
 L'ordre final est toujours :
@@ -50,6 +50,7 @@ Options :
 | `-m crop` | Adapte le segment ajoute en remplissant l'image cible, avec recadrage. Valeur par defaut. |
 | `-m pad` | Adapte le segment ajoute en conservant toute l'image, avec bandes noires. |
 | `-w DOSSIER` | Dossier de travail temporaire. |
+| `--mkvmerge` | Force `mkvmerge` pour le reassemblage standalone final, meme si `Muxiveo` est detecte. |
 
 Au moins une des options `--intro` ou `--outro` est obligatoire.
 
@@ -269,17 +270,18 @@ Outils conditionnels :
 
 | Outil | Quand il est requis |
 | --- | --- |
-| `mkvmerge` | Mux Matroska complet, sauf si `Muxiveo` est configure. |
+| `mkvmerge` | Standalone uniquement : force par `--mkvmerge`, ou repli quand `Muxiveo` est absent. |
 | `dovi_tool` | Source HEVC avec Dolby Vision. |
 | `hdr10plus_tool` | Source HEVC avec HDR10+. |
-| `Muxiveo` | Seulement si `MUXIVEO_PATH` est configure. |
+| `Muxiveo` | Detecte automatiquement; muxeur final privilegie quand il est disponible. |
 
 Pour chaque outil, l'ordre de resolution est :
 
 1. le chemin explicite defini dans les constantes `*_PATH`;
 2. le `PATH` systeme;
-3. le dossier `<racine-du-projet>/tools/<nom>`;
-4. sous Windows, `<racine-du-projet>/tools/<nom>.exe`.
+3. l'executable `<racine-du-projet>/<nom>`;
+4. le dossier `<racine-du-projet>/tools/<nom>`;
+5. sous Windows, `<racine-du-projet>/tools/<nom>.exe`.
 
 Les constantes sont en tete du script :
 
@@ -294,8 +296,14 @@ MUXIVEO_PATH = None
 DEFAULT_WORKDIR = None
 ```
 
-`MUXIVEO_PATH` est volontairement opt-in : trouver un executable `muxiveo`
-dans le `PATH` ne suffit pas a activer cette branche.
+`Muxiveo` est detecte automatiquement; un chemin explicite `MUXIVEO_PATH`
+reste prioritaire. Sans `--mkvmerge`, l'ordre de selection du muxeur final est
+toujours `Muxiveo`, puis `mkvmerge`, puis le fallback FFmpeg.
+
+Quand `Muxiveo` est retenu, le script lui transmet un `exact-job` avec
+`mux_backend: native` et reutilise les chemins d'outils retournes par
+`Muxiveo --cli tools` (FFmpeg, FFprobe, MediaInfo, dovi_tool,
+hdr10plus_tool), plutot qu'une configuration parallele.
 
 Le dossier temporaire est choisi dans cet ordre : `--workdir`,
 `DEFAULT_WORKDIR`, dossier temporaire Windows, puis dossier de sortie sous
@@ -320,8 +328,8 @@ flowchart TD
     J --> K[Reecrire sous-titres et chapitres]
     K --> L[Concatener audio intro/film/outro]
     L --> M{Muxeur final}
-    M -->|Muxiveo configure| N[Generer exact-job JSON]
-    M -->|mkvmerge disponible| O[Mux Matroska]
+    M -->|Muxiveo detecte| N[Generer exact-job JSON backend natif]
+    M -->|--mkvmerge ou Muxiveo absent| O[Mux Matroska standalone]
     M -->|Sinon| P[Fallback FFmpeg]
     N --> Q[Nettoyage]
     O --> Q
@@ -389,11 +397,13 @@ pour `Muxiveo`.
 
 ### Mux final
 
-`mkvmerge` est privilegie pour une sortie Matroska complete. Son code de
-retour `1` est accepte car il peut representer des avertissements non fatals.
-`Muxiveo` est selectionne seulement avec `MUXIVEO_PATH`; le script prepare un
-job JSON `exact-job`. Le fallback FFmpeg est moins complet mais maintient les
-sous-titres et chapitres re-ecrits.
+`Muxiveo` est privilegie des qu'il est detecte : le script prepare un job JSON
+`exact-job` en `mux_backend: native` et l'execute via `--cli run`, avec les
+chemins d'outils partages par `--cli tools`. `mkvmerge` reste la voie
+standalone : il est force par `--mkvmerge` ou utilise en repli quand `Muxiveo`
+est absent. Son code de retour `1` est accepte car il peut representer des
+avertissements non fatals. Le fallback FFmpeg est moins complet mais maintient
+les sous-titres et chapitres re-ecrits.
 
 ## Limitations et points d'attention
 
@@ -415,7 +425,7 @@ sous-titres et chapitres re-ecrits.
    compatibles. Les sources VFR, interlacees, multi-video ou avec une
    signalisation inhabituelle meritent une validation manuelle du resultat.
 8. Le fallback FFmpeg peut perdre des pieces jointes et certaines metadonnees
-   de conteneur. Pour des MKV complexes, utiliser `mkvmerge` ou `Muxiveo`.
+   de conteneur. Pour des MKV complexes, utiliser `Muxiveo` ou `mkvmerge`.
 9. La documentation de l'AppImage `Muxiveo` et les outils externes peuvent
    evoluer independamment; verifier leurs versions pour les flux Dolby Vision
    et HDR10+ critiques.
