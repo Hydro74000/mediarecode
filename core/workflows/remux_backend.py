@@ -9,8 +9,10 @@ not yet been materialised by the native writer.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+import heapq
 import mimetypes
 import re
 from math import gcd
@@ -236,9 +238,10 @@ def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
         timestamp_scale_ns = gcd(timestamp_scale_ns, abs(int(item.track.time_shift_ms or 0)) * 1_000_000)
     timestamp_scale_ns = timestamp_scale_ns or 1_000_000
     output_tracks: list[MatroskaMuxTrack] = []
-    output_packets: list[MatroskaMuxPacket] = []
     track_uid_maps: dict[int, dict[int, int]] = {}
-    block_cache = {index: list(reader.blocks()) for index, reader in readers.items()}
+    # source_file_index → numéro de piste source → [(piste sortie, offset ms)].
+    # Permet une seule passe streaming par source, sans matérialiser les blocks.
+    packet_routes: dict[int, dict[int, list[tuple[int, int]]]] = {}
     for output_index, item in enumerate(mapped, start=1):
         tracks = native_tracks[item.source_file_index]
         if not 0 <= item.stream_index < len(tracks):
@@ -271,26 +274,46 @@ def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
             flag_commentary=item.track.flag_commentary,
         ))
         offset = int(item.track.time_shift_ms or 0)
-        for source_sequence, block in enumerate(block_cache[item.source_file_index]):
-            if block.track_number == source_track.number:
-                if block.lace_count > 1 and block.lace_index > 0:
-                    continue
-                source_timestamp_ns = block.timestamp_ns if block.timestamp_ns is not None else block.timestamp_ms * 1_000_000
-                shifted_timestamp_ns = source_timestamp_ns + offset * 1_000_000
+        packet_routes.setdefault(item.source_file_index, {}).setdefault(
+            source_track.number, []).append((output_index, offset))
+
+    def source_packet_stream(source_index: int) -> Iterator[MatroskaMuxPacket]:
+        """Une passe streaming sur les blocks d'une source (mémoire bornée)."""
+        routes = packet_routes.get(source_index, {})
+        for source_sequence, block in enumerate(readers[source_index].blocks()):
+            targets = routes.get(block.track_number)
+            if not targets:
+                continue
+            if block.lace_count > 1 and block.lace_index > 0:
+                continue
+            source_timestamp_ns = block.timestamp_ns if block.timestamp_ns is not None else block.timestamp_ms * 1_000_000
+            for output_index, offset_ms in targets:
+                shifted_timestamp_ns = source_timestamp_ns + offset_ms * 1_000_000
                 if shifted_timestamp_ns < 0:
                     continue
-                shifted = block.__class__(**{
+                shifted = block if not offset_ms else block.__class__(**{
                     **block.__dict__,
                     "timestamp_ms": round(shifted_timestamp_ns / 1_000_000),
                     "timestamp_ns": shifted_timestamp_ns,
                 })
-                output_packets.append(MatroskaMuxPacket(output_index, shifted, source_sequence))
-    duration_ns = max((
-        (packet.block.timestamp_ns if packet.block.timestamp_ns is not None else packet.block.timestamp_ms * 1_000_000)
-        + (packet.block.duration_ns if packet.block.duration_ns is not None else (packet.block.duration_ms or 0) * 1_000_000)
-        for packet in output_packets
-    ), default=0)
-    duration = round(duration_ns / 1_000_000)
+                yield MatroskaMuxPacket(output_index, shifted, source_sequence)
+
+    active_sources = [index for index in readers if packet_routes.get(index)]
+    if len(active_sources) <= 1:
+        packet_stream: Iterator[MatroskaMuxPacket] = (
+            source_packet_stream(active_sources[0]) if active_sources else iter(())
+        )
+    else:
+        # Ordre interne de chaque source préservé ; fusion inter-sources par
+        # timestamp décalé (heapq.merge ne réordonne jamais au sein d'un flux).
+        packet_stream = heapq.merge(
+            *(source_packet_stream(index) for index in active_sources),
+            key=lambda packet: (
+                packet.block.timestamp_ns
+                if packet.block.timestamp_ns is not None
+                else packet.block.timestamp_ms * 1_000_000
+            ),
+        )
     opaque: list[bytes] = []
 
     attachments: list[MatroskaAttachment] = []
@@ -354,8 +377,8 @@ def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
     _, source_writing_app = first_reader.segment_info_apps()
     segment_title = config.file_title.strip() or first_reader.segment_title()
     return MatroskaMuxPlan(
-        config.output, tuple(output_tracks), tuple(output_packets), duration_ms=duration,
-        duration_ns=duration_ns, timestamp_scale_ns=timestamp_scale_ns,
+        config.output, tuple(output_tracks), packet_stream, duration_ms=0,
+        duration_ns=0, timestamp_scale_ns=timestamp_scale_ns,
         muxing_app=f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}",
         writing_app=source_writing_app or "Muxiveo",
         title=segment_title,

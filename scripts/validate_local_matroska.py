@@ -2,7 +2,7 @@
 """Read-only source validation against native Matroska round-trips.
 
 Outputs and exact-jobs are created under a temporary directory. Source files
-are never modified. This helper deliberately has no MKVToolNix dependency.
+are never modified. This helper deliberately has no third-party muxer dependency.
 """
 from __future__ import annotations
 

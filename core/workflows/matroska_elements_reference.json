@@ -612,7 +612,7 @@
       ],
       "range": null,
       "editable": "implemented",
-      "description": "Application d'écriture et version (ex. \"mkvmerge-0.3.3\"). Non modifié par l'éditeur actuel (option edit_writing_app=False par défaut)."
+      "description": "Application d'écriture et version (ex. \"Lavf62.19.101\"). Non modifié par l'éditeur actuel (option edit_writing_app=False par défaut)."
     },
     {
       "name": "Tracks",

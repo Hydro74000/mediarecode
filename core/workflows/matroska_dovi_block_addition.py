@@ -2,7 +2,7 @@
 core/workflows/matroska_dovi_block_addition.py
 
 Injection native (pure Python) du ``BlockAdditionMapping`` Dolby Vision dans
-le ``TrackEntry`` HEVC d'un fichier Matroska, sans dépendance MKVToolNix.
+le ``TrackEntry`` HEVC d'un fichier Matroska, sans outil externe.
 
 Contexte
 ========

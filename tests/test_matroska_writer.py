@@ -41,6 +41,28 @@ def test_writer_roundtrips_multiple_tracks_and_packets(tmp_path: Path) -> None:
     assert INFO_ID in top_level_ids and TRACKS_ID in top_level_ids and CUES_ID in top_level_ids
 
 
+def test_streaming_packets_match_tuple_output_and_patch_duration(tmp_path: Path) -> None:
+    from core.workflows.matroska_writer import _interleave_packets
+
+    video = source_track(7, 70, "V_MPEG4/ISO/AVC", 1)
+    audio = source_track(7, 71, "A_AAC", 2)
+    tracks = (
+        MatroskaMuxTrack(Path("v.mkv"), video, 1, deterministic_uid("v"), language="und", name="Video"),
+        MatroskaMuxTrack(Path("a.mkv"), audio, 2, deterministic_uid("a"), language="fra", name="Audio"),
+    )
+    packets = (
+        MatroskaMuxPacket(1, MatroskaBlock(7, 0, 0x80, b"video"), 0),
+        MatroskaMuxPacket(2, MatroskaBlock(7, 5, 0x80, b"audio", duration_ms=20, references=(-1,)), 1),
+        MatroskaMuxPacket(1, MatroskaBlock(7, 40, 0x00, b"video2"), 2),
+    )
+    via_tuple = tmp_path / "tuple.mkv"
+    MatroskaWriter().write(MatroskaMuxPlan(via_tuple, tracks, packets))
+    via_stream = tmp_path / "stream.mkv"
+    lazy = iter(_interleave_packets(packets))
+    MatroskaWriter().write(MatroskaMuxPlan(via_stream, tracks, lazy))
+    assert via_stream.read_bytes() == via_tuple.read_bytes()
+
+
 def test_deterministic_uid_is_stable_and_nonzero() -> None:
     assert deterministic_uid("source", 1) == deterministic_uid("source", 1)
     assert deterministic_uid("source", 1) != deterministic_uid("source", 2)
@@ -72,6 +94,23 @@ def test_copied_track_tag_uid_is_remapped() -> None:
     rewritten = rewrite_tag_target_uids(targeted, track_uids={10: 900}, attachment_uids={})
     assert uint_element(TAG_TRACK_UID_ID, 900) in rewritten
     assert uint_element(TAG_TRACK_UID_ID, 10) not in rewritten
+
+
+def test_stale_source_crc32_is_stripped_from_rebuilt_tags() -> None:
+    from core.workflows.matroska_element_ids import CRC32_ID
+
+    simple = element(
+        SIMPLE_TAG_ID,
+        string_element(TAG_NAME_ID, "TITLE") + string_element(TAG_STRING_ID, "Commentaire"),
+    )
+    stale_crc = element(CRC32_ID, b"\x01\x02\x03\x04")
+    targeted = element(
+        TAGS_ID,
+        stale_crc + element(TAG_ID, element(TARGETS_ID, uint_element(TAG_TRACK_UID_ID, 10)) + simple),
+    )
+    rewritten = rewrite_tag_target_uids(targeted, track_uids={10: 900}, attachment_uids={})
+    assert stale_crc not in rewritten
+    assert uint_element(TAG_TRACK_UID_ID, 900) in rewritten
 
 
 def test_tag_for_unselected_track_is_discarded() -> None:

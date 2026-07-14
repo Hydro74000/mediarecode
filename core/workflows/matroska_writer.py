@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+from collections.abc import Iterable
 from io import BytesIO
 from pathlib import Path
 from typing import Callable
@@ -17,7 +18,7 @@ from core.workflows.matroska_element_ids import (
     CLUSTER_ID, CODEC_STATE_ID, CUES_ID, DISCARD_PADDING_ID,
     FLAG_COMMENTARY_ID, FLAG_DEFAULT_ID, FLAG_ENABLED_ID, FLAG_FORCED_ID,
     FLAG_HEARING_IMPAIRED_ID, FLAG_ORIGINAL_ID, FLAG_VISUAL_IMPAIRED_ID,
-    DURATION_ID, INFO_ID, LANGUAGE_BCP47_ID, MUXING_APP_ID,
+    CRC32_ID, DURATION_ID, INFO_ID, LANGUAGE_BCP47_ID, MUXING_APP_ID,
     LANGUAGE_ID, NAME_ID, REFERENCE_BLOCK_ID, SEGMENT_ID, SIMPLE_BLOCK_ID,
     CHAPTERS_ID, CHAPTER_ATOM_ID, CHAPTER_DISPLAY_ID, CHAPTER_TIME_START_ID,
     CHAPTER_TIME_END_ID, CHAPTER_UID_ID, CHAP_LANGUAGE_ID, CHAP_STRING_ID, EDITION_ENTRY_ID,
@@ -44,6 +45,11 @@ _PATCHED_TRACK_FIELDS = {
 
 
 def _raw_children(payload: bytes) -> list[tuple[bytes, bytes]]:
+    """Enfants bruts d'un master en cours de réassemblage.
+
+    Les CRC-32 source sont écartés : le payload parent étant modifié, un CRC
+    recopié deviendrait invalide (l'élément est optionnel selon la spec EBML).
+    """
     out: list[tuple[bytes, bytes]] = []
     stream = BytesIO(payload)
     while stream.tell() < len(payload):
@@ -52,7 +58,8 @@ def _raw_children(payload: bytes) -> list[tuple[bytes, bytes]]:
             raise ValueError("TrackEntry EBML invalide")
         stream.seek(item.offset)
         raw = stream.read(item.header_size + item.size)
-        out.append((item.element_id, raw))
+        if item.element_id != CRC32_ID:
+            out.append((item.element_id, raw))
         stream.seek(item.payload_offset + item.size)
     return out
 
@@ -139,6 +146,12 @@ def _timestamp_ns(packet: MatroskaMuxPacket) -> int:
 def _is_keyframe(packet: MatroskaMuxPacket) -> bool:
     value = packet.block.is_keyframe
     return bool(packet.block.flags & 0x80) if value is None else value
+
+
+def _packet_end_ns(packet: MatroskaMuxPacket) -> int:
+    block = packet.block
+    duration = block.duration_ns if block.duration_ns is not None else (block.duration_ms or 0) * 1_000_000
+    return _timestamp_ns(packet) + duration
 
 
 def _interleave_packets(packets: tuple[MatroskaMuxPacket, ...]) -> list[MatroskaMuxPacket]:
@@ -285,12 +298,16 @@ class MatroskaWriter:
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".partial")
         partial.unlink(missing_ok=True)
-        packets = _interleave_packets(plan.packets)
-        duration_ns = plan.duration_ns or (plan.duration_ms * 1_000_000) or max((
-            _timestamp_ns(item)
-            + (item.block.duration_ns if item.block.duration_ns is not None else (item.block.duration_ms or 0) * 1_000_000)
-            for item in packets
-        ), default=0)
+        if isinstance(plan.packets, (tuple, list)):
+            packets: Iterable[MatroskaMuxPacket] = _interleave_packets(tuple(plan.packets))
+            duration_ns = plan.duration_ns or (plan.duration_ms * 1_000_000) or max((
+                _packet_end_ns(item) for item in packets
+            ), default=0)
+        else:
+            # Flux paresseux : l'ordre de mux vient du producteur, la durée
+            # réelle n'est connue qu'après consommation (Info patchée alors).
+            packets = plan.packets
+            duration_ns = plan.duration_ns or (plan.duration_ms * 1_000_000)
         info = _plan_info(plan, duration_ns)
         tracks = element(TRACKS_ID, b"".join(_track_entry(track) for track in plan.tracks))
         try:
@@ -308,25 +325,30 @@ class MatroskaWriter:
                 # that stop their metadata scan once media payload begins.
                 for raw in plan.opaque_top_level:
                     fh.write(raw)
-                index = 0
                 cluster_records: list[_ClusterRecord] = []
                 video_track = next((track.output_number for track in plan.tracks if track.source_track.track_type == 1), plan.tracks[0].output_number)
-                while index < len(packets):
-                    group: list[MatroskaMuxPacket] = []
-                    group_min_ns = group_max_ns = _timestamp_ns(packets[index])
-                    max_cluster_ns = min(
-                        30_000_000_000,
-                        32767 * plan.timestamp_scale_ns,
-                    )
-                    while index < len(packets):
-                        packet_ns = _timestamp_ns(packets[index])
+                max_cluster_ns = min(
+                    30_000_000_000,
+                    32767 * plan.timestamp_scale_ns,
+                )
+                packet_iter = iter(packets)
+                pending = next(packet_iter, None)
+                observed_end_ns = 0
+                while pending is not None:
+                    group: list[MatroskaMuxPacket] = [pending]
+                    group_min_ns = group_max_ns = _timestamp_ns(pending)
+                    observed_end_ns = max(observed_end_ns, _packet_end_ns(pending))
+                    pending = next(packet_iter, None)
+                    while pending is not None:
+                        packet_ns = _timestamp_ns(pending)
                         candidate_min = min(group_min_ns, packet_ns)
                         candidate_max = max(group_max_ns, packet_ns)
-                        if group and candidate_max - candidate_min > max_cluster_ns:
+                        if candidate_max - candidate_min > max_cluster_ns:
                             break
-                        group.append(packets[index])
+                        group.append(pending)
                         group_min_ns, group_max_ns = candidate_min, candidate_max
-                        index += 1
+                        observed_end_ns = max(observed_end_ns, _packet_end_ns(pending))
+                        pending = next(packet_iter, None)
                     cluster_time = _exact_ticks(group_min_ns, plan.timestamp_scale_ns, label="Cluster.Timestamp")
                     timestamp_element = uint_element(TIMESTAMP_ID, max(0, cluster_time))
                     packet_elements = [
@@ -362,6 +384,11 @@ class MatroskaWriter:
                 )
                 fh.seek(payload_start)
                 fh.write(seek)
+                if not duration_ns and observed_end_ns:
+                    # Flux paresseux : la durée n'était pas connue avant la
+                    # consommation des paquets — Info réécrite à taille égale.
+                    fh.seek(payload_start + info_offset)
+                    fh.write(_plan_info(plan, observed_end_ns))
             from core.workflows.matroska_reader import MatroskaReader
 
             validation_reader = MatroskaReader(partial)

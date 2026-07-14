@@ -298,8 +298,8 @@ class FrameCountGuard:
     def _ffprobe_nb_frames(self, path: Path) -> int | None:
         """
         Lecture directe de ``nb_frames`` dans le conteneur. Instantané quand
-        le muxer le déclare (toujours en MP4 ; en MKV, parfois écrit par
-        mkvmerge — on tente, on saute si absent).
+        le muxer le déclare (toujours en MP4 ; en MKV, selon le muxeur
+        d'origine — on tente, on saute si absent).
         """
         try:
             result = subprocess.run(

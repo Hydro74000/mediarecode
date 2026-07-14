@@ -6,7 +6,7 @@ Muxer Matroska natif Python pour streams HEVC mono-track.
 Cas d'usage : encapsuler un flux HEVC annexB ré-encodé (ayant subi
 l'injection RPU DoVi / HDR10+ par dovi_tool / hdr10plus_tool) dans un MKV
 en réutilisant les timestamps de la source d'origine. Permet de
-préserver les sources VFR sans dépendre de mkvmerge.
+préserver les sources VFR sans outil externe.
 
 Pourquoi un muxer natif et pas ffmpeg ?
 ========================================
@@ -130,7 +130,7 @@ _FOURCC_DVCC = 0x64766343  # "dvcC"
 
 # --- Réglages muxer ---------------------------------------------------------
 
-#: Taille cible (frames) d'un Cluster. mkvmerge utilise ~1 s ; à 24 fps,
+#: Taille cible (frames) d'un Cluster. L'usage courant est ~1 s ; à 24 fps,
 #: 24 frames/cluster donne une granularité de seek correcte sans bloquer
 #: la lecture (Cluster trop gros → pic mémoire chez le démuxeur).
 _DEFAULT_FRAMES_PER_CLUSTER = 24
@@ -177,8 +177,8 @@ def _build_hvcc(components: _HvccComponents, sps_bytes: bytes | None = None) -> 
 
     Pour un muxage Matroska (qui fournit le bitstream en annexB via
     SimpleBlock), de nombreux champs hvcC peuvent rester à 0/défaut tant
-    que les NAL arrays VPS/SPS/PPS sont corrects. C'est ce que mkvmerge
-    fait pour les pistes HEVC en mode "raw HEVC → MKV".
+    que les NAL arrays VPS/SPS/PPS sont corrects. C'est le comportement
+    usuel des muxeurs pour du HEVC brut → MKV.
     """
     _ = sps_bytes  # extension future : extraire les vrais champs depuis le SPS
 
@@ -200,7 +200,7 @@ def _build_hvcc(components: _HvccComponents, sps_bytes: bytes | None = None) -> 
     # constantFrameRate(2)|numTemporalLayers(3)|temporalIdNested(1)|lengthSizeMinusOne(2)
     # lengthSizeMinusOne = 3 → tailles NAL sur 4 octets dans CodecPrivate (ISO BMFF).
     # Mais en Matroska on émet du annexB dans les SimpleBlocks, donc cette valeur
-    # n'est pas critique. mkvmerge met 3.
+    # n'est pas critique. La valeur usuelle est 3.
     out.append(0x03)
     # numOfArrays
     arrays: list[tuple[int, list[bytes]]] = []

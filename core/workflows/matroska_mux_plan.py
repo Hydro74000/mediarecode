@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,7 +67,11 @@ class MatroskaMuxPacket:
 class MatroskaMuxPlan:
     output: Path
     tracks: tuple[MatroskaMuxTrack, ...]
-    packets: tuple[MatroskaMuxPacket, ...]
+    #: Tuple : ordre libre, le writer applique l'interleave canonique en RAM.
+    #: Itérateur : flux déjà en ordre de mux (ordre de décodage par piste
+    #: préservé), consommé une seule fois — mémoire bornée pour les gros
+    #: fichiers ; la Duration est alors patchée en fin d'écriture.
+    packets: Iterable[MatroskaMuxPacket]
     timestamp_scale_ns: int = 1_000_000
     duration_ms: int = 0
     duration_ns: int = 0
