@@ -673,12 +673,12 @@ class _ResultSection(QWidget):
         layout.setSpacing(8)
 
         card = _card()
-        card.setStyleSheet(f"""
-            QWidget {{
+        card.setStyleSheet("""
+            QWidget {
                 background: #0f2318;
                 border: 1px solid #1a4a2e;
                 border-radius: 6px;
-            }}
+            }
         """)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 14, 16, 14)
@@ -758,12 +758,12 @@ class _ErrorSection(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         card = _card()
-        card.setStyleSheet(f"""
-            QWidget {{
+        card.setStyleSheet("""
+            QWidget {
                 background: #1f0e0e;
                 border: 1px solid #3a1515;
                 border-radius: 6px;
-            }}
+            }
         """)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 12, 16, 12)
@@ -781,7 +781,7 @@ class _ErrorSection(QWidget):
 
         self._msg_lbl = QLabel("")
         self._msg_lbl.setWordWrap(True)
-        self._msg_lbl.setStyleSheet(f"""
+        self._msg_lbl.setStyleSheet("""
             color: #f09090;
             font-size: 11px;
             font-family: 'JetBrains Mono', monospace;

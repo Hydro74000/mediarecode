@@ -26,6 +26,7 @@ import json
 import shutil
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -35,7 +36,7 @@ from PySide6.QtCore import QCoreApplication, Qt
 from core.inspector import AttachmentInfo, ChapterEntry
 from core.runner import TaskSignals
 from core.version import APP_VERSION_LABEL
-from core.workflows.matroska_header_editor import MatroskaSegmentInfoHeaderEditor
+from core.matroska.editors.segment_info import MatroskaSegmentInfoHeaderEditor
 from core.workflows.remux_mapping import (
     requires_file_sync_fallback_for_offsets,
     resolve_mapped_tracks,
@@ -43,6 +44,8 @@ from core.workflows.remux_mapping import (
 from core.workflows.remux_models import RemuxConfig, RemuxError, SourceInput, TrackEntry
 from core.workflows.remux import RemuxWorkflow
 from core.workflows.remux_runtime import RemuxRuntimeRunner, RemuxRuntimeRunnerCallbacks
+from core.workflows.remux_plan import plan_remux
+from core.matroska.contract import ExpectedMatroskaTrack, MatroskaOutputContract
 from core.workflows.remux_sync import (
     decide_strict_interleave_with_prescan,
     prepare_timeline_sync_inputs,
@@ -53,6 +56,24 @@ from core.workflows.remux_timeline_sync import (
     TimelineSyncFallbackHelper,
 )
 from core.workflows.common.sync_rewrite import SyncRewritePreparedInput
+from core.matroska.ebml import ascii_element, element, uint_element
+from core.matroska.ids import (
+    EBML_HEADER_ID, SEGMENT_ID, TRACKS_ID, TRACK_ENTRY_ID, TRACK_NUMBER_ID,
+    TRACK_UID_ID, TRACK_TYPE_ID, CODEC_ID_ID,
+)
+
+
+def _fake_run_cmd_writing_candidate(cmd, _cwd, label, _progress_cb, _signals) -> str:
+    """Faux run_cmd : matérialise un candidat Matroska minimal pour le commit atomique."""
+    if label == "ffmpeg-remux":
+        entry = element(TRACK_ENTRY_ID, b"".join((
+            uint_element(TRACK_NUMBER_ID, 1), uint_element(TRACK_UID_ID, 1),
+            uint_element(TRACK_TYPE_ID, 1), ascii_element(CODEC_ID_ID, "V_MPEG4/ISO/AVC"),
+        )))
+        Path(cmd[-1]).write_bytes(
+            element(EBML_HEADER_ID, b"") + SEGMENT_ID + b"\xff" + element(TRACKS_ID, entry)
+        )
+    return "ok"
 
 
 def _track(
@@ -309,13 +330,12 @@ class TestRemuxWorkflowBuildCommand:
                 ffmpeg_bin="ffmpeg",
                 ffprobe_bin="ffprobe",
                 ffmpeg_thread_args=lambda: [],
-                validate=lambda _config: [],
                 build_command=build_command,
                 log_workflow_type=lambda _kind: None,
                 log_step=lambda _idx, _name: None,
                 log=lambda _level, _message: None,
                 bind_temp_cleanup=lambda _signals, _paths: None,
-                run_cmd=lambda _cmd, _cwd, _label, _progress_cb, _signals: "ok",
+                run_cmd=_fake_run_cmd_writing_candidate,
                 apply_muxing_post_action=lambda _path: None,
                 apply_language_post_action=lambda _path: None,
                 write_nfo=lambda _path: None,
@@ -325,7 +345,15 @@ class TestRemuxWorkflowBuildCommand:
             )
         )
 
-        state = _wait_task(runner.run(cfg))
+        execution_plan = replace(
+            plan_remux(cfg),
+            output_contract=MatroskaOutputContract(
+                track_types=("video",),
+                expected_tracks=(ExpectedMatroskaTrack("video"),),
+                duration_coherent=False,
+            ),
+        )
+        state = _wait_task(runner.run(cfg, execution_plan))
 
         assert state["failed"] is None
         assert captured["sync_inputs"]
@@ -381,13 +409,12 @@ class TestRemuxWorkflowBuildCommand:
                 ffmpeg_bin="ffmpeg",
                 ffprobe_bin="ffprobe",
                 ffmpeg_thread_args=lambda: [],
-                validate=lambda _config: [],
                 build_command=build_command,
                 log_workflow_type=lambda _kind: None,
                 log_step=lambda _idx, _name: None,
                 log=lambda _level, _message: None,
                 bind_temp_cleanup=lambda _signals, _paths: None,
-                run_cmd=lambda _cmd, _cwd, _label, _progress_cb, _signals: "ok",
+                run_cmd=_fake_run_cmd_writing_candidate,
                 apply_muxing_post_action=lambda _path: None,
                 apply_language_post_action=lambda _path: None,
                 write_nfo=lambda _path: None,
@@ -396,7 +423,15 @@ class TestRemuxWorkflowBuildCommand:
             )
         )
 
-        state = _wait_task(runner.run(cfg))
+        execution_plan = replace(
+            plan_remux(cfg),
+            output_contract=MatroskaOutputContract(
+                track_types=("video",),
+                expected_tracks=(ExpectedMatroskaTrack("video"),),
+                duration_coherent=False,
+            ),
+        )
+        state = _wait_task(runner.run(cfg, execution_plan))
 
         assert state["failed"] is None
         mapped_tracks = cast(list, captured["mapped_tracks"])
@@ -404,7 +439,6 @@ class TestRemuxWorkflowBuildCommand:
         assert mapped_audio.track.time_shift_ms == 250
 
     def test_requires_file_sync_fallback_for_offsets_detects_foreign_offset(self, tmp_path):
-        wf = RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe")
         src_a = tmp_path / "a.mkv"
         src_b = tmp_path / "b.mkv"
         src_a.touch()
@@ -424,7 +458,6 @@ class TestRemuxWorkflowBuildCommand:
         assert requires_file_sync_fallback_for_offsets(mapped) is True
 
     def test_requires_file_sync_fallback_for_offsets_ignores_zero_offsets(self, tmp_path):
-        wf = RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe")
         src_a = tmp_path / "a.mkv"
         src_b = tmp_path / "b.mkv"
         src_a.touch()
@@ -444,7 +477,6 @@ class TestRemuxWorkflowBuildCommand:
         assert requires_file_sync_fallback_for_offsets(mapped) is False
 
     def test_decide_strict_interleave_with_prescan_forces_sync_on_foreign_offset(self, tmp_path):
-        wf = RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe")
         src_a = tmp_path / "a.mkv"
         src_b = tmp_path / "b.mkv"
         src_a.touch()
@@ -1260,3 +1292,33 @@ class TestRemuxWorkflowIntegration:
         assert muxing_app == f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}"
         src_apps = _segment_info_apps(src)
         assert apps.get("writing_app") == src_apps.get("writing_app")
+
+
+class TestAbsolutePathNormalization:
+    """P1-b : le workflow résout les chemins relatifs de TOUT producteur
+    (UI, profils, appels directs) avant plan/validation/exécution — les
+    runners exécutent FFmpeg depuis le workspace temporaire tandis que les
+    post-actions résolvent le candidat depuis le cwd du processus."""
+
+    def test_absolute_paths_config_resolves_everything(self, tmp_path, monkeypatch) -> None:
+        from core.workflows.remux import RemuxWorkflow
+        from core.workflows.remux_models import RemuxConfig, SourceInput
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "in.mkv").write_bytes(b"x")
+        config = RemuxConfig(
+            sources=[SourceInput(Path("in.mkv"), 0, [])],
+            output=Path("sub/out.mkv"),
+            track_order=[],
+            work_dir=Path("wip"),
+            extra_attachments=[Path("cover.jpg")],
+        )
+        normalized = RemuxWorkflow._absolute_paths_config(config)
+        assert normalized.sources[0].path == tmp_path / "in.mkv"
+        assert normalized.output == tmp_path / "sub" / "out.mkv"
+        assert normalized.work_dir == tmp_path / "wip"
+        assert normalized.extra_attachments == [tmp_path / "cover.jpg"]
+        assert all(path.is_absolute() for path in (
+            normalized.sources[0].path, normalized.output, normalized.work_dir,
+            *normalized.extra_attachments,
+        ))

@@ -1,5 +1,5 @@
 """
-core/workflows/matroska_timestamp_reader.py
+core/matroska/timestamps.py
 
 Lecteur de timestamps de présentation (PTS) d'une piste vidéo source via
 ffprobe. Utilisé par le muxer Matroska natif (``MatroskaNativeMuxer``)

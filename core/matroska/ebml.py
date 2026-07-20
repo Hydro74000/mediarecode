@@ -1,5 +1,5 @@
 """
-core/workflows/ebml_writer.py
+core/matroska/ebml.py
 
 Primitives d'écriture EBML/Matroska pures Python.
 

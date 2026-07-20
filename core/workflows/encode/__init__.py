@@ -47,14 +47,13 @@ from core.workflows.encode.models import (
     VideoEncodeSettings,
     AudioTrackSettings,
     VideoTrackEncodePlan,
-    TrackMetaPatch,
-    TrackOffset,
     TrackMetaEdit,
     TrackTimeOffset,
     EncodeConfig,
     EncodePreset,
     EncodeError,
 )
+from core.workflows.common.track_types import TrackMetaPatch, TrackOffset
 from core.workflows.encode.hardware import HardwareEncoderDetector
 from core.workflows.encode.profiles import ProfileManager
 from core.workflows.encode.workflow import EncodeWorkflow

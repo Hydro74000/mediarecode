@@ -9,7 +9,7 @@ from typing import Callable
 from core.inspector import AttachmentInfo
 from core.runner import TaskCancelledError, TaskSignals
 from core.subprocess_utils import subprocess_text_kwargs
-from core.workflows.common.attachments import ATTACHMENT_EXT_BY_MIME, mime_for_path, sanitize_filename
+from core.workflows.common.attachments import ATTACHMENT_EXT_BY_MIME, sanitize_filename
 from core.workflows.remux_models import RemuxConfig, RemuxError
 
 
@@ -91,6 +91,10 @@ def extract_attached_pics(
     log_cb: Callable[[str, str], None],
 ) -> list[Path]:
     paths: list[Path] = []
+    # Dédoublonnage déterministe, insensible à la casse : identique sur tout
+    # OS (Path.exists() seul divergerait entre Linux et Windows/macOS) et
+    # répliqué à l'identique par le contrat de validation.
+    used_names: set[str] = set()
     for source in config.sources:
         for attachment in sorted(source.selected_attachments, key=lambda item: item.local_index):
             if not attachment.is_attached_pic:
@@ -103,11 +107,13 @@ def extract_attached_pics(
             if not suffix:
                 suffix = ATTACHMENT_EXT_BY_MIME.get((attachment.mimetype or "").strip().lower(), ".jpg")
             stem = Path(raw_name).stem or f"attachment_{attachment.index}"
-            out_path = tmp_dir / f"{stem}{suffix}"
+            out_name = f"{stem}{suffix}"
             counter = 1
-            while out_path.exists():
-                out_path = tmp_dir / f"{stem}_{counter}{suffix}"
+            while out_name.casefold() in used_names or (tmp_dir / out_name).exists():
+                out_name = f"{stem}_{counter}{suffix}"
                 counter += 1
+            used_names.add(out_name.casefold())
+            out_path = tmp_dir / out_name
 
             cmd = [
                 ffmpeg_bin, "-hide_banner", "-y",

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.workflows.matroska_reader import MatroskaBlock, MatroskaTrack
+from .reader import MatroskaBlock, MatroskaTrack
 
 
 def deterministic_uid(*parts: object) -> int:
@@ -52,6 +52,11 @@ class MatroskaMuxTrack:
     flag_visual_impaired: bool = False
     flag_original: bool = False
     flag_commentary: bool = False
+    #: Patch sélectif : False → la valeur du TrackEntry source est préservée
+    #: telle quelle (utilisé par l'assemblage encode qui copie sans éditer).
+    patch_language: bool = True
+    patch_name: bool = True
+    patch_flags: bool = True
 
 
 @dataclass(frozen=True)

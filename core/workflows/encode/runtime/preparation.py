@@ -10,6 +10,7 @@ from typing import Callable
 
 from core.runner import TaskCancelledError, TaskSignals
 from core.workflows.encode.models import EncodeConfig, EncodeError
+from core.workflows.encode.mux_backend import EncodeMuxDecision
 from core.workflows.encode.planning.plan_models import EncodePlan
 
 
@@ -38,6 +39,8 @@ class EncodePreparationRunnerCallbacks:
     run_multi_video_pipeline: Callable[..., TaskSignals]
     run_with_metadata_inject: Callable[..., TaskSignals]
     run_direct_output: Callable[..., TaskSignals]
+    #: Sélection du backend de muxage final (lot 2). None → FFmpeg historique.
+    select_mux_backend: Callable[[EncodeConfig], EncodeMuxDecision] | None = None
 
 
 class EncodePreparationRunner:
@@ -175,6 +178,34 @@ class EncodePreparationRunner:
                 "métadonnées préservées par passthrough ffmpeg.",
             )
 
+        # Décision de backend de muxage final : prise au préflight, journalisée
+        # avant toute écriture. Aucun repli après le démarrage effectif.
+        cb.check_cancelled(prep_signals)
+        mux_decision = (
+            cb.select_mux_backend(prepared_config)
+            if cb.select_mux_backend is not None
+            else None
+        )
+        native_mux = mux_decision is not None and mux_decision.selected == "native"
+        if mux_decision is not None:
+            cb.log(
+                "INFO",
+                f"MUX_BACKEND requested={mux_decision.requested} "
+                f"selected={mux_decision.selected} plan_version=1 "
+                f"pipeline={mux_decision.pipeline}",
+            )
+            diagnostics = mux_decision.diagnostics
+            if native_mux and diagnostics:
+                # Mode strict : incompatibilité signalée avant l'encodage lourd.
+                raise EncodeError("\n".join(
+                    f"Backend natif indisponible : {reason}." for reason in diagnostics
+                ))
+            if mux_decision.uses_fallback:
+                cb.log(
+                    "WARN",
+                    "Backend natif non applicable ; repli FFmpeg : " + "; ".join(diagnostics),
+                )
+
         cb.check_cancelled(prep_signals)
         if cb.is_multi_video(prepared_config):
             cb.log_step(4, "Routage du workflow (pipeline multi-pistes vidéo)")
@@ -184,23 +215,60 @@ class EncodePreparationRunner:
                     prep_signals,
                     output=prepared_config.output,
                     cleanup_paths=cleanup_paths,
+                    include_nfo=native_mux,
                 )
             signals = cb.run_multi_video_pipeline(
                 prepared_config,
                 cleanup_paths,
                 prep_signals=prep_signals,
                 plan=plan,
+                mux_decision=mux_decision,
             )
             if prep_signals is None or signals is not prep_signals:
                 cb.bind_output_hooks(
                     signals,
                     output=prepared_config.output,
                     cleanup_paths=cleanup_paths,
+                    include_nfo=native_mux,
                 )
             return signals
 
         cb.check_cancelled(prep_signals)
         needs_inject = cb.needs_metadata_inject(prepared_config)
+
+        if (
+            native_mux
+            and not needs_inject
+            and getattr(mux_decision, "pipeline", "") == "ffmpeg_direct"
+        ):
+            # Encode direct explicitement découpé en encode puis assemblage :
+            # le pipeline multi-pistes produit les MKV vidéo intermédiaires,
+            # l'assembleur natif matérialise l'audio et écrit la sortie.
+            cb.log_step(4, "Routage du workflow (encode découpé puis assemblage natif)")
+            plan = cb.build_encode_plan(prepared_config)
+            if prep_signals is not None:
+                cb.bind_output_hooks(
+                    prep_signals,
+                    output=prepared_config.output,
+                    cleanup_paths=cleanup_paths,
+                    include_nfo=True,
+                )
+            signals = cb.run_multi_video_pipeline(
+                prepared_config,
+                cleanup_paths,
+                prep_signals=prep_signals,
+                plan=plan,
+                mux_decision=mux_decision,
+            )
+            if prep_signals is None or signals is not prep_signals:
+                cb.bind_output_hooks(
+                    signals,
+                    output=prepared_config.output,
+                    cleanup_paths=cleanup_paths,
+                    include_nfo=True,
+                )
+            return signals
+
         cb.log_step(
             4,
             "Routage du workflow (sortie directe ou injection metadata)"
@@ -224,6 +292,7 @@ class EncodePreparationRunner:
                 prep_signals,
                 output=prepared_config.output,
                 cleanup_paths=cleanup_paths,
+                include_nfo=native_mux,
             )
 
         plan = cb.build_encode_plan(prepared_config)
@@ -232,6 +301,7 @@ class EncodePreparationRunner:
                 prepared_config,
                 prep_signals=prep_signals,
                 plan=plan,
+                mux_decision=mux_decision,
             )
             if needs_inject
             else cb.run_direct_output(
@@ -239,6 +309,7 @@ class EncodePreparationRunner:
                 cleanup_paths,
                 prep_signals=prep_signals,
                 plan=plan,
+                mux_decision=mux_decision,
             )
         )
         if prep_signals is None or signals is not prep_signals:
@@ -246,7 +317,6 @@ class EncodePreparationRunner:
                 signals,
                 output=prepared_config.output,
                 cleanup_paths=cleanup_paths,
-                include_segment_patch=False,
-                include_nfo=False,
+                include_nfo=native_mux,
             )
         return signals

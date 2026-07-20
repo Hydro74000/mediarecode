@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from core.workflows.matroska_header_editor import (
+from core.matroska.editors.segment_info import (
     MatroskaSegmentInfoHeaderEditor,
     MatroskaSegmentInfoHeaderEditorOptions,
     _AnalyzerState,

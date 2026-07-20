@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from core.workflows.matroska_reader import MatroskaReader
+from core.matroska.reader import MatroskaReader
 from scripts.matroska_semantic_report import compare_reports, semantic_report
 
 

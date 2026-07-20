@@ -3323,10 +3323,6 @@
     "fra": "EAC3=DDP\nAC3=Dolby Digital\nTRUEHD=Dolby TrueHD",
     "eng": "EAC3=DDP\nAC3=Dolby Digital\nTRUEHD=Dolby TrueHD"
   },
-  "Charger": {
-    "fra": "Charger",
-    "eng": "Load"
-  },
   "Supprimer profil": {
     "fra": "Supprimer profil",
     "eng": "Delete profile"
@@ -3786,5 +3782,13 @@
   "Playlist :": {
     "fra": "Playlist :",
     "eng": "Playlist:"
+  },
+  "Muxage Matroska": {
+    "fra": "Muxage Matroska",
+    "eng": "Matroska muxing"
+  },
+  "Assembleur final Matroska des workflows remux et encodage. FFmpeg par défaut ; Auto sélectionne le muxeur natif quand le plan le permet et journalise le repli ; Natif n'autorise aucun repli.": {
+    "fra": "Assembleur final Matroska des workflows remux et encodage. FFmpeg par défaut ; Auto sélectionne le muxeur natif quand le plan le permet et journalise le repli ; Natif n'autorise aucun repli.",
+    "eng": "Final Matroska assembler for the remux and encode workflows. FFmpeg by default; Auto selects the native muxer whenever the plan allows it and logs the fallback; Native never falls back."
   }
 }

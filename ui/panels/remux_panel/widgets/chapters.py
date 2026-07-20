@@ -599,8 +599,6 @@ class _ChapterPanel(QFrame):
             | Qt.ItemFlag.ItemIsSelectable
             | Qt.ItemFlag.ItemIsEditable
         )
-        _FLAG_RO = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-
         tc_str = _format_timecode(entry.timecode_s)
         tc_item = QTableWidgetItem(tc_str)
         tc_item.setFlags(_FLAG_RW)

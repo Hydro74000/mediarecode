@@ -12,7 +12,11 @@ The script:
 
 from __future__ import annotations
 
+# Imports applicatifs placés après l'ajout explicite de la racine du dépôt.
+# ruff: noqa: E402
+
 import copy
+import argparse
 import json
 import os
 import shutil
@@ -56,19 +60,11 @@ BIN_ROOT = ARTIFACT_ROOT / "bin"
 REPORT_PATH = ARTIFACT_ROOT / "report.json"
 SUMMARY_PATH = ARTIFACT_ROOT / "summary.md"
 
-HOST_ROOT = Path("/run/media/hydromel/Disque Local/ngPost/Downloads/complete")
-HOST_SDR_SAMPLE = (
-    HOST_ROOT
-    / "The.Boys.S05E01.MULTI.2160p.WEB.H265-HiggsBoson"
-    / "Sample"
-    / "the.boys.s05e01.multi.2160p.web.h265-higgsboson-sample.mkv"
-)
-HOST_DV_HDR10P = (
-    HOST_ROOT
-    / "The.Boys.2019.S05E01.MULTi.VF2.HDR.DV.2160p.WEB.H265-SUPPLY"
-    / "The.Boys.2019.S05E01.MULTi.VF2.HDR.DV.2160p.WEB.H265-SUPPLY.mkv"
-)
-REAL_FONT = Path("/usr/share/fonts/dejavu/DejaVuSans.ttf")
+HOST_SDR_SAMPLE = Path()
+HOST_DV_HDR10P = Path()
+REAL_FONT = Path()
+SAMPLE_START_S = 0.0
+SAMPLE_DURATION_S = 12.0
 
 CASE_TIMEOUT_S = 1800.0
 
@@ -80,6 +76,8 @@ class ToolPaths:
     mediainfo: str
     dovi_tool: str
     hdr10plus_tool: str
+    mkvinfo: str
+    mkvmerge: str
 
 
 @dataclass(frozen=True)
@@ -161,28 +159,45 @@ def sh_quote(text: str) -> str:
     return "'" + text.replace("'", "'\"'\"'") + "'"
 
 
-def create_tool_wrappers() -> ToolPaths:
+def _resolve_tool(name: str, *, distrobox_name: str | None) -> str:
+    host_tool = shutil.which(name)
+    if host_tool:
+        return host_tool
+    if not distrobox_name:
+        raise RuntimeError(
+            f"Outil requis introuvable sur le host : {name}. "
+            "Utiliser --distrobox NOM pour autoriser sa résolution dans un conteneur."
+        )
+    distrobox = shutil.which("distrobox")
+    if not distrobox:
+        raise RuntimeError("--distrobox demandé mais l'exécutable distrobox est introuvable.")
+    lookup = subprocess.run(
+        [distrobox, "enter", "-n", distrobox_name, "--", "sh", "-lc", f"command -v {name}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    inner_tool = first_line(lookup.stdout)
+    if lookup.returncode != 0 or not inner_tool.startswith("/"):
+        raise RuntimeError(
+            f"Outil requis introuvable dans la Distrobox {distrobox_name} : {name}"
+        )
+    return str(create_wrapper(
+        BIN_ROOT / f"{name}-distrobox",
+        [distrobox, "enter", "-n", distrobox_name, "--", inner_tool],
+    ))
+
+
+def create_tool_wrappers(distrobox_name: str | None = None) -> ToolPaths:
     BIN_ROOT.mkdir(parents=True, exist_ok=True)
-
-    mediainfo = create_wrapper(
-        BIN_ROOT / "mediainfo-host",
-        ["flatpak-spawn", "--host", "mediainfo"],
-    )
-    dovi_tool = create_wrapper(
-        BIN_ROOT / "dovi_tool-host",
-        ["flatpak-spawn", "--host", "dovi_tool"],
-    )
-    hdr10plus_tool = create_wrapper(
-        BIN_ROOT / "hdr10plus_tool-host",
-        ["flatpak-spawn", "--host", "hdr10plus_tool"],
-    )
-
     return ToolPaths(
-        ffmpeg="ffmpeg",
-        ffprobe="ffprobe",
-        mediainfo=str(mediainfo),
-        dovi_tool=str(dovi_tool),
-        hdr10plus_tool=str(hdr10plus_tool),
+        ffmpeg=_resolve_tool("ffmpeg", distrobox_name=distrobox_name),
+        ffprobe=_resolve_tool("ffprobe", distrobox_name=distrobox_name),
+        mediainfo=_resolve_tool("mediainfo", distrobox_name=distrobox_name),
+        dovi_tool=_resolve_tool("dovi_tool", distrobox_name=distrobox_name),
+        hdr10plus_tool=_resolve_tool("hdr10plus_tool", distrobox_name=distrobox_name),
+        mkvinfo=_resolve_tool("mkvinfo", distrobox_name=distrobox_name),
+        mkvmerge=_resolve_tool("mkvmerge", distrobox_name=distrobox_name),
     )
 
 
@@ -193,6 +208,8 @@ def tool_versions(tools: ToolPaths) -> dict[str, str]:
         "mediainfo": first_line(run_cmd([tools.mediainfo, "--Version"]).stdout),
         "dovi_tool": first_line(run_cmd([tools.dovi_tool, "--version"]).stdout),
         "hdr10plus_tool": first_line(run_cmd([tools.hdr10plus_tool, "--version"]).stdout),
+        "mkvinfo": first_line(run_cmd([tools.mkvinfo, "--version"]).stdout),
+        "mkvmerge": first_line(run_cmd([tools.mkvmerge, "--version"]).stdout),
     }
 
 
@@ -200,13 +217,46 @@ def first_line(text: str | None) -> str:
     return ((text or "").strip().splitlines() or [""])[0]
 
 
+def packet_counts(path: Path, tools: ToolPaths) -> dict[int, tuple[str, int]]:
+    payload = json.loads(run_cmd([
+        tools.ffprobe, "-v", "error", "-count_packets",
+        "-show_entries", "stream=index,codec_type,nb_read_packets",
+        "-of", "json", str(path.resolve()),
+    ]).stdout or "{}")
+    counts: dict[int, tuple[str, int]] = {}
+    for stream in payload.get("streams", []):
+        try:
+            count = int(stream.get("nb_read_packets", 0))
+        except (TypeError, ValueError):
+            count = 0
+        counts[int(stream["index"])] = (str(stream.get("codec_type") or ""), count)
+    return counts
+
+
+def require_packet_streams(
+    path: Path, tools: ToolPaths, expected: dict[int, str],
+) -> dict[int, tuple[str, int]]:
+    counts = packet_counts(path, tools)
+    errors: list[str] = []
+    for index, track_type in expected.items():
+        observed_type, count = counts.get(index, ("absent", 0))
+        if observed_type != track_type or count <= 0:
+            errors.append(
+                f"stream #{index}: attendu {track_type} non vide, "
+                f"obtenu {observed_type} avec {count} paquet(s)"
+            )
+    if errors:
+        raise RuntimeError(f"Corpus réel inutilisable ({path.name}) : " + "; ".join(errors))
+    return counts
+
+
 def prepare_corpus(tools: ToolPaths) -> PreparedSources:
     CORPUS_ROOT.mkdir(parents=True, exist_ok=True)
 
-    base_clip = CORPUS_ROOT / "sdr_base_18s.mkv"
-    sdr_attach = CORPUS_ROOT / "sdr_attach_source_18s.mkv"
-    sdr_meta = CORPUS_ROOT / "sdr_meta_source_18s.mkv"
-    dv_hdr10p = CORPUS_ROOT / "dv_hdr10plus_source_12s.mkv"
+    base_clip = CORPUS_ROOT / "sdr_base_short.mkv"
+    sdr_attach = CORPUS_ROOT / "sdr_attach_source_short.mkv"
+    sdr_meta = CORPUS_ROOT / "sdr_meta_source_short.mkv"
+    dv_hdr10p = CORPUS_ROOT / "dv_hdr10plus_source_short.mkv"
     cover = CORPUS_ROOT / "cover.jpg"
     chapters = CORPUS_ROOT / "meta_source_chapters.ffmetadata"
 
@@ -217,9 +267,9 @@ def prepare_corpus(tools: ToolPaths) -> PreparedSources:
         "error",
         "-y",
         "-ss",
-        "0",
+        str(SAMPLE_START_S),
         "-t",
-        "18",
+        str(SAMPLE_DURATION_S),
         "-i",
         str(HOST_SDR_SAMPLE.resolve()),
         "-map",
@@ -273,13 +323,16 @@ def prepare_corpus(tools: ToolPaths) -> PreparedSources:
         str(sdr_attach.resolve()),
     ])
 
+    duration_ms = max(3, int(round(SAMPLE_DURATION_S * 1000)))
+    first_end = duration_ms // 3
+    second_end = (duration_ms * 2) // 3
     write_text(
         chapters,
         (
             ";FFMETADATA1\n\n"
-            "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=6000\ntitle=Intro\n\n"
-            "[CHAPTER]\nTIMEBASE=1/1000\nSTART=6000\nEND=12000\ntitle=Middle\n\n"
-            "[CHAPTER]\nTIMEBASE=1/1000\nSTART=12000\nEND=18000\ntitle=End\n"
+            f"[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND={first_end}\ntitle=Intro\n\n"
+            f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={first_end}\nEND={second_end}\ntitle=Middle\n\n"
+            f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={second_end}\nEND={duration_ms}\ntitle=End\n"
         ),
     )
 
@@ -319,9 +372,9 @@ def prepare_corpus(tools: ToolPaths) -> PreparedSources:
         "error",
         "-y",
         "-ss",
-        "0",
+        str(SAMPLE_START_S),
         "-t",
-        "12",
+        str(SAMPLE_DURATION_S),
         "-i",
         str(HOST_DV_HDR10P.resolve()),
         "-map",
@@ -333,6 +386,8 @@ def prepare_corpus(tools: ToolPaths) -> PreparedSources:
         str(dv_hdr10p.resolve()),
     ])
 
+    require_packet_streams(base_clip, tools, {0: "video", 1: "audio", 2: "audio"})
+    require_packet_streams(dv_hdr10p, tools, {0: "video", 1: "audio", 3: "audio"})
     if not has_dovi(dv_hdr10p, tools):
         raise RuntimeError("Prepared DV/HDR10+ source lost Dolby Vision metadata.")
     if not has_hdr10plus(dv_hdr10p, tools):
@@ -343,6 +398,70 @@ def prepare_corpus(tools: ToolPaths) -> PreparedSources:
         sdr_meta_source=sdr_meta.resolve(),
         dv_hdr10plus_source=dv_hdr10p.resolve(),
     )
+
+
+def _discover_font(explicit: str | None) -> Path:
+    if explicit:
+        candidate = Path(explicit).expanduser().resolve()
+        if candidate.is_file():
+            return candidate
+        raise RuntimeError(f"Police de test introuvable : {candidate}")
+    candidates = sorted(Path("/usr/share/fonts").rglob("*.ttf"))
+    if not candidates:
+        candidates = sorted(Path("/usr/share/fonts").rglob("*.otf"))
+    if not candidates:
+        raise RuntimeError("Aucune police TTF/OTF réelle trouvée ; utiliser --font.")
+    return candidates[0].resolve()
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sdr-source", default=os.environ.get("MUXIVEO_TEST_SDR_SOURCE"))
+    parser.add_argument("--dv-source", default=os.environ.get("MUXIVEO_TEST_DV_SOURCE"))
+    parser.add_argument(
+        "--artifact-root",
+        default=os.environ.get("MUXIVEO_TEST_ARTIFACT_ROOT", str(ARTIFACT_ROOT)),
+    )
+    parser.add_argument(
+        "--sample-start", type=float,
+        default=float(os.environ.get("MUXIVEO_TEST_SAMPLE_START", "0")),
+    )
+    parser.add_argument(
+        "--sample-duration", type=float,
+        default=float(os.environ.get("MUXIVEO_TEST_SAMPLE_DURATION", "12")),
+    )
+    parser.add_argument("--distrobox", default=os.environ.get("MUXIVEO_TEST_DISTROBOX"))
+    parser.add_argument("--font", default=os.environ.get("MUXIVEO_TEST_FONT"))
+    args = parser.parse_args(argv)
+    if not args.sdr_source or not args.dv_source:
+        parser.error(
+            "sources réelles obligatoires : --sdr-source et --dv-source "
+            "(ou MUXIVEO_TEST_SDR_SOURCE / MUXIVEO_TEST_DV_SOURCE)"
+        )
+    if args.sample_start < 0 or args.sample_duration <= 0:
+        parser.error("--sample-start doit être >= 0 et --sample-duration > 0")
+    for name in ("sdr_source", "dv_source"):
+        path = Path(getattr(args, name)).expanduser().resolve()
+        if not path.is_file():
+            parser.error(f"source réelle introuvable : {path}")
+        setattr(args, name, path)
+    return args
+
+
+def configure_runtime(args: argparse.Namespace) -> None:
+    global ARTIFACT_ROOT, CORPUS_ROOT, RUNS_ROOT, BIN_ROOT, REPORT_PATH, SUMMARY_PATH
+    global HOST_SDR_SAMPLE, HOST_DV_HDR10P, REAL_FONT, SAMPLE_START_S, SAMPLE_DURATION_S
+    ARTIFACT_ROOT = Path(args.artifact_root).expanduser().resolve()
+    CORPUS_ROOT = ARTIFACT_ROOT / "corpus"
+    RUNS_ROOT = ARTIFACT_ROOT / "runs"
+    BIN_ROOT = ARTIFACT_ROOT / "bin"
+    REPORT_PATH = ARTIFACT_ROOT / "report.json"
+    SUMMARY_PATH = ARTIFACT_ROOT / "summary.md"
+    HOST_SDR_SAMPLE = Path(args.sdr_source)
+    HOST_DV_HDR10P = Path(args.dv_source)
+    REAL_FONT = _discover_font(args.font)
+    SAMPLE_START_S = float(args.sample_start)
+    SAMPLE_DURATION_S = float(args.sample_duration)
 
 
 def wait_task(signals, timeout_s: float) -> dict[str, Any]:
@@ -678,12 +797,12 @@ def track_meta_edit(track_order: int, **payload: Any) -> TrackMetaEdit:
         "track_order": track_order,
         "language": payload.get("language", ""),
         "title": payload.get("title"),
-        "flag_default": payload.get("flag_default", False),
-        "flag_forced": payload.get("flag_forced", False),
-        "flag_hearing_impaired": payload.get("flag_hearing_impaired", False),
-        "flag_visual_impaired": payload.get("flag_visual_impaired", False),
-        "flag_original": payload.get("flag_original", False),
-        "flag_commentary": payload.get("flag_commentary", False),
+        "flag_default": payload.get("flag_default"),
+        "flag_forced": payload.get("flag_forced"),
+        "flag_hearing_impaired": payload.get("flag_hearing_impaired"),
+        "flag_visual_impaired": payload.get("flag_visual_impaired"),
+        "flag_original": payload.get("flag_original"),
+        "flag_commentary": payload.get("flag_commentary"),
     }
     return TrackMetaEdit(**data)
 
@@ -748,6 +867,7 @@ def finalize_case(
     notes: list[str],
     tools: ToolPaths,
     exception: Exception | None = None,
+    backend: str = "",
 ) -> dict[str, Any]:
     ended = time.monotonic()
     work_state = process_dir_state(work_root, output_path)
@@ -755,6 +875,7 @@ def finalize_case(
         "id": case_id,
         "workflow": workflow_name,
         "branch": branch,
+        "backend": backend,
         "source": str(source),
         "output": str(output_path),
         "started_at": iso_now(),
@@ -780,8 +901,31 @@ def finalize_case(
             result["status"] = "warn"
         else:
             result["status"] = "pass"
-    if exception is None and result["status"] in {"pass", "warn"}:
-        shutil.rmtree(case_root, ignore_errors=True)
+    return result
+
+
+def append_oracle_checks(result: dict[str, Any], tools: ToolPaths) -> dict[str, Any]:
+    output = Path(str(result.get("output") or ""))
+    if result.get("status") == "fail" or not output.is_file():
+        result["oracle_checks"] = {
+            "mkvinfo_check_mode": False,
+            "mkvmerge_identify": False,
+        }
+        return result
+    checks: dict[str, bool] = {}
+    diagnostics: list[str] = []
+    for name, command in (
+        ("mkvinfo_check_mode", [tools.mkvinfo, "--check-mode", str(output)]),
+        ("mkvmerge_identify", [tools.mkvmerge, "-J", str(output)]),
+    ):
+        proc = run_cmd(command, check=False)
+        checks[name] = proc.returncode == 0
+        if proc.returncode != 0:
+            diagnostics.append(f"{name}: {(proc.stderr or proc.stdout or '').strip()}")
+    result["oracle_checks"] = checks
+    if not all(checks.values()):
+        result["status"] = "fail"
+        result["error"] = "Oracle MKVToolNix échoué : " + " ; ".join(diagnostics)
     return result
 
 
@@ -826,7 +970,9 @@ def build_encode_workflow(tools: ToolPaths) -> EncodeWorkflow:
     return workflow
 
 
-def run_remux_case_ffmpeg_attachments(case_id: str, sources: PreparedSources, tools: ToolPaths) -> dict[str, Any]:
+def run_remux_case_attachments(
+    case_id: str, sources: PreparedSources, tools: ToolPaths, *, backend: str,
+) -> dict[str, Any]:
     case_root = RUNS_ROOT / case_id
     case_root.mkdir(parents=True, exist_ok=True)
     output_path = (case_root / "out.mkv").resolve()
@@ -855,6 +1001,7 @@ def run_remux_case_ffmpeg_attachments(case_id: str, sources: PreparedSources, to
         file_title="Attach Source Remux FFmpeg",
         tag_overrides={"TEST_CASE": case_id, "SOURCE": "remux-ffmpeg-attachments"},
         work_dir=work_root,
+        mux_backend=backend,
     )
 
     try:
@@ -892,6 +1039,7 @@ def run_remux_case_ffmpeg_attachments(case_id: str, sources: PreparedSources, to
             cleanup_checks=cleanup,
             notes=[],
             tools=tools,
+            backend=backend,
         )
     except Exception as exc:
         return finalize_case(
@@ -911,10 +1059,13 @@ def run_remux_case_ffmpeg_attachments(case_id: str, sources: PreparedSources, to
             notes=[],
             tools=tools,
             exception=exc,
+            backend=backend,
         )
 
 
-def run_remux_case_ffmpeg_override(case_id: str, sources: PreparedSources, tools: ToolPaths) -> dict[str, Any]:
+def run_remux_case_override(
+    case_id: str, sources: PreparedSources, tools: ToolPaths, *, backend: str,
+) -> dict[str, Any]:
     case_root = RUNS_ROOT / case_id
     case_root.mkdir(parents=True, exist_ok=True)
     output_path = (case_root / "out.mkv").resolve()
@@ -952,6 +1103,7 @@ def run_remux_case_ffmpeg_override(case_id: str, sources: PreparedSources, tools
         },
         extra_attachments=[extra_cover.resolve()],
         work_dir=work_root,
+        mux_backend=backend,
     )
 
     try:
@@ -990,6 +1142,7 @@ def run_remux_case_ffmpeg_override(case_id: str, sources: PreparedSources, tools
             cleanup_checks=cleanup,
             notes=[],
             tools=tools,
+            backend=backend,
         )
     except Exception as exc:
         return finalize_case(
@@ -1009,10 +1162,13 @@ def run_remux_case_ffmpeg_override(case_id: str, sources: PreparedSources, tools
             notes=[],
             tools=tools,
             exception=exc,
+            backend=backend,
         )
 
 
-def run_remux_case_ffmpeg_cleanup(case_id: str, sources: PreparedSources, tools: ToolPaths) -> dict[str, Any]:
+def run_remux_case_cleanup(
+    case_id: str, sources: PreparedSources, tools: ToolPaths, *, backend: str,
+) -> dict[str, Any]:
     case_root = RUNS_ROOT / case_id
     case_root.mkdir(parents=True, exist_ok=True)
     output_path = (case_root / "out.mkv").resolve()
@@ -1041,6 +1197,7 @@ def run_remux_case_ffmpeg_cleanup(case_id: str, sources: PreparedSources, tools:
         file_title="",
         tag_overrides={},
         work_dir=work_root,
+        mux_backend=backend,
     )
 
     try:
@@ -1077,6 +1234,7 @@ def run_remux_case_ffmpeg_cleanup(case_id: str, sources: PreparedSources, tools:
             cleanup_checks=cleanup,
             notes=[],
             tools=tools,
+            backend=backend,
         )
     except Exception as exc:
         return finalize_case(
@@ -1096,6 +1254,7 @@ def run_remux_case_ffmpeg_cleanup(case_id: str, sources: PreparedSources, tools:
             notes=[],
             tools=tools,
             exception=exc,
+            backend=backend,
         )
 
 
@@ -1512,6 +1671,7 @@ def dv_encode_config(
     work_dir: Path,
     file_title: str,
     test_case: str,
+    mux_backend: str = "ffmpeg",
 ) -> EncodeConfig:
     return EncodeConfig(
         source=source.resolve(),
@@ -1533,10 +1693,18 @@ def dv_encode_config(
         copy_hdr10plus=copy_hdr10plus,
         duration_s=info.duration_s,
         work_dir=work_dir.resolve(),
+        mux_backend=mux_backend,
     )
 
 
-def run_encode_case_dv_inject(case_id: str, sources: PreparedSources, tools: ToolPaths, *, request_hdr10plus: bool) -> dict[str, Any]:
+def run_encode_case_dv_inject(
+    case_id: str,
+    sources: PreparedSources,
+    tools: ToolPaths,
+    *,
+    request_hdr10plus: bool,
+    backend: str = "ffmpeg",
+) -> dict[str, Any]:
     case_root = RUNS_ROOT / case_id
     case_root.mkdir(parents=True, exist_ok=True)
     output_path = (case_root / "out.mkv").resolve()
@@ -1556,6 +1724,7 @@ def run_encode_case_dv_inject(case_id: str, sources: PreparedSources, tools: Too
         work_dir=work_root,
         file_title="Encode DV Inject" if not request_hdr10plus else "Encode DV+HDR10+ Requested",
         test_case=case_id,
+        mux_backend=backend,
     )
 
     try:
@@ -1570,6 +1739,10 @@ def run_encode_case_dv_inject(case_id: str, sources: PreparedSources, tools: Too
             "hdr10plus_preserved": hdr10_ok if request_hdr10plus else not hdr10_ok,
             "audio_count_1": len(out_info.audio_tracks) == 1,
             "subtitle_count_1": len(out_info.subtitle_tracks) == 1,
+            "video_language_preserved": (
+                stream_languages(out_info.video_tracks)[:1]
+                == stream_languages(info.video_tracks)[:1]
+            ),
         }
         cleanup = {
             "stale_file_removed": not stale.exists(),
@@ -1597,6 +1770,7 @@ def run_encode_case_dv_inject(case_id: str, sources: PreparedSources, tools: Too
             cleanup_checks=cleanup,
             notes=notes,
             tools=tools,
+            backend=backend,
         )
     except Exception as exc:
         return finalize_case(
@@ -1616,6 +1790,7 @@ def run_encode_case_dv_inject(case_id: str, sources: PreparedSources, tools: Too
             notes=[],
             tools=tools,
             exception=exc,
+            backend=backend,
         )
 
 
@@ -1630,8 +1805,8 @@ def build_summary_markdown(report: dict[str, Any]) -> str:
         f"- Fail: `{report.get('summary', {}).get('fail', 0)}`",
         f"- Skipped: `{report.get('summary', {}).get('skipped', 0)}`",
         "",
-        "| Case | Workflow | Branch | Status | Functional | Cleanup | Key Notes |",
-        "|---|---|---|---|---|---|---|",
+        "| Case | Workflow | Backend | Branch | Status | Functional | Cleanup | Oracles | Key Notes |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for case in report.get("cases", []):
         if case.get("status") == "skipped":
@@ -1640,16 +1815,19 @@ def build_summary_markdown(report: dict[str, Any]) -> str:
         else:
             functional = "OK" if (not case.get("error") and all(case.get("functional_checks", {}).values())) else "KO"
             cleanup = "OK" if (not case.get("error") and all(case.get("cleanup_checks", {}).values())) else "KO"
+        oracles = "OK" if all(case.get("oracle_checks", {}).values()) else "KO"
         notes = "; ".join(case.get("notes", [])[:2])
         lines.append(
             "| "
             + " | ".join([
                 case["id"],
                 case["workflow"],
+                case.get("backend", ""),
                 case["branch"],
                 case["status"],
                 functional,
                 cleanup,
+                oracles,
                 notes.replace("|", "/"),
             ])
             + " |"
@@ -1657,12 +1835,14 @@ def build_summary_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    configure_runtime(args)
     ensure_app()
     shutil.rmtree(RUNS_ROOT, ignore_errors=True)
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
 
-    tools = create_tool_wrappers()
+    tools = create_tool_wrappers(args.distrobox)
     sources = prepare_corpus(tools)
 
     report: dict[str, Any] = {
@@ -1674,6 +1854,7 @@ def main() -> int:
             "sdr_sample": str(HOST_SDR_SAMPLE),
             "dv_hdr10plus": str(HOST_DV_HDR10P),
         },
+        "sample": {"start_s": SAMPLE_START_S, "duration_s": SAMPLE_DURATION_S},
         "prepared_sources": {
             "sdr_attach_source": str(sources.sdr_attach_source),
             "sdr_meta_source": str(sources.sdr_meta_source),
@@ -1685,42 +1866,45 @@ def main() -> int:
     }
     write_json_atomic(REPORT_PATH, report)
 
-    skipped_reason = "backend mkvmerge désactivé par politique outil"
     cases: list[Callable[[], dict[str, Any]]] = [
-        lambda: run_remux_case_ffmpeg_attachments("R1_ffmpeg_attach", sources, tools),
-        lambda: run_remux_case_ffmpeg_override("R2_ffmpeg_override", sources, tools),
-        lambda: run_remux_case_ffmpeg_cleanup("R3_ffmpeg_cleanup", sources, tools),
-        lambda: skipped_case_result(
-            case_id="R4_mkvmerge_attach",
-            workflow_name="remux_mkvmerge",
-            branch="preserve_source_attachments",
-            source=sources.sdr_attach_source,
-            reason=skipped_reason,
-        ),
-        lambda: skipped_case_result(
-            case_id="R5_mkvmerge_override",
-            workflow_name="remux_mkvmerge",
-            branch="override_metadata_cover",
-            source=sources.sdr_meta_source,
-            reason=skipped_reason,
-        ),
-        lambda: skipped_case_result(
-            case_id="R6_mkvmerge_cleanup",
-            workflow_name="remux_mkvmerge",
-            branch="cleanup_remove_metadata",
-            source=sources.sdr_meta_source,
-            reason=skipped_reason,
-        ),
+        lambda: run_remux_case_attachments("R1_ffmpeg_attach", sources, tools, backend="ffmpeg"),
+        lambda: run_remux_case_override("R2_ffmpeg_override", sources, tools, backend="ffmpeg"),
+        lambda: run_remux_case_cleanup("R3_ffmpeg_cleanup", sources, tools, backend="ffmpeg"),
+        lambda: run_remux_case_attachments("R4_native_attach", sources, tools, backend="native"),
+        lambda: run_remux_case_override("R5_native_override", sources, tools, backend="native"),
+        lambda: run_remux_case_cleanup("R6_native_cleanup", sources, tools, backend="native"),
+        lambda: run_remux_case_attachments("R7_auto_attach", sources, tools, backend="auto"),
+        lambda: run_remux_case_override("R8_auto_override", sources, tools, backend="auto"),
+        lambda: run_remux_case_cleanup("R9_auto_cleanup", sources, tools, backend="auto"),
         lambda: run_encode_case_copy_attachments("E1_encode_copy_attach", sources, tools),
         lambda: run_encode_case_single_pass("E2_encode_single", sources, tools),
         lambda: run_encode_case_two_pass("E3_encode_two_pass", sources, tools),
         lambda: run_encode_case_copy_dv_hdr10p("E4_encode_copy_dv_hdr10p", sources, tools),
         lambda: run_encode_case_dv_inject("E5_encode_dv_inject", sources, tools, request_hdr10plus=False),
         lambda: run_encode_case_dv_inject("E6_encode_dv_hdr10p_requested", sources, tools, request_hdr10plus=True),
+        lambda: run_encode_case_dv_inject(
+            "E7_native_dv_inject", sources, tools,
+            request_hdr10plus=False, backend="native",
+        ),
+        lambda: run_encode_case_dv_inject(
+            "E8_native_dv_hdr10p", sources, tools,
+            request_hdr10plus=True, backend="native",
+        ),
+        lambda: run_encode_case_dv_inject(
+            "E9_auto_dv_inject", sources, tools,
+            request_hdr10plus=False, backend="auto",
+        ),
+        lambda: run_encode_case_dv_inject(
+            "E10_auto_dv_hdr10p", sources, tools,
+            request_hdr10plus=True, backend="auto",
+        ),
     ]
 
     for runner in cases:
         result = runner()
+        if not result.get("backend"):
+            result["backend"] = "ffmpeg"
+        result = append_oracle_checks(result, tools)
         append_case_result(report, result)
 
     final_report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
@@ -1729,7 +1913,7 @@ def main() -> int:
     print(f"JSON report: {REPORT_PATH}")
     print(f"Summary MD:  {SUMMARY_PATH}")
     print(json.dumps(final_report["summary"], ensure_ascii=False))
-    return 0
+    return 1 if final_report["summary"].get("fail", 0) else 0
 
 
 if __name__ == "__main__":

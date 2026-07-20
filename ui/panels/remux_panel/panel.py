@@ -35,7 +35,7 @@ from core.bluray import discover_titles, find_disc_root
 from core.extractor import TrackExtractor
 from core.file_types import is_accepted
 from core.i18n import apply_translations, translate_text
-from core.matroska_attachment_extractor import extract_matroska_attachment_bytes
+from core.matroska.reader import MatroskaReader
 from core.inspector import AttachmentInfo, ChapterEntry, FileInfo
 from core.profiles.decision import DecisionProfileManager, apply_decision_profile as apply_decision_profile_v1
 from core.profiles.selectors import remux_config_to_exact_job
@@ -149,6 +149,7 @@ class RemuxPanel(QWidget):
     video_tracks_changed = Signal(object)
     audio_tracks_changed = Signal(object)
     ready_changed = Signal(bool)
+    mux_backend_changed = Signal(str)
 
     def __init__(
         self,
@@ -398,13 +399,17 @@ class RemuxPanel(QWidget):
         backend_label.setStyleSheet(f"color: {_C.TEXT_SEC}; background: transparent;")
         self._mux_backend_combo = QComboBox()
         for value, label in (
-            ("auto", "Auto"), ("native", "Natif Matroska"), ("ffmpeg", "FFmpeg"),
+            ("ffmpeg", "FFmpeg"), ("native", "Natif Matroska"), ("auto", "Auto"),
         ):
             self._mux_backend_combo.addItem(translate_text(label), value)
-        selected_backend = self._mux_backend_combo.findData(self._config.remux_mux_backend)
+        # Override du job, initialisé avec le réglage global [matroska].
+        selected_backend = self._mux_backend_combo.findData(self._config.matroska_mux_backend)
         self._mux_backend_combo.setCurrentIndex(max(0, selected_backend))
         self._mux_backend_combo.setStyleSheet(_input_style())
         self._mux_backend_combo.currentIndexChanged.connect(self._rebuild_preview)
+        self._mux_backend_combo.currentIndexChanged.connect(
+            lambda _index: self.mux_backend_changed.emit(self.current_mux_backend())
+        )
         backend_row.addWidget(backend_label)
         backend_row.addWidget(self._mux_backend_combo)
         backend_row.addStretch()
@@ -615,7 +620,7 @@ class RemuxPanel(QWidget):
                 translate_text("Source introuvable pour cet attachement embarqué.")
             )
         try:
-            return extract_matroska_attachment_bytes(source.path, attachment.local_index)
+            return MatroskaReader(source.path).attachment_data(attachment.local_index)
         except Exception as exc:
             raise RuntimeError(
                 translate_text("Impossible d'extraire cet attachement embarqué depuis la source.")
@@ -747,7 +752,7 @@ class RemuxPanel(QWidget):
             track_order=track_order,
             keep_chapters=True,
             work_dir=self._config.work_dir,
-            mux_backend=str(self._mux_backend_combo.currentData() or self._config.remux_mux_backend),
+            mux_backend=str(self._mux_backend_combo.currentData() or self._config.matroska_mux_backend),
         )
 
     def _export_exact_json(self) -> None:
@@ -1648,6 +1653,12 @@ class RemuxPanel(QWidget):
 
     def current_file_title(self) -> str:
         return self._file_title_edit.text().strip()
+
+    def current_mux_backend(self) -> str:
+        return str(
+            self._mux_backend_combo.currentData()
+            or self._config.matroska_mux_backend
+        )
 
     def current_extra_attachments(self) -> list:
         return self._attachment_panel.get_extra_attachments()

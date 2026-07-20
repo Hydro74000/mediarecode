@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import heapq
 from collections.abc import Iterable
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Callable
 
-from core.workflows.ebml_writer import (
-    binary_element, element, encode_unknown_size_marker, encode_vint_size_minimal,
+from .ebml import (
+    binary_element, element, encode_unknown_size_marker, encode_vint_size,
+    encode_vint_size_minimal,
     float_element, sint_element, string_element, uint_element,
 )
-from core.workflows.matroska_element_ids import (
+from .ids import (
     ATTACHMENTS_ID, ATTACHED_FILE_ID,
     BLOCK_ADDITIONS_ID, BLOCK_DURATION_ID, BLOCK_GROUP_ID, BLOCK_ID,
     CLUSTER_ID, CODEC_STATE_ID, CUES_ID, DISCARD_PADDING_ID,
@@ -28,20 +30,24 @@ from core.workflows.matroska_element_ids import (
     SEGMENT_UID_ID, TIMESTAMP_ID, TIMESTAMP_SCALE_ID, TRACK_ENTRY_ID,
     TRACK_NUMBER_ID, TRACK_UID_ID, TRACKS_ID, TITLE_ID, WRITING_APP_ID,
 )
-from core.workflows.matroska_mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack, deterministic_uid
-from core.workflows.matroska_native_muxer import (
+from .mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack, deterministic_uid
+from .native_muxer import (
     _ClusterRecord, _build_cues, _build_ebml_header, _build_seek_head,
 )
-from core.workflows.matroska_reader import read_element
-from core.workflows.matroska_reader import MatroskaAttachment
+from .reader import read_element
+from .reader import MatroskaAttachment
 
 
-_PATCHED_TRACK_FIELDS = {
-    TRACK_NUMBER_ID, TRACK_UID_ID, LANGUAGE_ID, LANGUAGE_BCP47_ID,
-    NAME_ID, FLAG_ENABLED_ID, FLAG_DEFAULT_ID, FLAG_FORCED_ID,
+#: Charge utile maximale d'un Cluster (octets). Borne le pic mémoire du
+#: writer (groupe courant + copies transitoires) indépendamment du flux.
+_MAX_CLUSTER_PAYLOAD_BYTES = 4 * 1024 * 1024
+
+_PATCHED_TRACK_FLAG_FIELDS = {
+    FLAG_ENABLED_ID, FLAG_DEFAULT_ID, FLAG_FORCED_ID,
     FLAG_HEARING_IMPAIRED_ID, FLAG_VISUAL_IMPAIRED_ID, FLAG_ORIGINAL_ID,
     FLAG_COMMENTARY_ID,
 }
+_PATCHED_TRACK_LANGUAGE_FIELDS = {LANGUAGE_ID, LANGUAGE_BCP47_ID}
 
 
 def _raw_children(payload: bytes) -> list[tuple[bytes, bytes]]:
@@ -114,22 +120,35 @@ def rewrite_tag_target_uids(
 
 
 def _track_entry(track: MatroskaMuxTrack) -> bytes:
-    kept = b"".join(raw for element_id, raw in _raw_children(track.source_track.raw_entry) if element_id not in _PATCHED_TRACK_FIELDS)
-    fields = b"".join((
+    patched_ids = {TRACK_NUMBER_ID, TRACK_UID_ID}
+    if track.patch_flags:
+        patched_ids |= _PATCHED_TRACK_FLAG_FIELDS
+    if track.patch_language:
+        patched_ids |= _PATCHED_TRACK_LANGUAGE_FIELDS
+    if track.patch_name:
+        patched_ids.add(NAME_ID)
+    kept = b"".join(raw for element_id, raw in _raw_children(track.source_track.raw_entry) if element_id not in patched_ids)
+    parts: list[bytes] = [
         uint_element(TRACK_NUMBER_ID, track.output_number),
         uint_element(TRACK_UID_ID, track.output_uid),
-        uint_element(FLAG_ENABLED_ID, int(track.flag_enabled)),
-        uint_element(FLAG_DEFAULT_ID, int(track.flag_default)),
-        uint_element(FLAG_FORCED_ID, int(track.flag_forced)),
-        uint_element(FLAG_HEARING_IMPAIRED_ID, int(track.flag_hearing_impaired)),
-        uint_element(FLAG_VISUAL_IMPAIRED_ID, int(track.flag_visual_impaired)),
-        uint_element(FLAG_ORIGINAL_ID, int(track.flag_original)),
-        uint_element(FLAG_COMMENTARY_ID, int(track.flag_commentary)),
-        string_element(LANGUAGE_ID, track.language or "und"),
-        string_element(LANGUAGE_BCP47_ID, track.language_bcp47) if track.language_bcp47 else b"",
-        string_element(NAME_ID, track.name) if track.name else b"",
-    ))
-    return element(TRACK_ENTRY_ID, fields + kept)
+    ]
+    if track.patch_flags:
+        parts.extend((
+            uint_element(FLAG_ENABLED_ID, int(track.flag_enabled)),
+            uint_element(FLAG_DEFAULT_ID, int(track.flag_default)),
+            uint_element(FLAG_FORCED_ID, int(track.flag_forced)),
+            uint_element(FLAG_HEARING_IMPAIRED_ID, int(track.flag_hearing_impaired)),
+            uint_element(FLAG_VISUAL_IMPAIRED_ID, int(track.flag_visual_impaired)),
+            uint_element(FLAG_ORIGINAL_ID, int(track.flag_original)),
+            uint_element(FLAG_COMMENTARY_ID, int(track.flag_commentary)),
+        ))
+    if track.patch_language:
+        parts.append(string_element(LANGUAGE_ID, track.language or "und"))
+        if track.language_bcp47:
+            parts.append(string_element(LANGUAGE_BCP47_ID, track.language_bcp47))
+    if track.patch_name and track.name:
+        parts.append(string_element(NAME_ID, track.name))
+    return element(TRACK_ENTRY_ID, b"".join(parts) + kept)
 
 
 def _block_header(track_number: int, timestamp_offset: int, flags: int) -> bytes:
@@ -148,10 +167,21 @@ def _is_keyframe(packet: MatroskaMuxPacket) -> bool:
     return bool(packet.block.flags & 0x80) if value is None else value
 
 
-def _packet_end_ns(packet: MatroskaMuxPacket) -> int:
+def _explicit_duration_ns(packet: MatroskaMuxPacket) -> int | None:
     block = packet.block
-    duration = block.duration_ns if block.duration_ns is not None else (block.duration_ms or 0) * 1_000_000
-    return _timestamp_ns(packet) + duration
+    if block.duration_ns is not None:
+        return block.duration_ns
+    if block.duration_ms is not None:
+        return block.duration_ms * 1_000_000
+    return None
+
+
+def _effective_frame_payload(packet: MatroskaMuxPacket) -> bytes:
+    """Payload réellement écrit : payload lacé complet pour un block lacé."""
+    block = packet.block
+    if block.lace_count > 1 and block.encoded_frames_payload:
+        return block.encoded_frames_payload
+    return block.payload
 
 
 def _interleave_packets(packets: tuple[MatroskaMuxPacket, ...]) -> list[MatroskaMuxPacket]:
@@ -194,18 +224,25 @@ def _exact_ticks(value_ns: int, scale_ns: int, *, label: str) -> int:
 def _packet_element(packet: MatroskaMuxPacket, cluster_time: int, timestamp_scale_ns: int) -> bytes:
     block = packet.block
     packet_time = _exact_ticks(_timestamp_ns(packet), timestamp_scale_ns, label="Timestamp de block")
-    frame_payload = (
-        block.encoded_frames_payload
-        if block.lace_count > 1 and block.encoded_frames_payload
-        else block.payload
-    )
-    raw = _block_header(packet.output_track_number, packet_time - cluster_time, block.flags) + frame_payload
+    frame_payload = _effective_frame_payload(packet)
+    # Bits communs SimpleBlock/Block : invisible (0x08) + lacing (0x06).
+    shared_flags = block.flags & 0x0E
     if not (
         block.duration_ms is not None or block.duration_ns is not None
         or block.references or block.references_ns or block.discard_padding_ns
         or block.codec_state or block.block_additions
     ):
+        # SimpleBlock : le bit keyframe est recalculé — une keyframe issue
+        # d'un BlockGroup source (signalée par l'absence de ReferenceBlock)
+        # doit rester signalée ici par le bit 0x80.
+        simple_flags = shared_flags | (block.flags & 0x01)
+        if _is_keyframe(packet):
+            simple_flags |= 0x80
+        raw = _block_header(packet.output_track_number, packet_time - cluster_time, simple_flags) + frame_payload
         return element(SIMPLE_BLOCK_ID, raw)
+    # Block (BlockGroup) : pas de bit keyframe ni discardable — la keyframe
+    # est signalée par l'absence de ReferenceBlock.
+    raw = _block_header(packet.output_track_number, packet_time - cluster_time, shared_flags) + frame_payload
     children = [element(BLOCK_ID, raw)]
     duration_ns = block.duration_ns if block.duration_ns is not None else ((block.duration_ms or 0) * 1_000_000 if block.duration_ms is not None else None)
     if duration_ns is not None:
@@ -215,9 +252,12 @@ def _packet_element(packet: MatroskaMuxPacket, cluster_time: int, timestamp_scal
         sint_element(REFERENCE_BLOCK_ID, _exact_ticks(value, timestamp_scale_ns, label="ReferenceBlock"))
         for value in reference_ns
     )
-    if block.discard_padding_ns: children.append(sint_element(DISCARD_PADDING_ID, block.discard_padding_ns))
-    if block.codec_state: children.append(element(CODEC_STATE_ID, block.codec_state))
-    if block.block_additions: children.append(element(BLOCK_ADDITIONS_ID, block.block_additions))
+    if block.discard_padding_ns:
+        children.append(sint_element(DISCARD_PADDING_ID, block.discard_padding_ns))
+    if block.codec_state:
+        children.append(element(CODEC_STATE_ID, block.codec_state))
+    if block.block_additions:
+        children.append(element(BLOCK_ADDITIONS_ID, block.block_additions))
     return element(BLOCK_GROUP_ID, b"".join(children))
 
 
@@ -287,32 +327,101 @@ def _plan_info(plan: MatroskaMuxPlan, duration_ns: int) -> bytes:
     )))
 
 
+class MatroskaWriteCancelled(Exception):
+    """Annulation coopérative demandée pendant l'écriture native."""
+
+
+@dataclass(frozen=True)
+class MatroskaWriteProgress:
+    """Progression d'écriture : étape, paquets, octets écrits, candidat."""
+
+    stage: str
+    packets_written: int
+    bytes_written: int
+    candidate: Path
+
+
 class MatroskaWriter:
     def write(
         self,
         plan: MatroskaMuxPlan,
         *,
         external_validator: Callable[[Path], None] | None = None,
+        cancel_cb: Callable[[], bool] | None = None,
+        progress_cb: Callable[[MatroskaWriteProgress], None] | None = None,
     ) -> Path:
         destination = Path(plan.output)
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".partial")
         partial.unlink(missing_ok=True)
+
+        packets_written = 0
+        packet_counts: dict[int, int] = {}
+
+        def _check_cancel(stage: str) -> None:
+            if cancel_cb is not None and cancel_cb():
+                raise MatroskaWriteCancelled(f"Écriture Matroska annulée ({stage})")
+
+        def _notify(stage: str, bytes_written: int) -> None:
+            if progress_cb is not None:
+                progress_cb(MatroskaWriteProgress(
+                    stage=stage,
+                    packets_written=packets_written,
+                    bytes_written=bytes_written,
+                    candidate=partial,
+                ))
         if isinstance(plan.packets, (tuple, list)):
             packets: Iterable[MatroskaMuxPacket] = _interleave_packets(tuple(plan.packets))
-            duration_ns = plan.duration_ns or (plan.duration_ms * 1_000_000) or max((
-                _packet_end_ns(item) for item in packets
-            ), default=0)
         else:
-            # Flux paresseux : l'ordre de mux vient du producteur, la durée
-            # réelle n'est connue qu'après consommation (Info patchée alors).
+            # Flux paresseux : l'ordre de mux vient du producteur, consommé
+            # une seule fois (mémoire bornée).
             packets = plan.packets
-            duration_ns = plan.duration_ns or (plan.duration_ms * 1_000_000)
+        # Durée du plan si connue ; sinon 0, puis Info réécrite à taille
+        # égale après consommation avec la fin réelle observée.
+        duration_ns = plan.duration_ns or (plan.duration_ms * 1_000_000)
         info = _plan_info(plan, duration_ns)
         tracks = element(TRACKS_ID, b"".join(_track_entry(track) for track in plan.tracks))
+        subtitle_tracks = {
+            track.output_number for track in plan.tracks
+            if track.source_track.track_type == 17
+        }
+        default_duration_by_track = {
+            track.output_number: track.source_track.default_duration_ns
+            for track in plan.tracks
+        }
+        # Fin réelle par piste, toutes pistes confondues (les muxeurs de
+        # référence prolongent la durée jusqu'au dernier sous-titre) : durée
+        # explicite du block, sinon DefaultDuration × laces, sinon dernier
+        # delta positif observé. Ce dernier repli (pistes sans
+        # DefaultDuration, ex. FLAC) majore la fin d'au plus un inter-block
+        # quand la dernière frame est plus courte — information codec
+        # inaccessible au niveau conteneur.
+        last_timestamp_by_track: dict[int, int] = {}
+        last_delta_by_track: dict[int, int] = {}
+        observed_end_ns = 0
+
+        def _note_packet_end(packet: MatroskaMuxPacket) -> None:
+            nonlocal observed_end_ns
+            track_number = packet.output_track_number
+            timestamp = _timestamp_ns(packet)
+            previous = last_timestamp_by_track.get(track_number)
+            if previous is not None and timestamp > previous:
+                last_delta_by_track[track_number] = timestamp - previous
+            last_timestamp_by_track[track_number] = timestamp
+            duration = _explicit_duration_ns(packet)
+            if duration is None:
+                default_duration = default_duration_by_track.get(track_number, 0)
+                if default_duration:
+                    duration = default_duration * max(1, packet.block.lace_count)
+                else:
+                    duration = last_delta_by_track.get(track_number, 0)
+            observed_end_ns = max(observed_end_ns, timestamp + duration)
+
         try:
             with partial.open("wb") as fh:
                 fh.write(_build_ebml_header())
+                # Taille de Segment : VINT 8 octets « inconnue » réservée,
+                # patchée avec la taille réelle en fin d'écriture.
                 fh.write(SEGMENT_ID + encode_unknown_size_marker(length=8))
                 payload_start = fh.tell()
                 seek_reserved = 512
@@ -323,21 +432,39 @@ class MatroskaWriter:
                 fh.write(tracks)
                 # Metadata level-1 before the first Cluster is required by readers
                 # that stop their metadata scan once media payload begins.
+                opaque_seek_entries: list[tuple[bytes, int]] = []
                 for raw in plan.opaque_top_level:
+                    raw_stream = BytesIO(raw)
+                    raw_item = read_element(raw_stream, limit=len(raw))
+                    if raw_item is not None:
+                        opaque_seek_entries.append((raw_item.element_id, fh.tell() - payload_start))
                     fh.write(raw)
                 cluster_records: list[_ClusterRecord] = []
-                video_track = next((track.output_number for track in plan.tracks if track.source_track.track_type == 1), plan.tracks[0].output_number)
+                # Sélection des Cues par TrackType : keyframes de toutes les
+                # pistes vidéo ; chaque sous-titre avec sa durée ; sans piste
+                # vidéo, au plus un point de la piste audio primaire
+                # (première piste audio du plan) par Cluster.
+                video_tracks = {
+                    track.output_number for track in plan.tracks
+                    if track.source_track.track_type == 1
+                }
+                primary_audio_track = None if video_tracks else next(
+                    (track.output_number for track in plan.tracks
+                     if track.source_track.track_type == 2),
+                    None,
+                )
                 max_cluster_ns = min(
                     30_000_000_000,
                     32767 * plan.timestamp_scale_ns,
                 )
                 packet_iter = iter(packets)
                 pending = next(packet_iter, None)
-                observed_end_ns = 0
                 while pending is not None:
+                    _check_cancel("clusters")
                     group: list[MatroskaMuxPacket] = [pending]
                     group_min_ns = group_max_ns = _timestamp_ns(pending)
-                    observed_end_ns = max(observed_end_ns, _packet_end_ns(pending))
+                    group_bytes = len(_effective_frame_payload(pending))
+                    _note_packet_end(pending)
                     pending = next(packet_iter, None)
                     while pending is not None:
                         packet_ns = _timestamp_ns(pending)
@@ -345,12 +472,20 @@ class MatroskaWriter:
                         candidate_max = max(group_max_ns, packet_ns)
                         if candidate_max - candidate_min > max_cluster_ns:
                             break
+                        # Borne d'octets par Cluster : garde le pic mémoire du
+                        # writer fixe, indépendant de la taille du flux (lot 3).
+                        if group_bytes + len(_effective_frame_payload(pending)) > _MAX_CLUSTER_PAYLOAD_BYTES:
+                            break
                         group.append(pending)
                         group_min_ns, group_max_ns = candidate_min, candidate_max
-                        observed_end_ns = max(observed_end_ns, _packet_end_ns(pending))
+                        group_bytes += len(_effective_frame_payload(pending))
+                        _note_packet_end(pending)
                         pending = next(packet_iter, None)
-                    cluster_time = _exact_ticks(group_min_ns, plan.timestamp_scale_ns, label="Cluster.Timestamp")
-                    timestamp_element = uint_element(TIMESTAMP_ID, max(0, cluster_time))
+                    # Timestamp Cluster écrit (uint ≥ 0) : les offsets de
+                    # blocks sont calculés contre cette même valeur pour que
+                    # les timestamps absolus restent exacts.
+                    cluster_time = max(0, _exact_ticks(group_min_ns, plan.timestamp_scale_ns, label="Cluster.Timestamp"))
+                    timestamp_element = uint_element(TIMESTAMP_ID, cluster_time)
                     packet_elements = [
                         _packet_element(packet, cluster_time, plan.timestamp_scale_ns)
                         for packet in group
@@ -359,44 +494,85 @@ class MatroskaWriter:
                     cluster_element = element(CLUSTER_ID, payload)
                     cluster_offset = fh.tell() - payload_start
                     fh.write(cluster_element)
-                    cluster_header_size = len(cluster_element) - len(payload)
-                    relative_position = cluster_header_size + len(timestamp_element)
-                    cue_points: list[tuple[int, int]] = []
+                    # CueRelativePosition (RFC 9559) : relatif au premier
+                    # octet du payload du Cluster (0 = premier élément).
+                    relative_position = len(timestamp_element)
+                    cue_points: list[tuple[int, int, int, int | None]] = []
+                    audio_cue: tuple[int, int, int, int | None] | None = None
                     for packet, packet_raw in zip(group, packet_elements):
-                        if packet.output_track_number == video_track and _is_keyframe(packet):
+                        if packet.output_track_number in video_tracks and _is_keyframe(packet):
                             key_time = _exact_ticks(_timestamp_ns(packet), plan.timestamp_scale_ns, label="CueTime")
-                            cue_points.append((key_time, relative_position))
-                        relative_position += len(packet_raw)
-                    if not cue_points and not any(track.source_track.track_type == 1 for track in plan.tracks):
-                        first_packet = next((item for item in group if item.output_track_number == video_track), None)
-                        if first_packet is not None:
+                            cue_points.append((key_time, packet.output_track_number, relative_position, None))
+                        elif packet.output_track_number in subtitle_tracks:
+                            # Index sous-titres : chaque entrée, avec durée.
+                            entry_time = _exact_ticks(_timestamp_ns(packet), plan.timestamp_scale_ns, label="CueTime")
+                            entry_duration = _explicit_duration_ns(packet)
                             cue_points.append((
-                                _exact_ticks(_timestamp_ns(first_packet), plan.timestamp_scale_ns, label="CueTime"),
-                                cluster_header_size + len(timestamp_element),
+                                entry_time, packet.output_track_number, relative_position,
+                                _exact_ticks(entry_duration, plan.timestamp_scale_ns, label="CueDuration")
+                                if entry_duration else None,
                             ))
+                        elif packet.output_track_number == primary_audio_track and audio_cue is None:
+                            audio_cue = (
+                                _exact_ticks(_timestamp_ns(packet), plan.timestamp_scale_ns, label="CueTime"),
+                                packet.output_track_number, relative_position, None,
+                            )
+                        relative_position += len(packet_raw)
+                    if audio_cue is not None:
+                        cue_points.append(audio_cue)
                     if cue_points:
                         cluster_records.append(_ClusterRecord(cluster_offset, cluster_time, cue_points))
+                    packets_written += len(group)
+                    for packet in group:
+                        packet_counts[packet.output_track_number] = (
+                            packet_counts.get(packet.output_track_number, 0) + 1
+                        )
+                    _notify("clusters", fh.tell())
+                _check_cancel("cues")
                 cues_offset = fh.tell() - payload_start
-                fh.write(_build_cues(cluster_records, video_track))
+                fh.write(_build_cues(cluster_records))
                 seek = _build_seek_head(
-                    [(INFO_ID, info_offset), (TRACKS_ID, tracks_offset), (CUES_ID, cues_offset)],
+                    [
+                        (INFO_ID, info_offset),
+                        (TRACKS_ID, tracks_offset),
+                        *opaque_seek_entries,
+                        (CUES_ID, cues_offset),
+                    ],
                     total_size=seek_reserved,
                 )
                 fh.seek(payload_start)
                 fh.write(seek)
                 if not duration_ns and observed_end_ns:
-                    # Flux paresseux : la durée n'était pas connue avant la
-                    # consommation des paquets — Info réécrite à taille égale.
+                    # Durée non fournie par le plan : Info réécrite à taille
+                    # égale avec la fin réelle du dernier paquet.
                     fh.seek(payload_start + info_offset)
                     fh.write(_plan_info(plan, observed_end_ns))
-            from core.workflows.matroska_reader import MatroskaReader
+                # Taille réelle du Segment patchée dans la VINT réservée.
+                segment_end = fh.seek(0, 2)
+                fh.seek(payload_start - 8)
+                fh.write(encode_vint_size(segment_end - payload_start, length=8))
+            _check_cancel("validation")
+            _notify("validation", partial.stat().st_size)
+            from .reader import MatroskaReader
 
             validation_reader = MatroskaReader(partial)
             validation_reader.segment()
             if len(validation_reader.tracks()) != len(plan.tracks):
                 raise ValueError("Validation native : nombre de pistes incohérent")
+            missing_media = [
+                track.output_number for track in plan.tracks
+                if track.source_track.track_type in (1, 2)
+                and not packet_counts.get(track.output_number)
+            ]
+            if missing_media:
+                raise ValueError(
+                    "Validation native : aucun paquet écrit pour les pistes média "
+                    + ", ".join(f"#{number}" for number in missing_media)
+                )
             if external_validator is not None:
                 external_validator(partial)
+            _check_cancel("commit")
+            _notify("commit", partial.stat().st_size)
             partial.replace(destination)
         except BaseException:
             partial.unlink(missing_ok=True)
@@ -405,6 +581,7 @@ class MatroskaWriter:
 
 
 __all__ = [
-    "MatroskaWriter", "build_attachments_element", "build_chapters_element",
+    "MatroskaWriteCancelled", "MatroskaWriteProgress", "MatroskaWriter",
+    "build_attachments_element", "build_chapters_element",
     "build_tags_element", "rewrite_tag_target_uids",
 ]

@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from core.workflows.ebml_writer import element, float_element
-from core.workflows.matroska_element_ids import EBML_HEADER_ID, INFO_ID, SEGMENT_ID
-from core.workflows.matroska_reader import MatroskaReader
+from core.matroska.ebml import element, float_element
+from core.matroska.ids import EBML_HEADER_ID, INFO_ID, SEGMENT_ID
+from core.matroska.reader import MatroskaReader
 
 
 def test_reader_enumerates_segment_children(tmp_path: Path) -> None:

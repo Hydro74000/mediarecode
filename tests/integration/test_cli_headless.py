@@ -76,10 +76,28 @@ def test_cli_inspect_validate_preview_on_synthetic_media(tmp_path: Path) -> None
     preview_payload = json.loads(preview_json.stdout)
     assert preview_payload["valid"] is True
     assert preview_payload["command"][0] == "ffmpeg"
-    assert preview_payload["command_text"].startswith("# Backend: native Matroska")
-    assert preview_payload["selected_backend"] == "native"
+    # Défaut effectif sans configuration : FFmpeg (setting global [matroska]).
+    assert preview_payload["selected_backend"] == "ffmpeg"
     assert preview_payload["plan_version"] == 1
-    assert preview_payload["execution_preview"]["action"] == "internal_matroska_write"
+    assert preview_payload["execution_preview"]["action"] == "external_ffmpeg"
+
+    # Choix explicite du job : le natif reste prioritaire sur le setting.
+    config.write_text(
+        json.dumps({
+            "version": 1,
+            "sources": [{"path": str(src)}],
+            "output": str(out),
+            "mux_backend": "native",
+        }),
+        encoding="utf-8",
+    )
+    preview_native = _run_cli(root, "preview", "--config", str(config), "--json")
+    assert preview_native.returncode == 0, preview_native.stderr
+    native_payload = json.loads(preview_native.stdout)
+    assert native_payload["valid"] is True
+    assert native_payload["command_text"].startswith("# Backend: native Matroska")
+    assert native_payload["selected_backend"] == "native"
+    assert native_payload["execution_preview"]["action"] == "internal_matroska_write"
 
 
 def test_cli_remux_dry_run_refuses_invalid_json_before_inspection(tmp_path: Path) -> None:

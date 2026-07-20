@@ -49,7 +49,8 @@ Plan de couverture :
             - enc_hdr10p.hevc supprimé dans les snapshots suivant enc_dv.hevc
 
         Comptage fichiers simultanés :
-            - Jamais > 2 fichiers .hevc/.mkv simultanément (DV / HDR10+ / les deux)
+            - Jamais > 3 fichiers .hevc/.mkv simultanément (MKV encodé + annexB
+              courant + annexB injecté — pipeline lot 3)
 
         Cleanup ext_files sur annulation / exception :
             - Fichiers ext_files supprimés si RuntimeError
@@ -96,6 +97,9 @@ Exécution :
 
 from __future__ import annotations
 
+# Les imports du workflow suivent volontairement la fixture Qt de module.
+# ruff: noqa: E402
+
 import json
 import sys
 import threading
@@ -103,8 +107,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
-import tempfile
+from unittest.mock import MagicMock, patch
 import os
 from typing import Any, cast
 
@@ -130,7 +133,6 @@ def qt_app():
 
 
 from core.workflows.encode import (
-    AUDIO_CODECS,
     AudioTrackSettings,
     EncodeConfig,
     EncodeError,
@@ -154,6 +156,7 @@ from core.workflows.encode.runtime.dovi_p7_router import P7RoutingDecision
 from core.workflows.encode.runtime.metadata_inject import (
     _friendly_dovi_conversion_error,
 )
+from core.matroska.hevc.timing_skeleton import TimingSkeletonResult
 from core.workflows.encode.runtime.static_hdr_estimator import StaticHdrEstimate
 from core.dovi_profile_detector import DoviSubProfile
 
@@ -186,6 +189,53 @@ def _make_config(source: Path, output: Path, **kw) -> EncodeConfig:
 def _as_single_command(cmd: list[str] | list[list[str]]) -> list[str]:
     assert cmd and isinstance(cmd[0], str)
     return cast(list[str], cmd)
+
+
+class _FakePayloadRewriteResult:
+    def __init__(self, frames: int = 1) -> None:
+        self.frames_rewritten = frames
+        self.codec_private_updated = False
+        self.dovi_mapping_written = False
+
+
+@pytest.fixture(autouse=True)
+def _fake_payload_rewriter(monkeypatch):
+    """Substitue le rewriter réel : il exige de vrais MKV, les tests du
+    workflow travaillent sur des fichiers factices (subprocess mockés)."""
+
+    class _FakeRewriter:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def rewrite(self, *, encoded_mkv, injected_hevc, output, **_kwargs):
+            _ = encoded_mkv, injected_hevc
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_bytes(b"\x00" * 100_000)
+            return _FakePayloadRewriteResult()
+
+    monkeypatch.setattr(
+        "core.workflows.encode.runtime.metadata_inject.MatroskaHevcPayloadRewriter",
+        _FakeRewriter,
+    )
+    monkeypatch.setattr(
+        "core.workflows.encode.runtime.multi_video.MatroskaHevcPayloadRewriter",
+        _FakeRewriter,
+    )
+
+    def _fake_write_timing_skeleton(encoded_mkv, output, **_kwargs):
+        _ = encoded_mkv
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        Path(output).write_bytes(b"\x00" * 4_096)
+        return TimingSkeletonResult(output=Path(output), blocks_written=1)
+
+    monkeypatch.setattr(
+        "core.workflows.encode.runtime.metadata_inject.write_timing_skeleton",
+        _fake_write_timing_skeleton,
+    )
+    monkeypatch.setattr(
+        "core.workflows.encode.runtime.multi_video.write_timing_skeleton",
+        _fake_write_timing_skeleton,
+    )
 
 
 def _make_workflow(
@@ -1104,6 +1154,12 @@ def _collect_signals(signals, timeout=10.0):
         time.sleep(0.01)
 
 
+def _delayed_finalizer(*_args, **_kwargs):
+    """Laisse au test le temps de raccorder les signaux du runner asynchrone."""
+    time.sleep(0.02)
+    return "ok"
+
+
 class TestMetadataInjectFileManagement:
 
     def _run_inject(self, tmp_path: Path, copy_dv: bool, copy_hdr10plus: bool,
@@ -1187,19 +1243,45 @@ class TestMetadataInjectFileManagement:
             assert "enc_hdr10p.hevc" not in names, \
                 f"enc_hdr10p.hevc encore présent après injection DV : {names}"
 
-    # ── comptage max 2 fichiers ───────────────────────────────────────────────
+    # ── comptage max 2 copies vidéo ───────────────────────────────────────────
 
     @pytest.mark.parametrize("copy_dv,copy_hdr10plus", [
         (True, False), (False, True), (True, True)
     ])
-    def test_max_two_large_files_at_any_time(self, tmp_path, copy_dv, copy_hdr10plus):
-        """Jamais plus de 2 gros fichiers simultanés sur disque."""
+    def test_max_two_video_copies_at_any_time(self, tmp_path, copy_dv, copy_hdr10plus):
+        """Jamais plus de 2 copies vidéo simultanées sur disque (pic 2×).
+
+        Le squelette de timing (payloads vides, quelques Mo en réel) n'est
+        pas une copie vidéo : il est exclu du comptage.
+        """
         snapshots = self._run_inject(tmp_path, copy_dv, copy_hdr10plus)
         for i, snap in enumerate(snapshots):
-            count = len([p for p in snap if p.exists()])
-            assert count <= 2, (
-                f"Snapshot {i} : {count} fichiers > 2 : {[p.name for p in snap]}"
+            large = [p for p in snap if p.exists() and p.name != "enc_timing.mkv"]
+            assert len(large) <= 2, (
+                f"Snapshot {i} : {len(large)} copies vidéo > 2 : {[p.name for p in snap]}"
             )
+
+    def test_enc_video_mkv_freed_before_injections(self, tmp_path):
+        """Le MKV encodé complet disparaît dès l'extraction annexB terminée ;
+        le squelette de timing survit jusqu'à la réécriture, puis disparaît."""
+        snapshots = self._run_inject(tmp_path, copy_dv=True, copy_hdr10plus=True)
+        first_injected = next(
+            (i for i, snap in enumerate(snapshots)
+             if any("enc_hdr10p.hevc" in str(p) for p in snap)), None
+        )
+        assert first_injected is not None, "enc_hdr10p.hevc jamais créé"
+        for snap in snapshots[first_injected:]:
+            names = [p.name for p in snap]
+            assert "enc_video.mkv" not in names, \
+                f"enc_video.mkv encore présent pendant les injections : {names}"
+        assert any(
+            "enc_timing.mkv" in [p.name for p in snap]
+            for snap in snapshots[first_injected:]
+        ), "le squelette de timing doit survivre pendant les injections"
+        final_names = [p.name for p in snapshots[-1]]
+        assert "enc_wrapped.mkv" in final_names
+        assert "enc_timing.mkv" not in final_names, \
+            "le squelette doit être libéré après la réécriture des payloads"
 
     # ── buffer RAM désactivé ──────────────────────────────────────────────────
 
@@ -1474,17 +1556,23 @@ class TestRuntimeCleanup:
             work_dir=work_dir,
         )
         wf = _make_workflow()
+        finalizer_started = threading.Event()
+        release_finalizer = threading.Event()
 
-        with patch.object(wf._runner, "run") as mock_run:
-            signals = TaskSignals()
-            mock_run.return_value = signals
+        def _hold_finalizer(*_args, **_kwargs):
+            finalizer_started.set()
+            assert release_finalizer.wait(5.0)
+            return "done"
+
+        with patch.object(wf, "_finalize_ffmpeg_output", side_effect=_hold_finalizer):
             returned = wf.run(cfg)
+            assert finalizer_started.wait(5.0)
             process_dir = work_dir / "output"
             attachments_dir = process_dir / "attachments"
             assert (attachments_dir / "cover.jpg").exists()
             assert not guid_dir.exists()
-            returned.finished.emit("done")
-            _get_app().processEvents()
+            release_finalizer.set()
+            _collect_signals(returned)
 
         assert not attachments_dir.exists()
         assert not process_dir.exists()
@@ -1593,14 +1681,16 @@ class TestBuildCommand:
         self.wf = _make_workflow()
 
     def test_crf_mode_returns_single_command(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(src, tmp_path / "out.mkv",
                               video=_make_video_settings(quality_mode=QualityMode.CRF))
         result = self.wf.build_command(config)
         assert isinstance(result, list) and isinstance(result[0], str)
 
     def test_size_mode_returns_two_commands(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(src, tmp_path / "out.mkv",
                               video=_make_video_settings(quality_mode=QualityMode.SIZE),
                               duration_s=3600.0)
@@ -1609,34 +1699,39 @@ class TestBuildCommand:
         assert len(result) == 2
 
     def test_single_pass_contains_source_and_output(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         out = tmp_path / "out.mkv"
         cmd = _as_single_command(self.wf.build_command(_make_config(src, out)))
         cmd_str = " ".join(cmd)
         assert str(src) in cmd_str and str(out) in cmd_str
 
     def test_copy_codec_no_crf_flag(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(src, tmp_path / "out.mkv",
                               video=_make_video_settings(codec="copy"))
         assert "-crf" not in self.wf.build_command(config)
 
     def test_audio_copy_codec_no_bitrate(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(stream_index=1, codec="copy", bitrate_kbps=384)
         cmd = self.wf.build_command(_make_config(src, tmp_path / "out.mkv",
                                                  audio_tracks=[track]))
         assert "-b:a:0" not in cmd
 
     def test_audio_aac_has_bitrate(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(stream_index=1, codec="aac", bitrate_kbps=256)
         cmd = self.wf.build_command(_make_config(src, tmp_path / "out.mkv",
                                                  audio_tracks=[track]))
         assert "-b:a:0" in cmd and "256k" in cmd
 
     def test_audio_ac3_has_bitrate(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(stream_index=1, codec="ac3", bitrate_kbps=448)
         cmd = _as_single_command(
             self.wf.build_command(_make_config(src, tmp_path / "out.mkv", audio_tracks=[track]))
@@ -1645,14 +1740,16 @@ class TestBuildCommand:
         assert "-b:a:0" in cmd and "448k" in cmd
 
     def test_audio_ac3_off_grid_bitrate_is_normalized(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(stream_index=1, codec="ac3", bitrate_kbps=444)
         cmd = self.wf.build_command(_make_config(src, tmp_path / "out.mkv",
                                                  audio_tracks=[track]))
         assert "-b:a:0" in cmd and "448k" in cmd
 
     def test_audio_eac3_bitrate_is_clamped_by_output_channels(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(
             stream_index=1,
             codec="eac3",
@@ -1665,7 +1762,8 @@ class TestBuildCommand:
         assert "-b:a:0" in cmd and "2048k" in cmd
 
     def test_audio_eac3_7_1_forces_5_1_downmix(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(
             stream_index=1,
             codec="eac3",
@@ -1680,7 +1778,8 @@ class TestBuildCommand:
         assert "-channel_layout:a:0" in cmd and cmd[cmd.index("-channel_layout:a:0") + 1] == "5.1"
 
     def test_audio_eac3_5_1_keeps_native_channels(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(
             stream_index=1,
             codec="eac3",
@@ -1693,7 +1792,8 @@ class TestBuildCommand:
         assert "-channel_layout:a:0" not in cmd
 
     def test_truehd_core_bsf_present(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(stream_index=2, codec="copy",
                                    bitrate_kbps=384, extract_truehd_core=True)
         cmd = _as_single_command(
@@ -1702,7 +1802,8 @@ class TestBuildCommand:
         assert "truehd_core" in " ".join(cmd)
 
     def test_truehd_core_bsf_ignored_for_transcoded_audio(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         track = AudioTrackSettings(stream_index=2, codec="eac3",
                                    bitrate_kbps=640, extract_truehd_core=True)
         cmd = _as_single_command(
@@ -1713,8 +1814,10 @@ class TestBuildCommand:
         assert "-c:a:0" in cmd and cmd[cmd.index("-c:a:0") + 1] == "eac3"
 
     def test_audio_track_order_follows_config_across_sources(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
-        alt = tmp_path / "alt.mkv"; alt.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
+        alt = tmp_path / "alt.mkv"
+        alt.touch()
         tracks = [
             AudioTrackSettings(stream_index=5, codec="aac", bitrate_kbps=192, source_path=alt),
             AudioTrackSettings(stream_index=1, codec="copy", source_path=src),
@@ -1728,8 +1831,10 @@ class TestBuildCommand:
         assert "-c:a:1" in cmd and cmd[cmd.index("-c:a:1") + 1] == "copy"
 
     def test_subtitle_track_order_follows_config_across_sources(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
-        alt = tmp_path / "alt.mkv"; alt.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
+        alt = tmp_path / "alt.mkv"
+        alt.touch()
         cmd = _as_single_command(self.wf.build_command(_make_config(
             src,
             tmp_path / "out.mkv",
@@ -1742,7 +1847,8 @@ class TestBuildCommand:
         assert "-c:s" in cmd and cmd[cmd.index("-c:s") + 1] == "copy"
 
     def test_video_track_mapping_uses_selected_stream_index(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         cmd = _as_single_command(self.wf.build_command(_make_config(
             src,
             tmp_path / "out.mkv",
@@ -1753,8 +1859,10 @@ class TestBuildCommand:
         assert map_values[0] == "0:4"
 
     def test_video_track_mapping_uses_selected_source(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
-        alt = tmp_path / "alt.mkv"; alt.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
+        alt = tmp_path / "alt.mkv"
+        alt.touch()
         cmd = _as_single_command(self.wf.build_command(_make_config(
             src,
             tmp_path / "out.mkv",
@@ -1769,7 +1877,8 @@ class TestBuildCommand:
         assert map_values[0] == "1:3"
 
     def test_vaapi_single_pass_adds_device_and_hwaccel_without_vf(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch.object(EncodeWorkflow, "_vaapi_device", return_value="/dev/dri/renderD128"):
             cmd = self.wf.build_command_single(
                 _make_config(src, tmp_path / "out.mkv",
@@ -1785,7 +1894,8 @@ class TestBuildCommand:
         assert "-vf" not in cmd
 
     def test_vaapi_tonemap_adds_hwupload_vf(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch.object(EncodeWorkflow, "_vaapi_device", return_value="/dev/dri/renderD128"):
             cmd = self.wf.build_command_single(
                 _make_config(src, tmp_path / "out.mkv",
@@ -1797,7 +1907,8 @@ class TestBuildCommand:
         assert cmd[cmd.index("-vf") + 1].endswith("format=nv12,hwupload")
 
     def test_vaapi_two_pass_adds_device_on_both_passes(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch.object(EncodeWorkflow, "_vaapi_device", return_value="/dev/dri/renderD128"):
             cmds = self.wf.build_command(
                 _make_config(
@@ -1815,7 +1926,8 @@ class TestBuildCommand:
             assert "-vf" not in pass_cmd
 
     def test_h264_vaapi_force_8bit_disables_hw_surface_decode_and_adds_upload(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch.object(EncodeWorkflow, "_vaapi_device", return_value="/dev/dri/renderD128"):
             cmd = self.wf.build_command_single(
                 _make_config(
@@ -1833,7 +1945,8 @@ class TestBuildCommand:
         assert cmd[cmd.index("-pix_fmt") + 1] == "nv12"
 
     def test_h264_nvenc_force_8bit_disables_hw_decode_and_sets_nv12(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         cmd = self.wf.build_command_single(
             _make_config(
                 src,
@@ -1847,7 +1960,8 @@ class TestBuildCommand:
         assert cmd[cmd.index("-pix_fmt") + 1] == "nv12"
 
     def test_qsv_single_pass_adds_explicit_device_on_linux(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch.object(EncodeWorkflow, "_qsv_device", return_value="/dev/dri/renderD129"):
             cmd = self.wf.build_command_single(
                 _make_config(
@@ -1865,7 +1979,8 @@ class TestBuildCommand:
         assert cmd[cmd.index("-hwaccel_output_format") + 1] == "qsv"
 
     def test_qsv_without_resolved_device_keeps_legacy_hwaccel_flags(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch.object(EncodeWorkflow, "_qsv_device", return_value=None):
             cmd = self.wf.build_command_single(
                 _make_config(
@@ -1879,7 +1994,8 @@ class TestBuildCommand:
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "qsv"
 
     def test_qsv_windows_single_pass_adds_explicit_adapter_index(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch("core.workflows.encode.workflow.sys.platform", "win32"), \
              patch.object(EncodeWorkflow, "_qsv_device", return_value="1"):
             cmd = self.wf.build_command_single(
@@ -1895,7 +2011,8 @@ class TestBuildCommand:
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "qsv"
 
     def test_amf_windows_single_pass_adds_named_d3d11_device(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch("core.workflows.encode.workflow.sys.platform", "win32"), \
              patch.object(EncodeWorkflow, "_amf_device", return_value="2"):
             cmd = self.wf.build_command_single(
@@ -1914,7 +2031,8 @@ class TestBuildCommand:
         assert cmd[cmd.index("-hwaccel_device") + 1] == "mre_amf"
 
     def test_amf_windows_tonemap_adds_hwupload_to_selected_device(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch("core.workflows.encode.workflow.sys.platform", "win32"), \
              patch.object(EncodeWorkflow, "_amf_device", return_value="2"):
             cmd = self.wf.build_command_single(
@@ -1931,7 +2049,8 @@ class TestBuildCommand:
         assert "-hwaccel_output_format" not in cmd
 
     def test_nvenc_windows_single_pass_adds_explicit_gpu_index(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch("core.workflows.encode.workflow.sys.platform", "win32"), \
              patch.object(EncodeWorkflow, "_nvenc_device", return_value="1"):
             cmd = self.wf.build_command_single(
@@ -1948,7 +2067,8 @@ class TestBuildCommand:
         assert cmd[cmd.index("-gpu") + 1] == "1"
 
     def test_libx264_force_8bit_sets_yuv420p(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         cmd = self.wf.build_command_single(
             _make_config(
                 src,
@@ -1961,7 +2081,8 @@ class TestBuildCommand:
         assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
 
     def test_non_vaapi_codec_does_not_receive_vaapi_args(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         with patch.object(EncodeWorkflow, "_vaapi_device", return_value="/dev/dri/renderD128"):
             cmd = self.wf.build_command_single(
                 _make_config(
@@ -1976,7 +2097,8 @@ class TestBuildCommand:
         assert "hwupload" not in cmd[cmd.index("-vf") + 1]
 
     def test_ffmpeg_vf_orders_geometry_filters_resize_and_tonemap(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         cmd = self.wf.build_command_single(
             _make_config(
                 src,
@@ -2016,7 +2138,8 @@ class TestBuildCommand:
         assert "min(1280\\,iw):min(720\\,ih)" in vf
 
     def test_ffmpeg_percent_resize_clamps_when_upscale_is_disabled(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         cmd = self.wf.build_command_single(
             _make_config(
                 src,
@@ -2052,12 +2175,14 @@ class TestValidate:
         assert any("introuvable" in e.lower() or "source" in e.lower() for e in errors)
 
     def test_source_equals_output(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         errors = self.wf.validate(_make_config(src, src))
         assert len(errors) >= 1
 
     def test_output_dir_not_writable(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(src, tmp_path / "out.mkv")
         with patch(
             "core.workflows.encode.workflow.tempfile.NamedTemporaryFile",
@@ -2067,7 +2192,8 @@ class TestValidate:
         assert any("inscriptible" in e.lower() for e in errors)
 
     def test_size_mode_without_duration(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(src, tmp_path / "out.mkv",
                               video=_make_video_settings(quality_mode=QualityMode.SIZE),
                               duration_s=None)
@@ -2075,7 +2201,8 @@ class TestValidate:
         assert any("durée" in e.lower() or "taille" in e.lower() for e in errors)
 
     def test_copy_size_mode_without_duration_is_allowed(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(
             src,
             tmp_path / "out.mkv",
@@ -2086,7 +2213,8 @@ class TestValidate:
         assert not any("durée" in e.lower() or "taille" in e.lower() for e in errors)
 
     def test_copy_with_source_hdr_passthrough_is_allowed(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(
             src,
             tmp_path / "out.mkv",
@@ -2101,11 +2229,13 @@ class TestValidate:
         assert not any("codec copy incompatible" in e.lower() for e in errors)
 
     def test_valid_config_no_errors(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         assert self.wf.validate(_make_config(src, tmp_path / "out.mkv")) == []
 
     def test_copy_with_tonemap_is_rejected(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(
             src,
             tmp_path / "out.mkv",
@@ -2115,7 +2245,8 @@ class TestValidate:
         assert any("codec copy incompatible avec les transformations vidéo" in e.lower() for e in errors)
 
     def test_copy_with_geometry_or_filters_is_rejected(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(
             src,
             tmp_path / "out.mkv",
@@ -2129,7 +2260,8 @@ class TestValidate:
         assert any("codec copy incompatible avec les transformations vidéo" in e.lower() for e in errors)
 
     def test_invalid_master_display(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(src, tmp_path / "out.mkv",
                               video=_make_video_settings(inject_hdr_meta=True,
                                                          master_display="INVALID"))
@@ -2137,14 +2269,16 @@ class TestValidate:
                    for e in self.wf.validate(config))
 
     def test_invalid_max_cll(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(src, tmp_path / "out.mkv",
                               video=_make_video_settings(inject_hdr_meta=True,
                                                          max_cll="INVALID"))
         assert any("cll" in e.lower() for e in self.wf.validate(config))
 
     def test_validate_rejects_negative_video_track_offset(self, tmp_path):
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         config = _make_config(
             src,
             tmp_path / "out.mkv",
@@ -2216,7 +2350,8 @@ class TestHdrMetaArgs:
 
     def test_libx265_x265_params_contains_master_display(self, tmp_path):
         """libx265 : -x265-params fusionné avec master-display et max-cll."""
-        src = tmp_path / "s.mkv"; src.touch()
+        src = tmp_path / "s.mkv"
+        src.touch()
         vs = self._vs("libx265")
         config = _make_config(src, tmp_path / "o.mkv", video=vs)
         cmd = self.wf.build_command_single(config)
@@ -2227,7 +2362,8 @@ class TestHdrMetaArgs:
 
     def test_libx265_x265_params_merges_extra_params(self, tmp_path):
         """libx265 : extra_params + HDR meta fusionnés dans un seul -x265-params."""
-        src = tmp_path / "s.mkv"; src.touch()
+        src = tmp_path / "s.mkv"
+        src.touch()
         vs = _make_video_settings(codec="libx265", inject_hdr_meta=True,
                                    master_display="G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,50)",
                                    max_cll="343,203", extra_params="hdr-opt=1:repeat-headers=1")
@@ -2512,6 +2648,7 @@ class TestMetadataInjectCopyCodec:
                     _collect_signals(sigs)
 
         assert len(calls) == 1
+        assert config.video is not None
         assert calls[0][2] == config.video.master_display
         assert calls[0][3] == "900,300"
         assert any(
@@ -2641,14 +2778,16 @@ class TestCopyCodecMetadataPassthrough:
         self.wf = _make_workflow()
 
     def _cmd_copy(self, tmp_path, **video_kw) -> list[str]:
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         vs = _make_video_settings(codec="copy", **video_kw)
         return self.wf.build_command_single(
             _make_config(src, tmp_path / "out.mkv", video=vs)
         )
 
     def _cmd_x265(self, tmp_path) -> list[str]:
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         return self.wf.build_command_single(
             _make_config(src, tmp_path / "out.mkv",
                          video=_make_video_settings(codec="libx265"))
@@ -2672,7 +2811,8 @@ class TestCopyCodecMetadataPassthrough:
 
     def test_copy_single_pass_metadata_before_output(self, tmp_path):
         """-map_metadata apparaît avant le chemin de sortie."""
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         out = tmp_path / "out.mkv"
         vs = _make_video_settings(codec="copy")
         cmd = self.wf.build_command_single(
@@ -2688,7 +2828,8 @@ class TestCopyCodecMetadataPassthrough:
     @pytest.mark.parametrize("codec", ["libx264", "libsvtav1", "hevc_nvenc", "hevc_amf"])
     def test_non_copy_codecs_no_map_metadata(self, tmp_path, codec):
         """-map_metadata absent pour tout codec de réencodage."""
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         cmd = self.wf.build_command_single(
             _make_config(src, tmp_path / "out.mkv",
                          video=_make_video_settings(codec=codec))
@@ -2699,7 +2840,8 @@ class TestCopyCodecMetadataPassthrough:
 
     def test_copy_size_mode_forces_single_pass_with_map_metadata(self, tmp_path):
         """codec=copy en mode SIZE reste en single-pass (pas de 2-pass)."""
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         vs = _make_video_settings(codec="copy", quality_mode=QualityMode.SIZE)
         cmd = _as_single_command(
             self.wf.build_command(_make_config(src, tmp_path / "out.mkv", video=vs, duration_s=3600.0))
@@ -2712,7 +2854,8 @@ class TestCopyCodecMetadataPassthrough:
 
     def test_non_copy_two_pass_no_map_metadata(self, tmp_path):
         """Passe 2 sans -map_metadata pour codec de réencodage en mode SIZE."""
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         vs = _make_video_settings(codec="libx265", quality_mode=QualityMode.SIZE)
         cmds = self.wf.build_command(
             _make_config(src, tmp_path / "out.mkv", video=vs, duration_s=3600.0)
@@ -2724,7 +2867,8 @@ class TestCopyCodecMetadataPassthrough:
 
     def test_copy_with_audio_tracks_metadata_still_present(self, tmp_path):
         """-map_metadata présent même avec des pistes audio configurées."""
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         audio = [AudioTrackSettings(stream_index=1, codec="copy")]
         vs = _make_video_settings(codec="copy")
         cmd = self.wf.build_command_single(
@@ -2734,7 +2878,8 @@ class TestCopyCodecMetadataPassthrough:
 
     def test_copy_with_subtitles_metadata_still_present(self, tmp_path):
         """-map_metadata présent même avec copy_subtitles=True."""
-        src = tmp_path / "src.mkv"; src.touch()
+        src = tmp_path / "src.mkv"
+        src.touch()
         vs = _make_video_settings(codec="copy")
         cmd = self.wf.build_command_single(
             _make_config(src, tmp_path / "out.mkv", video=vs, copy_subtitles=True)
@@ -2792,9 +2937,8 @@ class TestRunCopyBypassesInject:
             return original(cfg)
 
         with patch.object(wf, "_run_with_metadata_inject", side_effect=_spy), \
-             patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer):
+            _collect_signals(wf.run(config))
 
         assert not inject_called[0], \
             "codec=copy + profil source ne doit pas passer par _run_with_metadata_inject"
@@ -2810,9 +2954,8 @@ class TestRunCopyBypassesInject:
             return (True, True)
 
         with patch.object(wf, "_detect_source_dynamic_hdr_presence", side_effect=_fake_detect), \
-             patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer):
+            _collect_signals(wf.run(config))
 
         assert detection_called["value"] is False, \
             "La détection HDR dynamique ne doit pas être appelée en codec=copy."
@@ -2824,7 +2967,7 @@ class TestRunCopyBypassesInject:
 
         with patch.object(wf, "_detect_source_dynamic_hdr_presence", return_value=(True, False)) as detect_mock, \
              patch.object(wf, "_run_with_metadata_inject", return_value=MagicMock()) as inject_mock, \
-             patch.object(wf._runner, "run", return_value=MagicMock()) as direct_mock:
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as direct_mock:
             wf.run(config)
 
         assert detect_mock.called
@@ -2886,8 +3029,8 @@ class TestRunCopyBypassesInject:
 
         with patch.object(wf, "_detect_source_dynamic_hdr_presence", return_value=(False, False)), \
              patch.object(wf, "_run_with_metadata_inject", return_value=MagicMock()) as inject_mock, \
-             patch.object(wf._runner, "run", return_value=MagicMock()) as direct_mock:
-            wf.run(config)
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as direct_mock:
+            _collect_signals(wf.run(config))
 
         assert not inject_mock.called
         assert direct_mock.called
@@ -2934,9 +3077,8 @@ class TestRunCopyBypassesInject:
 
         with patch.object(wf, "_detect_source_dynamic_hdr_presence", return_value=(False, False)), \
              patch.object(wf, "_run_with_metadata_inject", side_effect=_spy), \
-             patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as mock_run:
+            _collect_signals(wf.run(config))
 
         assert not inject_called[0], "Sans DV/HDR10+ source, l'injection ne doit pas être lancée."
         assert mock_run.called, "Le chemin encode standard doit rester utilisé."
@@ -2958,9 +3100,8 @@ class TestRunCopyBypassesInject:
         wf = _make_workflow()
 
         with patch.object(wf, "_run_with_metadata_inject", return_value=MagicMock()) as inject_mock, \
-             patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as mock_run:
+            _collect_signals(wf.run(config))
 
         assert not inject_mock.called, "Le fallback bitstream HDR10 NVENC ne doit plus être actif."
         assert mock_run.called, "Le chemin encode standard doit rester utilisé."
@@ -2982,9 +3123,8 @@ class TestRunCopyBypassesInject:
         wf = _make_workflow()
 
         with patch.object(wf, "_run_with_metadata_inject", return_value=MagicMock()) as inject_mock, \
-             patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as mock_run:
+            _collect_signals(wf.run(config))
 
         assert not inject_mock.called, "libx265 ne doit pas passer par le fallback bitstream."
         assert mock_run.called, "libx265 doit rester sur le chemin encode standard."
@@ -3006,9 +3146,8 @@ class TestRunCopyBypassesInject:
         wf = _make_workflow()
 
         with patch.object(wf, "_run_with_metadata_inject", return_value=MagicMock()) as inject_mock, \
-             patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+             patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as mock_run:
+            _collect_signals(wf.run(config))
 
         assert not inject_mock.called, "hevc_vaapi ne doit pas passer par le fallback bitstream."
         assert mock_run.called, "hevc_vaapi doit rester sur le chemin encode standard."
@@ -3024,9 +3163,8 @@ class TestRunCopyBypassesInject:
         log_msgs: list[tuple[str, str]] = []
         wf.log_message.connect(lambda lvl, msg: log_msgs.append((lvl, msg)))
 
-        with patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+        with patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer):
+            _collect_signals(wf.run(config))
 
         passthrough_logs = [
             (lvl, msg) for lvl, msg in log_msgs
@@ -3044,9 +3182,8 @@ class TestRunCopyBypassesInject:
             video=_make_video_settings(codec="copy"),
         )
         wf = _make_workflow()
-        with patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(config)
+        with patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer):
+            _collect_signals(wf.run(config))
 
     def test_validate_false_returns_before_preparation_finishes(self, tmp_path):
         """Le chemin UI encode ne bloque pas pendant la préparation workflow."""
@@ -3091,7 +3228,10 @@ class TestRunCopyBypassesInject:
             assert entered.wait(timeout=1.0)
             outer.cancel()
             release.set()
-            _collect_signals(outer)
+            deadline = time.monotonic() + 2.0
+            while not cancelled and time.monotonic() < deadline:
+                _get_app().processEvents()
+                time.sleep(0.01)
 
         assert launched == []
         assert cancelled == [True]
@@ -3136,9 +3276,8 @@ class TestRunIntegratedMetadata:
         cfg.chapter_overrides = []
         wf = _make_workflow()
 
-        with patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(cfg)
+        with patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as mock_run:
+            _collect_signals(wf.run(cfg))
 
         assert mock_run.called
 
@@ -3151,9 +3290,8 @@ class TestRunIntegratedMetadata:
             writing_application="MuxiveoTest",
         )
 
-        with patch.object(wf._runner, "run") as mock_run:
-            mock_run.return_value = MagicMock()
-            wf.run(cfg)
+        with patch.object(wf, "_finalize_ffmpeg_output", side_effect=_delayed_finalizer) as mock_run:
+            _collect_signals(wf.run(cfg))
 
         assert mock_run.called
 
@@ -3256,7 +3394,8 @@ class TestDynamicHdrDetection:
 
 class TestIntegratedMetadataCommand:
     def test_tag_overrides_disable_metadata_copy(self, tmp_path):
-        src = tmp_path / "source.mkv"; src.write_bytes(b"\x00")
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00")
         out = tmp_path / "output.mkv"
         cfg = _make_config(
             src,
@@ -3278,7 +3417,8 @@ class TestIntegratedMetadataCommand:
         assert "title=Titre" in cmd
 
     def test_chapter_overrides_with_tag_overrides_map_metadata_from_chapter_input(self, tmp_path):
-        src = tmp_path / "source.mkv"; src.write_bytes(b"\x00")
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00")
         out = tmp_path / "output.mkv"
         cfg = _make_config(
             src,
@@ -3300,9 +3440,12 @@ class TestIntegratedMetadataCommand:
         assert cmd[chap_idx + 1] == "1"
 
     def test_tag_sources_copy_from_last_source(self, tmp_path):
-        src = tmp_path / "source.mkv"; src.write_bytes(b"\x00")
-        tag1 = tmp_path / "tag1.mkv"; tag1.write_bytes(b"\x00")
-        tag2 = tmp_path / "tag2.mkv"; tag2.write_bytes(b"\x00")
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00")
+        tag1 = tmp_path / "tag1.mkv"
+        tag1.write_bytes(b"\x00")
+        tag2 = tmp_path / "tag2.mkv"
+        tag2.write_bytes(b"\x00")
         out = tmp_path / "output.mkv"
         cfg = _make_config(
             src,
@@ -3318,7 +3461,8 @@ class TestIntegratedMetadataCommand:
         assert cmd[idx + 1] == "1"
 
     def test_empty_chapter_overrides_remove_chapters(self, tmp_path):
-        src = tmp_path / "source.mkv"; src.write_bytes(b"\x00")
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00")
         out = tmp_path / "output.mkv"
         cfg = _make_config(
             src,
@@ -3333,7 +3477,8 @@ class TestIntegratedMetadataCommand:
         assert cmd[idx + 1] == "-1"
 
     def test_main_command_does_not_force_muxing_application_tag(self, tmp_path):
-        src = tmp_path / "source.mkv"; src.write_bytes(b"\x00")
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00")
         out = tmp_path / "output.mkv"
         cfg = _make_config(src, out, video=_make_video_settings(codec="copy"))
         wf = EncodeWorkflow(
@@ -3346,7 +3491,8 @@ class TestIntegratedMetadataCommand:
         assert not any("muxing_application=" in str(arg) for arg in cmd)
 
     def test_main_command_includes_threads_argument(self, tmp_path):
-        src = tmp_path / "source.mkv"; src.write_bytes(b"\x00")
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00")
         out = tmp_path / "output.mkv"
         cfg = _make_config(
             src,
@@ -3412,13 +3558,15 @@ class TestSelectedAttachedPicHandling:
 
         with patch("subprocess.run", side_effect=_fake_subprocess_run), \
              patch.object(wf._runner, "_run_cmd", side_effect=_fake_run_cmd), \
-             patch.object(wf._runner, "run") as mock_run:
-            signals = TaskSignals()
-            mock_run.side_effect = lambda cmd, **_kw: captured.append(list(cmd)) or signals
+             patch.object(wf, "_finalize_ffmpeg_output") as mock_run:
+            def _capture_finalizer(_cfg, cmd, *_args, **_kw):
+                captured.append(list(cmd))
+                return _delayed_finalizer()
+            mock_run.side_effect = _capture_finalizer
             returned = wf.run(config)
-            returned.finished.emit("done")
+            _collect_signals(returned)
 
-        assert returned is signals
+        assert isinstance(returned, TaskSignals)
         assert len(captured) == 1
         cmd = captured[0]
         assert "-attach" in cmd
@@ -3895,16 +4043,28 @@ class TestInjectPathIntegratedPostproc:
         chap_idx = recon.index("-map_chapters")
         assert recon[chap_idx + 1] == "2"
 
-    def test_recon_wraps_injected_hevc_before_final_mux(self, tmp_path):
+    def test_recon_consumes_rewritten_artifact_before_final_mux(self, tmp_path):
+        """Lot 3 : plus aucun wrap ffmpeg depuis les timestamps de la source.
+
+        L'annexB est extrait de l'artefact MKV encodé (source de vérité
+        temporelle), puis le rewriter produit enc_wrapped.mkv consommé par
+        la reconstitution finale.
+        """
         cmds = self._run_inject(tmp_path)
+        extract_cmds = [
+            c for c in cmds
+            if c[0] == "ffmpeg"
+            and any(str(arg).endswith("enc_video.mkv") for arg in c)
+            and str(c[-1]).endswith("enc.hevc")
+        ]
+        assert len(extract_cmds) == 1, f"Extraction annexB introuvable. Cmds: {cmds}"
+        extract = extract_cmds[0]
+        assert extract[extract.index("-bsf:v") + 1] == "hevc_mp4toannexb"
+
+        # Aucun wrap ffmpeg vers enc_wrapped.mkv : c'est le rewriter natif.
         wrap_cmds = [c for c in cmds if c[0] == "ffmpeg" and str(c[-1]).endswith("enc_wrapped.mkv")]
-        assert len(wrap_cmds) == 1, f"Commande d'encapsulation introuvable. Cmds: {cmds}"
-        wrap = wrap_cmds[0]
-        assert "-f" in wrap
-        assert wrap[wrap.index("-f") + 1] == "hevc"
-        assert "-framerate" in wrap
-        assert "-bsf:v" in wrap
-        assert wrap[wrap.index("-bsf:v") + 1].startswith("setts=pts=N/(")
+        assert wrap_cmds == []
+        assert not any("setts=pts=N/(" in str(arg) for c in cmds for arg in c)
 
         recon = self._get_recon_cmd(cmds)
         first_input = recon[recon.index("-i") + 1]
@@ -3927,7 +4087,7 @@ class TestEncodeExtraAttachments:
     Conventions ffmpeg :
       -attach <path>                       — attache le fichier
       -metadata:s:t:N mimetype=<mime>      — type MIME de l'attachement N
-      -metadata:s:t:N filename=<name>      — nom dans le MKV (cover → "cover")
+      -metadata:s:t:N filename=<name>      — nom dans le MKV (cover → "cover<ext>" canonique)
     """
 
     def setup_method(self):
@@ -4003,19 +4163,19 @@ class TestEncodeExtraAttachments:
         assert filename_val == "filename=poster.jpg"
 
     def test_single_attach_filename_cover(self, tmp_path):
-        """-metadata:s:t:0 filename=cover pour un fichier nommé cover.*."""
+        """-metadata:s:t:0 filename=cover.jpg (canonique) pour un fichier cover.*."""
         cmd = self._single(tmp_path, [tmp_path / "cover.jpg"])
         indices = [i for i, a in enumerate(cmd) if a == "-metadata:s:t:0"]
         assert len(indices) == 2
         filename_val = cmd[indices[1] + 1]
-        assert filename_val == "filename=cover"
+        assert filename_val == "filename=cover.jpg"
 
     def test_single_cover_case_insensitive(self, tmp_path):
-        """COVER.JPG → filename=cover (insensible à la casse)."""
+        """COVER.JPG → filename=cover.jpg (stem et extension canoniques)."""
         cmd = self._single(tmp_path, [tmp_path / "COVER.JPG"])
         indices = [i for i, a in enumerate(cmd) if a == "-metadata:s:t:0"]
         filename_val = cmd[indices[1] + 1]
-        assert filename_val == "filename=cover"
+        assert filename_val == "filename=cover.jpg"
 
     def test_single_no_extra_no_attach(self, tmp_path):
         """extra_attachments=[] → aucun -attach dans la commande."""
@@ -4059,7 +4219,7 @@ class TestEncodeExtraAttachments:
         assert "filename=DejaVuSans.ttf" in cmd
         assert "-metadata:s:t:1" in cmd
         indices = [i for i, a in enumerate(cmd) if a == "-metadata:s:t:1"]
-        assert any(cmd[i + 1] == "filename=cover" for i in indices)
+        assert any(cmd[i + 1] == "filename=cover.jpg" for i in indices)
 
     def test_single_attachment_streams_write_filename_and_mimetype(self, tmp_path):
         src = self._src(tmp_path)
@@ -4097,11 +4257,11 @@ class TestEncodeExtraAttachments:
         assert cmd[idx + 1] == "mimetype=image/jpeg"
 
     def test_pass2_cover_filename(self, tmp_path):
-        """-metadata:s:t:0 filename=cover dans la passe 2 pour cover.*."""
+        """-metadata:s:t:0 filename=cover.jpg dans la passe 2 pour cover.*."""
         cmd = self._pass2(tmp_path, [tmp_path / "cover.jpg"])
         indices = [i for i, a in enumerate(cmd) if a == "-metadata:s:t:0"]
         filename_val = cmd[indices[1] + 1]
-        assert filename_val == "filename=cover"
+        assert filename_val == "filename=cover.jpg"
 
     def test_pass1_no_attach(self, tmp_path):
         """-attach absent de la passe 1 (analyse seule, pas de sortie)."""
@@ -4170,12 +4330,12 @@ class TestEncodeExtraAttachments:
         assert recon[recon.index("-threads") + 1] == "9"
 
     def test_inject_cover_filename(self, tmp_path):
-        """filename=cover dans la reconstitution finale pour cover.*."""
+        """filename=cover.jpg dans la reconstitution finale pour cover.*."""
         extras = [tmp_path / "cover.jpg"]
         cmds = self._run_inject_with_extras(tmp_path, extras)
         recon = self._get_recon_cmd(cmds)
         indices = [i for i, a in enumerate(recon) if a == "-metadata:s:t:0"]
-        assert any(recon[i + 1] == "filename=cover" for i in indices)
+        assert any(recon[i + 1] == "filename=cover.jpg" for i in indices)
 
     def test_inject_no_attach_when_empty(self, tmp_path):
         """extra_attachments=[] → aucun -attach dans la reconstitution."""
@@ -4428,7 +4588,7 @@ class TestEncodeRuntimeMultiSourceSync:
                 sigs = wf._run_with_metadata_inject(cfg)
                 _collect_signals(sigs)
 
-        recon = [c for c in ran_cmds if str(out) in [str(x) for x in c]]
+        recon = [c for c in ran_cmds if str(out) + ".partial" in [str(x) for x in c]]
         assert len(recon) == 1
         cmd = recon[0]
         assert str(sync_audio) in cmd
@@ -4493,7 +4653,7 @@ class TestEncodeRuntimeMultiSourceSync:
                 sigs = wf._run_with_metadata_inject(cfg)
                 _collect_signals(sigs)
 
-        recon = [c for c in ran_cmds if str(out) in [str(x) for x in c]]
+        recon = [c for c in ran_cmds if str(out) + ".partial" in [str(x) for x in c]]
         assert len(recon) == 1
         cmd = recon[0]
         assert "-itsoffset" in cmd
@@ -4842,6 +5002,61 @@ class TestEncodeRuntimeMultiSourceSync:
         assert "0:0" in map_values
         assert "1:1" in map_values
 
+    def test_multi_video_releases_rewritten_intermediates_before_final_mux(self, tmp_path):
+        src = tmp_path / "src.mkv"
+        out = tmp_path / "out.mkv"
+        work_dir = tmp_path / "work"
+        src.write_bytes(b"source")
+        work_dir.mkdir()
+
+        video = _make_video_settings(
+            codec="libx265",
+            source_path=src,
+            stream_index=0,
+            copy_hdr10plus=True,
+        )
+        cfg = _make_config(
+            src,
+            out,
+            video=video,
+            video_tracks=[video],
+            work_dir=work_dir,
+        )
+        wf = _make_workflow()
+        finalizer_called = False
+
+        def _fake_run_cmd(cmd, **_kwargs):
+            target = Path(cmd[-1])
+            if target.suffix in {".mkv", ".hevc", ".json"}:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"artifact")
+            return "ok"
+
+        def _fake_finalize(*_args, **_kwargs):
+            nonlocal finalizer_called
+            finalizer_called = True
+            assert not (work_dir / "video_1.enc.mkv").exists()
+            assert not (work_dir / "video_1.hdr10plus.hevc").exists()
+            assert (work_dir / "video_1.wrapped.mkv").is_file()
+            return str(out)
+
+        with patch.object(wf._runner, "_run_cmd", side_effect=_fake_run_cmd), patch.object(
+            wf,
+            "_prepare_multisource_sync",
+            return_value=({}, [], None, False),
+        ), patch.object(
+            wf,
+            "_finalize_ffmpeg_output",
+            side_effect=_fake_finalize,
+        ):
+            wf._run_multi_video_pipeline(
+                cfg,
+                cleanup_paths=[],
+                prep_signals=TaskSignals(),
+            )
+
+        assert finalizer_called
+
     def test_run_with_preparation_multi_video_binds_post_actions(self, tmp_path):
         src = tmp_path / "src.mkv"
         out = tmp_path / "out.mkv"
@@ -4885,9 +5100,6 @@ class TestEncodeRuntimeMultiSourceSync:
             "_bind_temp_cleanup",
         ) as bind_cleanup, patch.object(
             wf,
-            "_bind_matroska_segment_muxing_patch",
-        ) as bind_mux, patch.object(
-            wf,
             "_bind_nfo_write",
         ) as bind_nfo:
             result = wf._run_with_preparation(cfg, validate=False, prep_signals=prep_signals)
@@ -4897,12 +5109,7 @@ class TestEncodeRuntimeMultiSourceSync:
         assert bind_cleanup.call_count == 2
         bind_cleanup.assert_any_call(prep_signals, [work_dir])
         bind_cleanup.assert_any_call(inner_signals, [work_dir])
-        assert bind_mux.call_count == 2
-        bind_mux.assert_any_call(prep_signals, out)
-        bind_mux.assert_any_call(inner_signals, out)
-        assert bind_nfo.call_count == 2
-        bind_nfo.assert_any_call(prep_signals, out)
-        bind_nfo.assert_any_call(inner_signals, out)
+        assert bind_nfo.call_count == 0
         assert any(
             level == "INFO"
             and message == "STEP 4 - Routage du workflow (pipeline multi-pistes vidéo)"
@@ -4935,19 +5142,15 @@ class TestEncodeRuntimeMultiSourceSync:
             assert signals is prep_signals
             call_order.append("bind_cleanup")
 
-        def _fake_bind_mux(signals, _out):
-            assert signals is prep_signals
-            call_order.append("bind_mux")
-
         def _fake_bind_nfo(signals, _out):
             assert signals is prep_signals
             call_order.append("bind_nfo")
 
-        def _fake_run_multi(_cfg, _cleanup_paths, *, prep_signals=None, plan=None):
+        def _fake_run_multi(_cfg, _cleanup_paths, *, prep_signals=None, plan=None, mux_decision=None):
             assert prep_signals is prep_signals_ref
             assert plan is not None
             call_order.append("run_multi")
-            assert call_order[:3] == ["bind_cleanup", "bind_mux", "bind_nfo"]
+            assert call_order == ["bind_cleanup", "run_multi"]
             prep_signals_ref.finished.emit("done")
             return prep_signals_ref
 
@@ -4973,17 +5176,13 @@ class TestEncodeRuntimeMultiSourceSync:
             side_effect=_fake_bind_cleanup,
         ), patch.object(
             wf,
-            "_bind_matroska_segment_muxing_patch",
-            side_effect=_fake_bind_mux,
-        ), patch.object(
-            wf,
             "_bind_nfo_write",
             side_effect=_fake_bind_nfo,
         ):
             result = wf._run_with_preparation(cfg, validate=False, prep_signals=prep_signals)
 
         assert result is prep_signals
-        assert call_order[:4] == ["bind_cleanup", "bind_mux", "bind_nfo", "run_multi"]
+        assert call_order == ["bind_cleanup", "run_multi"]
 
     def test_run_with_preparation_prebinds_hooks_before_sync_direct_output(self, tmp_path):
         src = tmp_path / "src.mkv"
@@ -5010,19 +5209,15 @@ class TestEncodeRuntimeMultiSourceSync:
             assert signals is prep_signals
             call_order.append("bind_cleanup")
 
-        def _fake_bind_mux(signals, _out):
-            assert signals is prep_signals
-            call_order.append("bind_mux")
-
         def _fake_bind_nfo(signals, _out):
             assert signals is prep_signals
             call_order.append("bind_nfo")
 
-        def _fake_run_direct(_cfg, _cleanup_paths, *, prep_signals=None, plan=None):
+        def _fake_run_direct(_cfg, _cleanup_paths, *, prep_signals=None, plan=None, mux_decision=None):
             assert prep_signals is prep_signals_ref
             assert plan is not None
             call_order.append("run_direct")
-            assert call_order[:3] == ["bind_cleanup", "bind_mux", "bind_nfo"]
+            assert call_order == ["bind_cleanup", "run_direct"]
             prep_signals_ref.finished.emit("done")
             return prep_signals_ref
 
@@ -5048,17 +5243,13 @@ class TestEncodeRuntimeMultiSourceSync:
             side_effect=_fake_bind_cleanup,
         ), patch.object(
             wf,
-            "_bind_matroska_segment_muxing_patch",
-            side_effect=_fake_bind_mux,
-        ), patch.object(
-            wf,
             "_bind_nfo_write",
             side_effect=_fake_bind_nfo,
         ):
             result = wf._run_with_preparation(cfg, validate=False, prep_signals=prep_signals)
 
         assert result is prep_signals
-        assert call_order[:4] == ["bind_cleanup", "bind_mux", "bind_nfo", "run_direct"]
+        assert call_order == ["bind_cleanup", "run_direct"]
 
     def test_run_multi_video_pipeline_serializes_same_resource(self, tmp_path):
         src = tmp_path / "src.mkv"
@@ -5378,7 +5569,14 @@ class TestTrackMetaArgs:
     def setup_method(self):
         self.wf = _make_workflow()
 
-    def _build_args(self, tmp_path, edits: list, *, audio_count: int = 1) -> list[str]:
+    def _build_args(
+        self,
+        tmp_path,
+        edits: list,
+        *,
+        audio_count: int = 1,
+        subtitle_count: int = 0,
+    ) -> list[str]:
         source = tmp_path / "src.mkv"
         output = tmp_path / "out.mkv"
         source.touch()
@@ -5388,6 +5586,7 @@ class TestTrackMetaArgs:
             source,
             output,
             audio_tracks=audio_tracks,
+            subtitle_tracks=[(source, audio_count + index + 1) for index in range(subtitle_count)],
             track_meta_edits=edits,
         )
         return self.wf._build_track_meta_args(config)
@@ -5406,7 +5605,7 @@ class TestTrackMetaArgs:
             TrackMetaEdit(track_order=2, language="en"),
             TrackMetaEdit(track_order=3, language="es"),
         ]
-        args = self._build_args(tmp_path, edits, audio_count=1)
+        args = self._build_args(tmp_path, edits, audio_count=1, subtitle_count=1)
         assert "-metadata:s:v:0" in args
         assert "-metadata:s:a:0" in args
         assert "-metadata:s:s:0" in args
@@ -5990,3 +6189,144 @@ class TestNvenccRuntimeRouting:
         with patch.object(wf, "_ffprobe_streams_payload", return_value=None), \
              patch.object(wf, "_load_mediainfo_video_track", return_value={"FrameRate_Mode": "CFR"}):
             assert wf._source_is_vfr(src) is False
+
+
+class TestEncodeContractAuditFixes:
+    """Non-régression des défauts contrat/chemins relevés par l'audit externe.
+
+    - attentes des attachments embarqués calculées avec le même descripteur
+      que la commande (noms identiques → validation atomique cohérente) ;
+    - nom de cover canonique partagé commande/contrat (extension conservée) ;
+    - copie de sous-titres par mapping optionnel (pré-scan incomplet) :
+      contrat assoupli sur les sous-titres uniquement ;
+    - chemins relatifs résolus en absolu à l'entrée du workflow encode.
+    """
+
+    def test_attachment_stream_expectations_match_command_naming(self, tmp_path):
+        wf = _make_workflow()
+        src = tmp_path / "src.mkv"
+        src.write_bytes(b"src")
+        cfg = _make_config(src, tmp_path / "out.mkv", attachment_streams=[(src, 3)])
+        with patch.object(
+            wf, "_describe_attachment_stream",
+            return_value={"filename": "DejaVuSans.ttf", "mimetype": "font/ttf"},
+        ):
+            expectations = wf._attachment_stream_expectations(cfg)
+        assert [(item.name, item.media_type) for item in expectations] == [
+            ("DejaVuSans.ttf", "font/ttf"),
+        ]
+
+    def test_contract_uses_canonical_cover_name(self, tmp_path):
+        from core.workflows.common.attachments import canonical_attachment_output_name
+        from core.workflows.encode.output_contract import build_encode_output_contract
+
+        assert canonical_attachment_output_name(Path("cover.jpg")) == "cover.jpg"
+        assert canonical_attachment_output_name(Path("COVER.JPG")) == "cover.jpg"
+        assert canonical_attachment_output_name(Path("poster.png")) == "poster.png"
+
+        wf = _make_workflow()
+        src = tmp_path / "src.mkv"
+        src.write_bytes(b"src")
+        cover = tmp_path / "COVER.JPG"
+        cover.write_bytes(b"jpg")
+        cfg = _make_config(src, tmp_path / "out.mkv", extra_attachments=[cover])
+        contract = build_encode_output_contract(cfg, wf._build_encode_plan(cfg))
+        assert contract.attachment_names == ("cover.jpg",)
+
+    def test_unresolved_subtitle_prescan_relaxes_contract(self, tmp_path):
+        """Pré-scan incomplet + copy_subtitles : le contrat tolère les sous-titres."""
+        from core.workflows.encode.output_contract import build_encode_output_contract
+
+        wf = _make_workflow()
+        src = tmp_path / "src.mkv"
+        src.write_bytes(b"pas un mkv sondable")
+        cfg = _make_config(src, tmp_path / "out.mkv", copy_subtitles=True)
+        plan = wf._build_encode_plan(cfg)
+        assert plan.subtitles_resolved is False
+        contract = build_encode_output_contract(cfg, plan)
+        assert contract.allow_unexpected_subtitles is True
+
+        resolved_cfg = _make_config(src, tmp_path / "out.mkv", copy_subtitles=False)
+        resolved_plan = wf._build_encode_plan(resolved_cfg)
+        resolved_contract = build_encode_output_contract(resolved_cfg, resolved_plan)
+        assert resolved_contract.allow_unexpected_subtitles is False
+
+    def test_absolute_paths_config_resolves_everything(self, tmp_path, monkeypatch):
+        from core.workflows.common.track_types import TrackOffset
+
+        monkeypatch.chdir(tmp_path)
+        cfg = _make_config(
+            Path("in.mkv"),
+            Path("sub/out.mkv"),
+            work_dir=Path("wip"),
+            audio_tracks=[AudioTrackSettings(stream_index=0, codec="copy", source_path=Path("audio.mkv"))],
+            subtitle_tracks=[(Path("subs.mkv"), 0)],
+            attachment_streams=[(Path("in.mkv"), 3)],
+            extra_attachments=[Path("cover.jpg")],
+            tag_sources=[Path("in.mkv")],
+            track_time_offsets=[TrackOffset("audio", Path("audio.mkv"), 1, offset_ms=80)],
+        )
+        normalized = EncodeWorkflow._absolute_paths_config(cfg)
+        observed = [
+            normalized.source, normalized.output, normalized.work_dir,
+            normalized.audio_tracks[0].source_path,
+            normalized.subtitle_tracks[0][0],
+            normalized.attachment_streams[0][0],
+            normalized.extra_attachments[0],
+            normalized.tag_sources[0],
+            normalized.track_time_offsets[0].source_path,
+        ]
+        assert all(path is not None and Path(path).is_absolute() for path in observed)
+        assert normalized.source == tmp_path / "in.mkv"
+        assert normalized.output == tmp_path / "sub" / "out.mkv"
+        assert normalized.work_dir == tmp_path / "wip"
+
+    def test_chapters_hint_covers_non_matroska_sources(self, tmp_path):
+        """Chapitres MP4/MOV : l'indice de sonde pilote expects_chapters."""
+        from core.workflows.encode.output_contract import build_encode_output_contract
+
+        wf = _make_workflow()
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        cfg = _make_config(src, tmp_path / "out.mkv", keep_chapters=True)
+        plan = wf._build_encode_plan(cfg)
+        assert build_encode_output_contract(cfg, plan).expects_chapters is False
+        assert build_encode_output_contract(
+            cfg, plan, source_has_chapters=True,
+        ).expects_chapters is True
+        assert build_encode_output_contract(
+            cfg, plan, source_has_chapters=False,
+        ).expects_chapters is False
+
+    def test_source_has_chapters_hint_only_probes_non_matroska(self, tmp_path):
+        """Sonde ffprobe : uniquement hors Matroska et si copie demandée."""
+        wf = _make_workflow()
+        mkv = tmp_path / "src.mkv"
+        mkv.write_bytes(b"\x1a\x45\xdf\xa3rest")
+        assert wf._source_has_chapters_hint(
+            _make_config(mkv, tmp_path / "out.mkv", keep_chapters=True)
+        ) is None
+        mp4 = tmp_path / "src.mp4"
+        mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        assert wf._source_has_chapters_hint(
+            _make_config(mp4, tmp_path / "out.mkv", keep_chapters=False)
+        ) is None
+        with patch("core.workflows.encode.workflow.subprocess.run") as mocked:
+            mocked.return_value = MagicMock(returncode=0, stdout='{"chapters": [{"id": 0}]}')
+            assert wf._source_has_chapters_hint(
+                _make_config(mp4, tmp_path / "out.mkv", keep_chapters=True)
+            ) is True
+            mocked.return_value = MagicMock(returncode=0, stdout='{"chapters": []}')
+            assert wf._source_has_chapters_hint(
+                _make_config(mp4, tmp_path / "out.mkv", keep_chapters=True)
+            ) is False
+
+    def test_validate_rejects_non_mkv_output(self, tmp_path):
+        """Le préflight refuse une sortie non-.mkv (le mux écrit du Matroska)."""
+        wf = _make_workflow()
+        src = tmp_path / "src.mkv"
+        src.write_bytes(b"src")
+        errors = wf.validate(_make_config(src, tmp_path / "out.mp4"))
+        assert any(".mkv" in error for error in errors)
+        errors_mkv = wf.validate(_make_config(src, tmp_path / "out.mkv"))
+        assert not any("sortie d'encodage" in error for error in errors_mkv)

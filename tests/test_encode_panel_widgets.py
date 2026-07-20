@@ -64,7 +64,7 @@ from typing import Any, cast
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QLineEdit,
+    QCheckBox, QComboBox, QDialog, QLineEdit,
     QPushButton, QSpinBox, QWidget,
 )
 
@@ -1678,6 +1678,22 @@ class TestEncodePanelDynamicHdrDefaults:
 
 
 class TestEncodePanelRunOperation:
+
+    def test_collect_config_uses_shared_mux_backend_provider(self, qt_app):
+        panel = EncodePanel(AppConfig())
+        panel.set_output_provider(lambda: Path("/tmp/out.mkv"))
+        panel.set_mux_backend_provider(lambda: "native")
+        entry = _video_entry(0)
+        entry.entry_id = "video-mux-provider"
+        panel.set_video_tracks([(
+            _file_info(_PATH_A, [_video_track(0)]), entry, _COLOR,
+        )])
+
+        config = panel.collect_config()
+
+        assert config is not None
+        assert config.mux_backend == "native"
+        panel.close()
 
     def test_run_operation_skips_duplicate_workflow_validation(self, qt_app, monkeypatch):
         panel = EncodePanel(AppConfig())

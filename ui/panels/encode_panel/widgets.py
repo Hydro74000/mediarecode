@@ -28,8 +28,8 @@ from core.file_types import VIDEO_CONTAINER_EXTENSIONS, build_qt_filter
 from core.inspector import AudioTrack, FileInfo
 from core.i18n import apply_translations, translate_text
 from core.lang_tags import Rfc5646LanguageTags
+from core.workflows.encode.catalog import AUDIO_CODECS
 from core.workflows.encode.models import (
-    AUDIO_CODECS,
     DEFAULT_AUDIO_KBPS_PER_CHANNEL,
     audio_bitrate_choices_kbps,
     default_audio_bitrate_kbps,

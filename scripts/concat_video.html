@@ -1,0 +1,2001 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Muxiveo - Merging Additionnal Tool - concat_video.py Documentation</title>
+    
+    <!-- Google Fonts: Sora (display), Space Grotesk (body/sans), JetBrains Mono (mono) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Prism.js CSS (dynamic theme loader in JS) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" id="prism-theme">
+    
+    <!-- Animate.css for entrance animations -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"/>
+
+    <!-- Muxiveo Web Design Stylesheet -->
+    <style>
+        :root {
+            --font-sans: 'Space Grotesk', 'Segoe UI', sans-serif;
+            --font-display: 'Sora', 'Space Grotesk', sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+            
+            /* Dark Theme (Based on Muxiveo Web ~/dev/muxiveo_web/) */
+            --bg-main: #101417;
+            --bg-sidebar: rgba(23, 29, 33, 0.65);
+            --bg-card: rgba(23, 29, 33, 0.4);
+            --border-color: rgba(248, 243, 234, 0.16);
+            --border-glow: rgba(255, 179, 71, 0.25);
+            --text-main: #f8f3ea;
+            --text-muted: #b8c0bd;
+            --accent: #ffb347; /* Warm Amber */
+            --accent-light: #ffd085;
+            --accent-secondary: #51d6a9; /* Teal */
+            --accent-glow: rgba(255, 179, 71, 0.12);
+            
+            --code-bg: rgba(23, 29, 33, 0.6);
+            --table-header: rgba(16, 20, 23, 0.75);
+            --table-row-alt: rgba(23, 29, 33, 0.2);
+            
+            --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
+            --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.3);
+            --shadow-lg: 0 24px 80px rgba(0, 0, 0, 0.4);
+        }
+
+        [data-theme="light"] {
+            /* Light Theme (Inverted Muxiveo Web Aesthetics) */
+            --bg-main: #f8f3ea;
+            --bg-sidebar: rgba(242, 234, 223, 0.7);
+            --bg-card: rgba(255, 255, 255, 0.65);
+            --border-color: rgba(16, 20, 23, 0.12);
+            --border-glow: rgba(217, 119, 6, 0.25);
+            --text-main: #101417;
+            --text-muted: #737c78;
+            --accent: #d97706; /* Darker Amber */
+            --accent-light: #ffb347;
+            --accent-secondary: #0f766e; /* Dark Teal */
+            --accent-glow: rgba(217, 119, 6, 0.08);
+            
+            --code-bg: rgba(253, 251, 247, 0.85);
+            --table-header: rgba(245, 238, 223, 0.8);
+            --table-row-alt: rgba(252, 250, 245, 0.5);
+            
+            --shadow-sm: 0 2px 8px rgba(16, 20, 23, 0.04);
+            --shadow-md: 0 8px 24px rgba(16, 20, 23, 0.06);
+            --shadow-lg: 0 16px 48px rgba(16, 20, 23, 0.1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            line-height: 1.75;
+            display: flex;
+            min-height: 100vh;
+            transition: background-color 0.3s, color 0.3s;
+            position: relative;
+            overflow-x: hidden;
+            
+            /* Muxiveo Web Background Radial Gradients */
+            background-image:
+                radial-gradient(circle at 18% 12%, rgba(255, 179, 71, .15), transparent 28rem),
+                radial-gradient(circle at 84% 18%, rgba(81, 214, 169, .12), transparent 26rem),
+                linear-gradient(135deg, #0e1214 0%, #182127 52%, #111514 100%);
+        }
+
+        [data-theme="light"] body {
+            background-image:
+                radial-gradient(circle at 18% 12%, rgba(255, 179, 71, .08), transparent 28rem),
+                radial-gradient(circle at 84% 18%, rgba(81, 214, 169, .06), transparent 26rem),
+                linear-gradient(135deg, #f8f3ea 0%, #f2eadf 100%);
+        }
+
+        /* Uniform grid overlay */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            opacity: .22;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, .045) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, .035) 1px, transparent 1px);
+            background-size: 60px 60px;
+            z-index: -2;
+        }
+
+        [data-theme="light"] body::before {
+            opacity: 0.18;
+            background-image:
+                linear-gradient(rgba(16, 20, 23, .05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(16, 20, 23, .04) 1px, transparent 1px);
+        }
+
+        /* Retractable Sidebar (Desktop & Mobile) */
+        .sidebar {
+            width: 330px;
+            background: var(--bg-sidebar);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border-right: 1px solid var(--border-color);
+            padding: 2.25rem 1.5rem;
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            z-index: 100;
+            overflow-y: auto;
+            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), padding 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .logo-link {
+            text-decoration: none;
+            color: inherit;
+            display: block;
+        }
+        .logo-link:hover .logo-icon {
+            border-color: var(--accent) !important;
+            background: rgba(255, 179, 71, 0.15) !important;
+            box-shadow: 0 0 10px var(--border-glow) !important;
+        }
+        .logo-link:hover .logo-text {
+            color: var(--accent) !important;
+        }
+
+        /* Logo styling - Muxiveo brand matching */
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            margin-bottom: 3.5rem;
+            transition: all 0.3s;
+        }
+
+        .logo-icon {
+            background: rgba(255, 179, 71, 0.08);
+            border: 1px solid var(--border-color);
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--accent);
+            flex-shrink: 0;
+            box-shadow: 0 0 10px rgba(255, 179, 71, 0.05);
+            transition: all 0.3s;
+        }
+
+        .brand-meta {
+            display: flex;
+            flex-direction: column;
+            line-height: 1.2;
+            transition: opacity 0.2s;
+        }
+
+        .logo-text {
+            font-family: var(--font-display);
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            color: var(--text-main);
+        }
+
+        .logo-subtitle {
+            font-family: var(--font-sans);
+            font-size: 0.65rem;
+            color: var(--accent);
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            margin-top: 0.15rem;
+        }
+
+        .toc-title {
+            font-family: var(--font-display);
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: var(--accent);
+            margin-bottom: 1.25rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            transition: opacity 0.2s;
+        }
+        .toc-title::before {
+            content: "";
+            display: inline-block;
+            width: 4px;
+            height: 4px;
+            background-color: var(--accent);
+            border-radius: 50%;
+        }
+
+        .toc-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+
+        .toc-item a {
+            display: block;
+            padding: 0.45rem 0.6rem;
+            border-radius: 999px; /* Rounded pill style like Muxiveo menu */
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.88rem;
+            transition: all 0.2s;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            border-left: 2px solid transparent;
+        }
+
+        .toc-item.h3 a {
+            padding-left: 1.5rem;
+            font-size: 0.82rem;
+        }
+
+        .toc-item.h4 a {
+            padding-left: 2.25rem;
+            font-size: 0.78rem;
+        }
+
+        .toc-item a:hover {
+            color: var(--text-main);
+            background-color: rgba(255, 255, 255, 0.08);
+        }
+
+        .toc-item.active a {
+            color: var(--text-main);
+            background-color: rgba(255, 255, 255, 0.08);
+            border-left-color: var(--accent);
+            font-weight: 600;
+        }
+
+        .toc-num {
+            font-family: var(--font-mono);
+            font-size: 0.72rem;
+            color: var(--accent);
+            margin-right: 0.35rem;
+            opacity: 0.8;
+        }
+
+        /* Collapsed Sidebar State (Desktop) */
+        body.sidebar-collapsed .sidebar {
+            width: 70px;
+            padding: 2.25rem 0.5rem;
+            align-items: center;
+        }
+        
+        body.sidebar-collapsed .logo-container {
+            justify-content: center;
+            margin-bottom: 2.5rem;
+        }
+
+        body.sidebar-collapsed .brand-meta,
+        body.sidebar-collapsed .toc-title,
+        body.sidebar-collapsed .toc-item a span:not(.toc-num) {
+            opacity: 0;
+            display: none;
+        }
+
+        body.sidebar-collapsed .toc-item a {
+            padding: 0.5rem 0;
+            text-align: center;
+            border-left: none;
+        }
+
+        body.sidebar-collapsed .toc-num {
+            margin-right: 0;
+            font-size: 0.85rem;
+        }
+
+        /* Main Wrapper & Layout Transitions */
+        .main-wrapper {
+            margin-left: 330px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body.sidebar-collapsed .main-wrapper {
+            margin-left: 70px;
+        }
+
+        /* Clean Glass Header */
+        .top-header {
+            height: 70px;
+            background: rgba(16, 20, 23, 0.3);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 3rem;
+            position: sticky;
+            top: 0;
+            z-index: 90;
+        }
+
+        [data-theme="light"] .top-header {
+            background: rgba(248, 243, 240, 0.35);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1.25rem;
+        }
+
+        /* Sidebar toggle button (desktop) */
+        .sidebar-toggle-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-muted);
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.25s;
+            font-family: var(--font-mono);
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+
+        .sidebar-toggle-btn:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+            background: rgba(255, 179, 71, 0.05);
+        }
+
+        .breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-family: var(--font-display);
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            letter-spacing: 0.02em;
+        }
+
+        .breadcrumb-separator {
+            color: var(--border-color);
+        }
+
+        .breadcrumb-link {
+            color: var(--accent);
+            font-weight: 600;
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+            transition: all 0.2s;
+        }
+        .breadcrumb-link:hover {
+            color: var(--accent-light);
+            border-bottom-color: var(--accent-light);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 1.25rem;
+        }
+
+        .search-container {
+            position: relative;
+        }
+
+        .search-input {
+            background-color: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 0.45rem 1rem 0.45rem 2.25rem;
+            border-radius: 999px; /* Rounded search */
+            font-size: 0.82rem;
+            width: 200px;
+            transition: all 0.3s;
+            font-family: var(--font-sans);
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            width: 260px;
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            width: 14px;
+            height: 14px;
+        }
+
+        .theme-toggle {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.25s;
+        }
+
+        .theme-toggle:hover {
+            background-color: rgba(255, 179, 71, 0.04);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* Content Container & Card (Muxiveo Glass Style) */
+        .content-container {
+            padding: 3.5rem;
+            max-width: 1020px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .content-card {
+            background: var(--bg-card);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid var(--border-color);
+            border-radius: 24px; /* Rounded corners like Muxiveo */
+            padding: 3.5rem;
+            box-shadow: var(--shadow-lg);
+            position: relative;
+            margin-bottom: 2rem;
+        }
+
+        /* Thin tech indicators */
+        .content-card::before {
+            content: "MUXIVEO // CONCAT // DOCUMENTATION";
+            position: absolute;
+            top: 0.75rem;
+            right: 1.25rem;
+            font-family: var(--font-mono);
+            font-size: 0.62rem;
+            color: var(--accent);
+            opacity: 0.6;
+            letter-spacing: 0.08em;
+        }
+
+        /* Typography */
+        .markdown-body {
+            font-size: 1.02rem;
+        }
+
+        .markdown-body h1 {
+            font-family: var(--font-display);
+            font-size: 2.5rem;
+            font-weight: 800;
+            margin-bottom: 2rem;
+            color: var(--text-main);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1rem;
+            letter-spacing: -0.015em;
+        }
+
+        .markdown-body h2 {
+            font-family: var(--font-display);
+            font-size: 1.65rem;
+            font-weight: 700;
+            color: var(--text-main);
+            margin-top: 3.5rem;
+            margin-bottom: 1.25rem;
+            letter-spacing: -0.01em;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.4rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .markdown-body h2::after {
+            content: "[ MVO // DOCS ]";
+            font-family: var(--font-mono);
+            font-size: 0.65rem;
+            color: var(--accent);
+            opacity: 0.65;
+            letter-spacing: 0.1em;
+        }
+
+        .markdown-body h3 {
+            font-family: var(--font-display);
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-top: 2.25rem;
+            margin-bottom: 0.85rem;
+            color: var(--accent-light);
+            display: block;
+        }
+        .markdown-body h3::before {
+            content: "•";
+            color: var(--accent-secondary);
+            font-weight: 600;
+            margin-right: 0.4rem;
+        }
+        .markdown-body h3::after {
+            content: "[ MVO // ATTR ]";
+            float: right;
+            font-family: var(--font-mono);
+            font-size: 0.6rem;
+            color: var(--accent-secondary);
+            opacity: 0.65;
+            letter-spacing: 0.1em;
+            font-weight: 400;
+            margin-top: 0.35rem;
+        }
+
+        .markdown-body h4 {
+            font-family: var(--font-display);
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-top: 1.75rem;
+            margin-bottom: 0.6rem;
+            color: var(--text-main);
+            opacity: 0.9;
+        }
+
+        .markdown-body p {
+            margin-bottom: 1.25rem;
+            color: var(--text-main);
+            opacity: 0.88;
+        }
+
+        .markdown-body a {
+            color: var(--accent);
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .markdown-body a:hover {
+            border-bottom-color: var(--accent);
+        }
+
+        .markdown-body ul, .markdown-body ol {
+            margin-bottom: 1.5rem;
+            padding-left: 1.5rem;
+        }
+
+        .markdown-body li {
+            margin-bottom: 0.5rem;
+            color: var(--text-main);
+            opacity: 0.88;
+        }
+
+        .markdown-body li::marker {
+            color: var(--accent);
+        }
+
+        /* Muxiveo Flat Table Design */
+        .markdown-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 2.25rem 0;
+            font-size: 0.88rem;
+            background: rgba(23, 29, 33, 0.2);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .markdown-body th {
+            background-color: var(--table-header);
+            color: var(--accent);
+            font-family: var(--font-display);
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-weight: 700;
+            text-align: left;
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .markdown-body td {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid rgba(255, 179, 71, 0.06);
+            color: var(--text-main);
+        }
+
+        .markdown-body tr:last-child td {
+            border-bottom: none;
+        }
+
+        .markdown-body tr:nth-child(even) {
+            background-color: var(--table-row-alt);
+        }
+
+        .markdown-body tr:hover {
+            background-color: rgba(255, 179, 71, 0.03);
+        }
+
+        /* Muxiveo Alert / Info Box */
+        .markdown-body blockquote {
+            margin: 2rem 0;
+            padding: 1.25rem 1.5rem;
+            background: rgba(255, 179, 71, 0.05);
+            border-left: 3px solid var(--accent);
+            border-radius: 6px;
+            border-top: 1px solid rgba(255, 179, 71, 0.1);
+            border-right: 1px solid rgba(255, 179, 71, 0.1);
+            border-bottom: 1px solid rgba(255, 179, 71, 0.1);
+        }
+
+        .markdown-body blockquote::before {
+            content: "[ MUXIVEO // NOTICE ]";
+            display: block;
+            font-family: var(--font-mono);
+            font-size: 0.65rem;
+            font-weight: 700;
+            color: var(--accent);
+            margin-bottom: 0.5rem;
+            letter-spacing: 0.08em;
+        }
+
+        .markdown-body blockquote p {
+            margin-bottom: 0;
+            font-style: normal;
+            color: var(--text-main);
+            opacity: 0.9;
+        }
+
+        /* Code Blocks Muxiveo Terminal Styling */
+        .code-block-wrapper {
+            position: relative;
+            margin: 2rem 0;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            background: rgba(23, 29, 33, 0.35);
+        }
+
+        .code-block-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: rgba(0, 0, 0, 0.3);
+            padding: 0.5rem 1.25rem;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-color);
+            font-family: var(--font-mono);
+            letter-spacing: 0.04em;
+        }
+
+        .copy-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            padding: 0.2rem 0.45rem;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            font-size: 0.7rem;
+            font-family: var(--font-mono);
+            transition: all 0.2s;
+        }
+
+        .copy-btn:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+            background-color: rgba(255, 179, 71, 0.04);
+        }
+
+        .markdown-body pre {
+            margin: 0 !important;
+            padding: 1.25rem 1.5rem !important;
+            background-color: var(--code-bg) !important;
+            border: none !important;
+            overflow-x: auto;
+        }
+
+        .markdown-body code {
+            font-family: var(--font-mono);
+            font-size: 0.88rem;
+        }
+
+        /* Glowing Inline Code Badges */
+        .markdown-body :not(pre) > code {
+            background-color: rgba(255, 179, 71, 0.08);
+            color: var(--accent);
+            border: 1px solid rgba(255, 179, 71, 0.18);
+            border-radius: 4px;
+            padding: 0.15rem 0.35rem;
+            font-size: 0.85em;
+            font-family: var(--font-mono);
+            white-space: nowrap;
+        }
+
+        [data-theme="light"] .markdown-body :not(pre) > code {
+            background-color: rgba(217, 119, 6, 0.06);
+            color: var(--accent);
+            border: 1px solid rgba(217, 119, 6, 0.12);
+        }
+
+        /* Flat Glass Mermaid Diagram Wrapper */
+        .mermaid-wrapper {
+            margin: 2.5rem 0;
+            background-color: rgba(23, 29, 33, 0.45);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 2.5rem 1.5rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+            overflow-x: auto;
+            position: relative;
+        }
+        [data-theme="light"] .mermaid-wrapper {
+            background-color: rgba(255, 255, 255, 0.6);
+            border-color: rgba(9, 132, 227, 0.2);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+        }
+        .mermaid-wrapper::before {
+            content: "[ MUXIVEO // SCHEMATIC // FLOW ]";
+            position: absolute;
+            top: 0.6rem;
+            left: 1rem;
+            font-family: var(--font-mono);
+            font-size: 0.62rem;
+            color: var(--text-muted);
+            letter-spacing: 0.05em;
+            opacity: 0.6;
+        }
+
+        .mermaid {
+            background-color: transparent !important;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+        }
+        
+        /* Direct SVG overrides for Muxiveo style */
+        .mermaid svg {
+            font-family: var(--font-mono) !important;
+        }
+        .mermaid .node rect, 
+        .mermaid .node circle, 
+        .mermaid .node polygon,
+        .mermaid .node path,
+        .mermaid .actor {
+            fill: rgba(23, 29, 33, 0.75) !important;
+            stroke: var(--accent) !important;
+            stroke-width: 1.5px !important;
+            rx: 6px !important;
+            ry: 6px !important;
+        }
+        [data-theme="light"] .mermaid .node rect,
+        [data-theme="light"] .mermaid .node circle,
+        [data-theme="light"] .mermaid .node polygon,
+        [data-theme="light"] .mermaid .node path,
+        [data-theme="light"] .mermaid .actor {
+            fill: #ffffff !important;
+            stroke: var(--accent) !important;
+        }
+        
+        /* Labels & text overrides */
+        .mermaid .node .label,
+        .mermaid .actor-man,
+        .mermaid text.actor {
+            fill: var(--text-main) !important;
+            color: var(--text-main) !important;
+            font-weight: 500 !important;
+        }
+        .mermaid .messageText {
+            fill: var(--text-main) !important;
+            stroke: none !important;
+            font-family: var(--font-mono) !important;
+            font-size: 0.75rem !important;
+        }
+        
+        /* Connector lines & arrows (Muxiveo Gold/Green) */
+        .mermaid .edgePaths .edgePath .path,
+        .mermaid .messageLine0,
+        .mermaid .messageLine1 {
+            stroke: var(--accent-secondary) !important;
+            stroke-width: 2px !important;
+        }
+        .mermaid .edgeLabels .edgeLabel rect {
+            fill: var(--bg-main) !important;
+            rx: 4px;
+            ry: 4px;
+        }
+        .mermaid .edgeLabels .edgeLabel span {
+            color: var(--text-muted) !important;
+            font-family: var(--font-mono) !important;
+            font-size: 0.72rem !important;
+        }
+        .mermaid .marker,
+        .mermaid #arrowhead,
+        .mermaid .loopLine {
+            fill: var(--accent-secondary) !important;
+            stroke: var(--accent-secondary) !important;
+        }
+
+        /* Scroll to Top button */
+        .scroll-top-btn {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            background-color: rgba(16, 20, 23, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--border-color);
+            color: var(--accent);
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s;
+            z-index: 80;
+        }
+
+        .scroll-top-btn.visible {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .scroll-top-btn:hover {
+            transform: translateY(-2px);
+            background-color: rgba(255, 179, 71, 0.06);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* Search Highlighting */
+        mark.search-highlight {
+            background-color: rgba(255, 179, 71, 0.35);
+            color: #ffffff;
+            border-bottom: 2px solid var(--accent);
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+        [data-theme="light"] mark.search-highlight {
+            background-color: rgba(217, 119, 6, 0.25);
+            color: #000000;
+        }
+
+        /* Clickable Code Boxes & Editor Dropdowns */
+        .clickable-code-box {
+            cursor: pointer;
+            position: relative;
+            transition: all 0.2s;
+        }
+        .clickable-code-box:hover {
+            border-color: var(--accent) !important;
+            background-color: rgba(255, 179, 71, 0.15) !important;
+            box-shadow: 0 0 6px var(--accent-glow);
+        }
+        
+        .code-dropdown {
+            background: rgba(16, 20, 23, 0.95);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.25rem;
+            min-width: 220px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            animation-duration: 0.15s;
+        }
+        [data-theme="light"] .code-dropdown {
+            background: rgba(255, 255, 255, 0.96);
+            border-color: rgba(16, 20, 23, 0.12);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+        }
+        
+        .code-dropdown-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            color: var(--text-main);
+            text-decoration: none;
+            font-size: 0.8rem;
+            font-family: var(--font-sans);
+            border-radius: 6px;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        .code-dropdown-item:hover {
+            background-color: rgba(255, 179, 71, 0.08);
+            color: var(--accent);
+        }
+        [data-theme="light"] .code-dropdown-item:hover {
+            background-color: rgba(217, 119, 6, 0.05);
+            color: var(--accent);
+        }
+
+        /* Heading scroll adjustments */
+        .markdown-body h2,
+        .markdown-body h3,
+        .markdown-body h4 {
+            scroll-margin-top: 90px;
+        }
+
+        /* Mobile controls */
+        .mobile-menu-btn {
+            display: none;
+            background: transparent;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-main);
+            cursor: pointer;
+            width: 36px;
+            height: 36px;
+            align-items: center;
+            justify-content: center;
+            z-index: 110;
+        }
+
+        /* Responsive Breakpoints */
+        @media (max-width: 1024px) {
+            .sidebar {
+                width: 300px;
+                transform: translateX(-100%);
+                transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+                background: rgba(16, 20, 23, 0.96);
+            }
+            
+            .sidebar.open {
+                transform: translateX(0);
+            }
+            
+            .main-wrapper {
+                margin-left: 0 !important;
+            }
+            
+            .top-header {
+                padding: 0 1.5rem;
+            }
+            
+            .mobile-menu-btn {
+                display: flex;
+            }
+            
+            .sidebar-toggle-btn {
+                display: none !important;
+            }
+            
+            .content-container {
+                padding: 2rem 1rem;
+            }
+            
+            .content-card {
+                padding: 2.25rem 1.5rem;
+                border-radius: 12px;
+            }
+            
+            .search-input:focus {
+                width: 150px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar with Navigation TOC -->
+    <aside class="sidebar" id="sidebar">
+        <a href="https://www.muxiveo.fr/" target="_blank" class="logo-link">
+            <div class="logo-container">
+                <div class="logo-icon">
+                    <i data-lucide="terminal" style="width: 20px; height: 20px;"></i>
+                </div>
+                <div class="brand-meta">
+                    <span class="logo-text">Muxiveo</span>
+                    <span class="logo-subtitle">Merging Tool</span>
+                </div>
+            </div>
+        </a>
+        
+        <h3 class="toc-title">LOG_INDEX</h3>
+        <nav>
+            <ul class="toc-list" id="toc-list">
+                <!-- TOC is auto-generated by JS -->
+            </ul>
+        </nav>
+    </aside>
+
+    <!-- Main Wrapper -->
+    <div class="main-wrapper">
+        
+        <!-- Header -->
+        <header class="top-header">
+            <div class="header-left">
+                <!-- Desktop retract button -->
+                <button id="sidebar-toggle" class="sidebar-toggle-btn" title="Réduire/Développer le menu">&lt;</button>
+                
+                <div class="breadcrumb">
+                    <span>scripts</span>
+                    <span class="breadcrumb-separator">/</span>
+                    <a href="https://www.aotr.fr/scripts/concat_video.py" target="_blank" class="breadcrumb-link">concat_video.py <i data-lucide="external-link" style="width: 11px; height: 11px; margin-left: 3px; display: inline-block; vertical-align: middle;"></i></a>
+                </div>
+            </div>
+            
+            <div class="header-actions">
+                <div class="search-container">
+                    <i data-lucide="search" class="search-icon"></i>
+                    <input type="text" id="search-input" class="search-input" placeholder="Rechercher...">
+                </div>
+                
+                <button id="theme-toggle" class="theme-toggle" title="Changer de thème">
+                    <i data-lucide="sun"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="content-container animate__animated animate__fadeIn">
+            <div class="content-card">
+                <article class="markdown-body">
+                    <h1 id="concat_videopy"><code>concat_video.py</code></h1>
+<h2 id="objectif">Objectif</h2>
+<p><code>concat_video.py</code> ajoute une intro, une outro, ou les deux a une video
+principale. Il reencode uniquement les segments ajoutes pour les rendre
+compatibles avec la video principale, puis reconstitue un fichier final avec
+la video, les pistes audio (avec prise en charge de l'Atmos), les sous-titres, les chapitres et, lorsque cela
+s'applique, les metadonnees HDR dynamiques.</p>
+<p>L'ordre final est toujours :</p>
+<pre><code class="language-text">intro (optionnelle) -&gt; video principale -&gt; outro (optionnelle)
+</code></pre>
+<p>Le script est generaliste : HDR, Dolby Vision et HDR10+ sont des chemins
+specialises actives seulement quand ils sont detectes sur la video principale.</p>
+<h2 id="utilisation-fonctionnelle">Utilisation fonctionnelle</h2>
+<h3 id="syntaxe">Syntaxe</h3>
+<pre><code class="language-bash">python scripts/concat_video.py MAIN OUTPUT --intro INTRO [options]
+python scripts/concat_video.py MAIN OUTPUT --outro OUTRO [options]
+python scripts/concat_video.py MAIN OUTPUT --intro INTRO --outro OUTRO [options]
+</code></pre>
+<p>Exemples :</p>
+<pre><code class="language-bash"># Intro seule
+python scripts/concat_video.py film.mkv resultat.mkv --intro intro.mp4
+
+# Outro seule
+python scripts/concat_video.py film.mkv resultat.mkv --outro outro.mp4
+
+# Intro et outro, en conservant toute l'image avec bandes noires si necessaire
+python scripts/concat_video.py film.mkv resultat.mkv \
+  --intro intro.mp4 --outro outro.mp4 --mode pad
+</code></pre>
+<p>Options :</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Effet</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--intro CHEMIN</code></td>
+<td>Video ajoutee avant le film.</td>
+</tr>
+<tr>
+<td><code>--outro CHEMIN</code></td>
+<td>Video ajoutee apres le film.</td>
+</tr>
+<tr>
+<td><code>-m crop</code></td>
+<td>Adapte le segment ajoute en remplissant l'image cible, avec recadrage. Valeur par defaut.</td>
+</tr>
+<tr>
+<td><code>-m pad</code></td>
+<td>Adapte le segment ajoute en conservant toute l'image, avec bandes noires.</td>
+</tr>
+<tr>
+<td><code>-w DOSSIER</code></td>
+<td>Dossier de travail temporaire.</td>
+</tr>
+<tr>
+<td><code>--mkvmerge</code></td>
+<td>Force <code>mkvmerge</code> pour le reassemblage standalone final, meme si <code>Muxiveo</code> est detecte.</td>
+</tr>
+</tbody>
+</table>
+<p>Au moins une des options <code>--intro</code> ou <code>--outro</code> est obligatoire.</p>
+<h3 id="compatibilite-de-ligne-de-commande">Compatibilite de ligne de commande</h3>
+<p>L'ancienne syntaxe suivante reste acceptee avec un avertissement :</p>
+<pre><code class="language-bash">python scripts/concat_video.py INTRO MAIN OUTPUT
+</code></pre>
+<p>Elle equivaut a <code>MAIN OUTPUT --intro INTRO</code>. La syntaxe explicite avec
+<code>--intro</code> et <code>--outro</code> doit etre privilegiee.</p>
+<h2 id="comportement-par-piste">Comportement par piste</h2>
+<h3 id="video">Video</h3>
+<p>La video principale definit les caracteristiques cible : codec, resolution,
+SAR/DAR, cadence, format de pixels et signalisation de couleur. L'intro et
+l'outro sont reencodees dans ce format puis assemblees autour du film.</p>
+<p>Codecs video acceptes pour la video principale :</p>
+<table>
+<thead>
+<tr>
+<th>Codec source</th>
+<th>Encodeur des segments</th>
+<th>Assemblage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>H.264/AVC</td>
+<td><code>libx264</code></td>
+<td>Demuxeur concat FFmpeg dans un conteneur Matroska temporaire.</td>
+</tr>
+<tr>
+<td>HEVC/H.265</td>
+<td><code>libx265</code></td>
+<td>Flux HEVC Annex-B, necessaire aux outils Dolby Vision et HDR10+.</td>
+</tr>
+<tr>
+<td>VP9</td>
+<td><code>libvpx-vp9</code></td>
+<td>Demuxeur concat FFmpeg dans un conteneur Matroska temporaire.</td>
+</tr>
+<tr>
+<td>AV1</td>
+<td><code>libsvtav1</code></td>
+<td>Demuxeur concat FFmpeg, ou flux OBU pour les metadonnees dynamiques.</td>
+</tr>
+</tbody>
+</table>
+<p>Les segments sont encodes avec un GOP de 1 afin de pouvoir commencer et finir
+proprement au point de raccord. Les encodeurs disposent de reglages rapides
+adaptes a leur implementation (<code>ultrafast</code>, <code>realtime</code>/<code>cpu-used</code>, ou preset
+SVT-AV1).</p>
+<p>La cadence cible privilegie <code>avg_frame_rate</code>; <code>r_frame_rate</code> n'est utilisee
+qu'en repli. Cela evite le faux taux de 1000 fps rapporte par certains MKV AV1.</p>
+<h3 id="adaptation-geometrique">Adaptation geometrique</h3>
+<p>Les segments ajoutes ne sont jamais etires :</p>
+<ul>
+<li><code>crop</code> calcule un recadrage centre, puis effectue la mise a l'echelle.</li>
+<li><code>pad</code> effectue une mise a l'echelle proportionnelle, force des dimensions
+  paires, puis ajoute des bandes noires centrees.</li>
+<li>Le SAR cible est reimpose avec <code>setsar</code>.</li>
+</ul>
+<h3 id="couleur-sdr-et-hdr-statique">Couleur, SDR et HDR statique</h3>
+<p>Le script reapplique aux segments les primaires, la fonction de transfert et
+la matrice de la video principale quand FFmpeg les expose. Les metadonnees HDR
+statiques disponibles (mastering display, MaxCLL, MaxFALL) sont egalement
+repassees au muxeur final pour les sorties Matroska.</p>
+<p>Le script ne fait ni conversion SDR vers HDR, ni tone mapping, ni conversion
+HDR vers SDR. Il signale et conserve la colorimetrie declaree par la source;
+la qualite visuelle depend donc aussi de la compatibilite du contenu ajoute
+avec cette colorimetrie.</p>
+<h3 id="dolby-vision-et-hdr10">Dolby Vision et HDR10+</h3>
+<p>Les metadonnees dynamiques sont prises en charge seulement pour HEVC et AV1.
+Une source H.264 ou VP9 qui serait annoncee avec Dolby Vision ou HDR10+ est
+refusee.</p>
+<h4 id="hevc">HEVC</h4>
+<ol>
+<li>Le flux principal est extrait en HEVC brut.</li>
+<li><code>dovi_tool</code> extrait le RPU Dolby Vision, si present.</li>
+<li><code>hdr10plus_tool</code> extrait le JSON HDR10+, si present.</li>
+<li>La premiere metadonnee dynamique de la source est dupliquee pour chaque
+   image de l'intro et de l'outro.</li>
+<li>Le RPU ou le JSON ainsi reconstruit est injecte dans le flux HEVC final.</li>
+</ol>
+<p>Les outils <code>dovi_tool</code> et <code>hdr10plus_tool</code> operent sur des flux HEVC. Ils ne
+sont pas utilises pour AV1.</p>
+<h4 id="av1">AV1</h4>
+<p>Dolby Vision Profile 10 et HDR10+ AV1 utilisent des OBUs Metadata ITU-T T.35.
+Le script :</p>
+<ol>
+<li>extrait la video AV1 en low-overhead OBU avec des Temporal Delimiter OBUs;</li>
+<li>lit les tailles LEB128 et separe les unites temporelles;</li>
+<li>prend les OBUs T.35 de la premiere image principale;</li>
+<li>les insere dans chaque unite temporelle de l'intro et de l'outro;</li>
+<li>reassemble les segments dans l'ordre final.</li>
+</ol>
+<p>Cette voie exige un flux AV1 valide avec champs de taille et Temporal
+Delimiter. En cas de flux incomplet, de compte d'images incoherent ou de T.35
+absent, le traitement s'arrete avec une erreur plutot que de produire un
+fichier ambigu.</p>
+<h2 id="audio">Audio</h2>
+<p>Chaque piste audio principale est traitee independamment. Les pistes
+concatenees suivent l'ordre intro -&gt; film -&gt; outro. L'audio de l'intro ou de
+l'outro est encode dans le codec, la frequence, le nombre de canaux et, quand
+il est disponible, le debit de la piste principale.</p>
+<p>Codecs cibles declares par le script : AAC, AC-3, E-AC-3, FLAC, Opus, MP3,
+DTS et TrueHD.</p>
+<p>Si l'audio d'un segment ajoute est absent ou ne peut pas etre encode, le
+script essaie de creer un silence de meme duree et de meme configuration. Si
+la piste ne peut toujours pas etre construite, la piste audio principale est
+conservee avec son demarrage apres l'intro. Dans ce repli, elle ne couvre pas
+l'outro ajoutee.</p>
+<h3 id="dts-et-truehd">DTS et TrueHD</h3>
+<p>DTS et TrueHD sont detectes et presentes dans la table des codecs, mais leur
+concatenation depend de l'encodeur FFmpeg installe. Dans l'environnement de
+reference, les encodeurs <code>dca</code> (DTS) et <code>truehd</code> sont experimentaux et
+necessitent <code>-strict -2</code>; le script ne transmet pas cette option. De plus, le
+nom d'encodeur DTS configure est <code>dts</code>, alors que FFmpeg expose generalement
+<code>dca</code>. En pratique, ces pistes tombent donc souvent dans le repli de piste
+decalee au lieu d'etre concatenees.</p>
+<h3 id="atmos">Atmos</h3>
+<p>Une piste est consideree Atmos uniquement lorsque MediaInfo detecte un
+marqueur de bitstream dans <code>Format_Commercial_IfAny</code>,
+<code>Format_AdditionalFeatures</code>, <code>Format_Profile</code> ou <code>Format</code>. Les marqueurs
+acceptes sont <code>Dolby Atmos</code>, <code>Joint Object Coding</code> et <code>JOC</code>. Le titre de la
+piste n'intervient pas dans cette decision.</p>
+<p>Pour une intro Atmos detectee, le script reserve 32 ms au debut de la piste,
+extrait la premiere trame Atmos du film et la place avant l'audio d'intro.
+Cette trame contient l'en-tete JOC necessaire a la reconnaissance Atmos par
+certains lecteurs, notamment Plex et MediaInfo. Le reste de la piste du film
+est ensuite ajoute apres l'audio d'intro.</p>
+<h2 id="sous-titres-et-chapitres">Sous-titres et chapitres</h2>
+<h3 id="regle-de-temporalite">Regle de temporalite</h3>
+<p>La duree de l'intro est mesuree sur le fichier encode temporaire avec
+<code>ffprobe format=duration</code>, arrondie a la milliseconde. Elle ne provient donc
+pas du calcul <code>nombre d'images / FPS</code>.</p>
+<p>Les sous-titres et les chapitres sont materialises avec de nouveaux
+timestamps. Le mux final ne leur applique pas de <code>--sync</code> ou de
+<code>time_shift_ms</code>.</p>
+<h3 id="sous-titres">Sous-titres</h3>
+<p>Chaque piste de sous-titres est remuxee temporairement apres recalcul de ses
+timestamps. Les donnees de cue ne sont pas analysees ou modifiees manuellement
+pour les codecs copies : le nouveau timestamp est porte par les paquets du
+conteneur temporaire.</p>
+<table>
+<thead>
+<tr>
+<th>Format source</th>
+<th>Traitement</th>
+<th>Resultat</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SRT/SubRip</td>
+<td>Copie de flux dans MKV avec timestamps recalculees.</td>
+<td>SRT conserve.</td>
+</tr>
+<tr>
+<td>PGS</td>
+<td>Copie de flux dans MKV avec timestamps recalculees.</td>
+<td>PGS bitmap conserve.</td>
+</tr>
+<tr>
+<td>MOV_TEXT</td>
+<td>Conversion en SRT dans MKV avec timestamps recalculees.</td>
+<td>Texte et timings conserves; style MOV_TEXT eventuellement perdu.</td>
+</tr>
+<tr>
+<td>Autres codecs compatibles Matroska</td>
+<td>Copie de flux dans MKV.</td>
+<td>Codec conserve si FFmpeg et le muxeur l'acceptent.</td>
+</tr>
+</tbody>
+</table>
+<p>MOV_TEXT requiert une conversion dans ce workflow : Matroska ne peut pas le
+copier comme codec de sous-titres, et un MP4 MOV_TEXT isole normalise le
+premier timestamp a zero via ses edit lists. La conversion vers SRT permet de
+porter un premier cue apres l'intro dans un conteneur MKV.</p>
+<p>Les sous-titres originaux sont exclus du mux final. <code>Muxiveo</code> recoit une copie
+de la source sans sous-titres, afin d'eviter qu'il reintroduise implicitement
+une piste originale avec des timestamps non recalcules.</p>
+<h3 id="chapitres">Chapitres</h3>
+<p>Les chapitres de la source sont lus avec FFprobe, puis reconstruits avec :</p>
+<pre><code class="language-text">nouveau_timecode = timecode_source + duree_intro
+</code></pre>
+<p>Le script ne cree pas de chapitre automatique pour l'intro ni pour l'outro.</p>
+<ul>
+<li>Avec <code>mkvmerge</code>, un XML Matroska temporaire est genere avec les nouveaux
+  <code>ChapterTimeStart</code>; les chapitres source sont exclus.</li>
+<li>Avec <code>Muxiveo</code>, le job <code>exact-job</code> utilise <code>chapters.add</code> avec les timecodes
+  recalcules et desactive l'import automatique de la source.</li>
+<li>Avec le fallback FFmpeg, un fichier FFmetadata temporaire contient les
+  chapitres recalculees et devient la source de chapitres du fichier final.</li>
+</ul>
+<p>Cette reconstruction preserve les positions et les titres exposes par
+FFprobe. Elle ne conserve pas necessairement les editions complexes, les
+chapitres imbriques, les langues multiples ou les tags proprietaires Matroska.</p>
+<h2 id="pistes-annexes-et-metadonnees-de-conteneur">Pistes annexes et metadonnees de conteneur</h2>
+<p>Avec <code>mkvmerge</code>, le script conserve les pieces jointes et les pistes source
+non remplacees. La video source est toujours exclue, de meme que les pistes
+audio qui ont ete concatenees. Les pistes audio non concatenees sont la seule
+famille de piste qui garde un decalage applique par muxeur.</p>
+<p>Avec <code>Muxiveo</code>, un <code>exact-job</code> est genere avec la video recomposee, les pistes
+audio concatenees, une source principale sans sous-titres, les sous-titres
+re-ecrits et les chapitres reconstruits.</p>
+<p>Sans <code>mkvmerge</code> et sans <code>Muxiveo</code>, le fallback FFmpeg conserve la video, les
+pistes audio concatenees, les sous-titres re-ecrits et les chapitres
+reconstruits. Il ne garantit pas la conservation des pieces jointes ni des
+pistes audio non concatenees. La signalisation Dolby Vision au niveau du
+conteneur peut aussi etre incomplete.</p>
+<h2 id="pre-requis-et-detection-des-outils">Pre-requis et detection des outils</h2>
+<p>Outils de base obligatoires :</p>
+<ul>
+<li><code>ffmpeg</code></li>
+<li><code>ffprobe</code></li>
+<li><code>mediainfo</code></li>
+</ul>
+<p>Outils conditionnels :</p>
+<table>
+<thead>
+<tr>
+<th>Outil</th>
+<th>Quand il est requis</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mkvmerge</code></td>
+<td>Standalone uniquement : force par <code>--mkvmerge</code>, ou repli quand <code>Muxiveo</code> est absent.</td>
+</tr>
+<tr>
+<td><code>dovi_tool</code></td>
+<td>Source HEVC avec Dolby Vision.</td>
+</tr>
+<tr>
+<td><code>hdr10plus_tool</code></td>
+<td>Source HEVC avec HDR10+.</td>
+</tr>
+<tr>
+<td><code>Muxiveo</code></td>
+<td>Detecte automatiquement; muxeur final privilegie quand il est disponible.</td>
+</tr>
+</tbody>
+</table>
+<p>Pour chaque outil, l'ordre de resolution est :</p>
+<ol>
+<li>le chemin explicite defini dans les constantes <code>*_PATH</code>;</li>
+<li>le <code>PATH</code> systeme;</li>
+<li>l'executable <code>&lt;racine-du-projet&gt;/&lt;nom&gt;</code>;</li>
+<li>le dossier <code>&lt;racine-du-projet&gt;/tools/&lt;nom&gt;</code>;</li>
+<li>sous Windows, <code>&lt;racine-du-projet&gt;/tools/&lt;nom&gt;.exe</code>.</li>
+</ol>
+<p>Les constantes sont en tete du script :</p>
+<pre><code class="language-python">FFMPEG_PATH = None
+FFPROBE_PATH = None
+DOVI_TOOL_PATH = None
+HDR10PLUS_TOOL_PATH = None
+MEDIAINFO_PATH = None
+MKVMERGE_PATH = None
+MUXIVEO_PATH = None
+DEFAULT_WORKDIR = None
+</code></pre>
+<p><code>Muxiveo</code> est detecte automatiquement; un chemin explicite <code>MUXIVEO_PATH</code>
+reste prioritaire. Sans <code>--mkvmerge</code>, l'ordre de selection du muxeur final est
+toujours <code>Muxiveo</code>, puis <code>mkvmerge</code>, puis le fallback FFmpeg.</p>
+<p>Quand <code>Muxiveo</code> est retenu, le script lui transmet un <code>exact-job</code> avec
+<code>mux_backend: native</code> et reutilise les chemins d'outils retournes par
+<code>Muxiveo --cli tools</code> (FFmpeg, FFprobe, MediaInfo, dovi_tool,
+hdr10plus_tool), plutot qu'une configuration parallele.</p>
+<p>Le dossier temporaire est choisi dans cet ordre : <code>--workdir</code>,
+<code>DEFAULT_WORKDIR</code>, dossier temporaire Windows, puis dossier de sortie sous
+Linux/macOS. Le dossier doit disposer d'assez d'espace pour les copies de
+flux, les sous-titres remuxes et les fichiers de metadonnees.</p>
+<h2 id="architecture-logique">Architecture logique</h2>
+<pre><code class="language-mermaid">flowchart TD
+    A[Arguments CLI] --&gt; B[Verifier outils et dossier temporaire]
+    B --&gt; C[Analyser MAIN, INTRO et OUTRO]
+    C --&gt; D[Determiner codec, couleur et metadonnees]
+    D --&gt; E[Encoder INTRO et/ou OUTRO au format cible]
+    E --&gt; F{Codec et metadonnees dynamiques}
+    F --&gt;|HEVC| G[Concatener flux HEVC et injecter RPU/HDR10+]
+    F --&gt;|AV1 dynamique| H[Concatener OBUs et recopier T.35]
+    F --&gt;|H.264, VP9, AV1 statique| I[Concatener video conteneurisee]
+    G --&gt; J[Mesurer duree effective de l'intro]
+    H --&gt; J
+    I --&gt; J
+    J --&gt; K[Reecrire sous-titres et chapitres]
+    K --&gt; L[Concatener audio intro/film/outro]
+    L --&gt; M{Muxeur final}
+    M --&gt;|Muxiveo detecte| N[Generer exact-job JSON backend natif]
+    M --&gt;|--mkvmerge ou Muxiveo absent| O[Mux Matroska standalone]
+    M --&gt;|Sinon| P[Fallback FFmpeg]
+    N --&gt; Q[Nettoyage]
+    O --&gt; Q
+    P --&gt; Q
+</code></pre>
+<pre><code class="language-mermaid">sequenceDiagram
+    participant U as Utilisateur
+    participant S as Script
+    participant F as FFmpeg/FFprobe
+    participant D as Outils dynamiques
+    participant M as Muxeur final
+
+    U-&gt;&gt;S: MAIN OUTPUT --intro/--outro
+    S-&gt;&gt;F: Analyse flux et metadonnees
+    S-&gt;&gt;F: Encodage des segments ajoutes
+    S-&gt;&gt;F: Reecriture video, audio, sous-titres et chapitres
+    alt HEVC Dolby Vision ou HDR10+
+        S-&gt;&gt;D: Extraction et injection des metadonnees
+    else AV1 dynamique
+        S-&gt;&gt;S: Insertion des OBUs T.35
+    end
+    S-&gt;&gt;M: Video, pistes, chapitres et metadonnees
+    M--&gt;&gt;U: Fichier final
+</code></pre>
+<h2 id="architecture-technique-detaillee">Architecture technique detaillee</h2>
+<h3 id="analyse-media">Analyse media</h3>
+<p><code>get_video_audio_metadata()</code> interroge FFprobe et complete, quand possible,
+les informations via MediaInfo. La premiere piste video non attachee est la
+piste de reference. Les images de couverture sont ignorees.</p>
+<p>Les pistes audio et sous-titres sont inventoriees avec <code>mkvmerge -J</code> quand
+celui-ci est utilisable, sinon avec FFprobe. MediaInfo complete les debits
+audio lorsque possible.</p>
+<h3 id="preparation-video">Preparation video</h3>
+<p>Les segments ajoutes sont encodes video seule (<code>-an</code>). Leur audio est traite
+independamment piste par piste. Pour HEVC, le flux final est un flux brut
+Annex-B. Pour AV1 dynamique, le flux final temporaire est un flux low-overhead
+OBU. Pour les autres cas, le demuxeur concat de FFmpeg assemble des MKV
+video-seuls compatibles.</p>
+<h3 id="reecriture-des-sous-titres">Reecriture des sous-titres</h3>
+<p><code>prepare_shifted_subtitle_sources()</code> cree une source temporaire par piste de
+sous-titres. FFmpeg applique la nouvelle base temporelle pendant ce remux.
+Le fichier temporaire est ensuite une entree normale du muxeur final : il ne
+recoit plus de regle de synchronisation supplementaire.</p>
+<p>PGS est copie sans decodage ni OCR. SRT est copie sans reparsing manuel.
+MOV_TEXT est decode puis encode en SRT pour contourner les limites MP4/MKV
+decrites plus haut.</p>
+<h3 id="reecriture-des-chapitres">Reecriture des chapitres</h3>
+<p><code>get_chapters()</code> lit les debuts et fins avec FFprobe. Le script fabrique
+ensuite soit un XML Matroska (<code>write_shifted_matroska_chapters()</code>), soit un
+FFmetadata (<code>write_shifted_ffmetadata()</code>), soit des objets <code>chapters.add</code>
+pour <code>Muxiveo</code>.</p>
+<h3 id="mux-final">Mux final</h3>
+<p><code>Muxiveo</code> est privilegie des qu'il est detecte : le script prepare un job JSON
+<code>exact-job</code> en <code>mux_backend: native</code> et l'execute via <code>--cli run</code>, avec les
+chemins d'outils partages par <code>--cli tools</code>. <code>mkvmerge</code> reste la voie
+standalone : il est force par <code>--mkvmerge</code> ou utilise en repli quand <code>Muxiveo</code>
+est absent. Son code de retour <code>1</code> est accepte car il peut representer des
+avertissements non fatals. Le fallback FFmpeg est moins complet mais maintient
+les sous-titres et chapitres re-ecrits.</p>
+<h2 id="limitations-et-points-dattention">Limitations et points d'attention</h2>
+<ol>
+<li>La sortie pratique est Matroska. Le script ne propose pas de branche MP4
+   dediee; une extension <code>.mp4</code> n'implique pas la compatibilite de toutes les
+   pistes avec MP4.</li>
+<li>PGS est preserve dans le flux Matroska, mais ne serait pas une piste MP4
+   standard. MOV_TEXT est converti en SRT dans ce workflow.</li>
+<li>Les chapitres complexes Matroska ne sont pas preserves integralement lors
+   de leur reconstruction depuis FFprobe.</li>
+<li>Les pistes DTS et TrueHD peuvent ne pas etre concatenees si les encodeurs
+   experimentaux correspondants ne sont pas actives dans FFmpeg.</li>
+<li>Les pistes audio non concatenees gardent un decalage de muxeur; elles ne
+   sont pas re-ecrites comme les sous-titres et chapitres.</li>
+<li>La duplication de la premiere metadonnee dynamique Dolby Vision, HDR10+
+   ou T.35 sur les segments ajoutes est une approximation. Elle ne constitue
+   pas une analyse scene par scene de l'intro ou de l'outro.</li>
+<li>Le script attend des frequences et des caracteristiques d'encodage
+   compatibles. Les sources VFR, interlacees, multi-video ou avec une
+   signalisation inhabituelle meritent une validation manuelle du resultat.</li>
+<li>Le fallback FFmpeg peut perdre des pieces jointes et certaines metadonnees
+   de conteneur. Pour des MKV complexes, utiliser <code>Muxiveo</code> ou <code>mkvmerge</code>.</li>
+<li>La documentation de l'AppImage <code>Muxiveo</code> et les outils externes peuvent
+   evoluer independamment; verifier leurs versions pour les flux Dolby Vision
+   et HDR10+ critiques.</li>
+</ol>
+<h2 id="verification-recommandee">Verification recommandee</h2>
+<p>Apres une execution, verifier au minimum :</p>
+<pre><code class="language-bash"># Flux, codecs, couleurs et duree
+ffprobe -v error -show_streams -show_format resultat.mkv
+
+# Positions des chapitres
+ffprobe -v error -show_chapters -of json resultat.mkv
+
+# Premier timestamp d'une piste de sous-titres
+ffprobe -v error -select_streams s:0 -show_entries packet=pts_time \
+  -of csv=p=0 resultat.mkv | head -n 1
+
+# Contenu Matroska et identifiants de pistes
+mkvmerge -J resultat.mkv
+</code></pre>
+<p>Pour une intro de <code>1000 ms</code>, le premier chapitre source et le premier cue de
+sous-titre source doivent commencer a <code>1.000 s</code> dans le resultat.</p>
+                </article>
+            </div>
+        </main>
+        
+    </div>
+
+    <!-- Scroll to Top Button -->
+    <button id="scroll-top-btn" class="scroll-top-btn" title="Retour en haut">
+        <i data-lucide="arrow-up" style="width: 20px; height: 20px;"></i>
+    </button>
+
+    <!-- JS dependencies -->
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Prism.js Syntax Highlighter -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    
+    <!-- Mermaid.js for Diagrams -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+
+    <!-- Muxiveo Interactive Terminal Script -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // 1. Initialize Lucide Icons
+            lucide.createIcons();
+
+            // 2. Convert code blocks with language "mermaid" to direct divs for Mermaid to render
+            document.querySelectorAll('pre code.language-mermaid').forEach((el, idx) => {
+                const parent = el.parentElement;
+                const div = document.createElement('div');
+                div.className = 'mermaid';
+                div.id = `mermaid-diag-${idx}`;
+                div.setAttribute('data-mermaid-source', el.textContent);
+                div.textContent = el.textContent;
+                
+                const wrapper = document.createElement('div');
+                wrapper.className = 'mermaid-wrapper';
+                wrapper.appendChild(div);
+                
+                parent.replaceWith(wrapper);
+            });
+
+            // 3. Wrap other code blocks in code-block-wrapper with language name & copy button
+            document.querySelectorAll('pre code').forEach(el => {
+                if (el.classList.contains('language-mermaid')) return;
+
+                const parent = el.parentElement;
+                const wrapper = document.createElement('div');
+                wrapper.className = 'code-block-wrapper';
+
+                const header = document.createElement('div');
+                header.className = 'code-block-header';
+                
+                let lang = 'TEXT';
+                el.classList.forEach(cls => {
+                    if (cls.startsWith('language-')) {
+                        lang = cls.replace('language-', '').toUpperCase();
+                    }
+                });
+                
+                const langSpan = document.createElement('span');
+                langSpan.textContent = `[ TERMINAL // ${lang} ]`;
+                header.appendChild(langSpan);
+
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'copy-btn';
+                copyBtn.innerHTML = '<i data-lucide="copy" style="width: 14px; height: 14px;"></i> COPIER';
+                copyBtn.addEventListener('click', () => {
+                    navigator.clipboard.writeText(el.textContent).then(() => {
+                        copyBtn.innerHTML = '<i data-lucide="check" style="width: 14px; height: 14px; color: var(--accent);"></i> COPIÉ';
+                        setTimeout(() => {
+                            copyBtn.innerHTML = '<i data-lucide="copy" style="width: 14px; height: 14px;"></i> COPIER';
+                            lucide.createIcons();
+                        }, 2000);
+                    });
+                });
+                header.appendChild(copyBtn);
+
+                parent.parentNode.insertBefore(wrapper, parent);
+                wrapper.appendChild(header);
+                wrapper.appendChild(parent);
+            });
+            lucide.createIcons();
+
+            // 4. Generate Table of Contents (TOC) dynamically with index numbers
+            const tocList = document.getElementById('toc-list');
+            const headings = document.querySelectorAll('.markdown-body h2, .markdown-body h3');
+
+            headings.forEach((heading, index) => {
+                if (!heading.id) {
+                    heading.id = heading.textContent
+                        .toLowerCase()
+                        .normalize('NFD') // Remove accents
+                        .replace(/[̀-ͯ]/g, '')
+                        .replace(/[^a-z0-9]+/g, '-')
+                        .replace(/(^-|-$)/g, '');
+                }
+
+                const li = document.createElement('li');
+                li.className = `toc-item ${heading.tagName.toLowerCase()}`;
+                
+                const a = document.createElement('a');
+                a.href = `#${heading.id}`;
+                
+                const numStr = String(index + 1).padStart(2, '0');
+                a.innerHTML = `<span class="toc-num">${numStr}</span> <span>${heading.textContent}</span>`;
+                
+                li.appendChild(a);
+                tocList.appendChild(li);
+            });
+
+            // 5. IntersectionObserver to highlight active TOC item
+            const observerOptions = {
+                root: null,
+                rootMargin: '-10% 0px -75% 0px',
+                threshold: 0
+            };
+
+            const observer = new IntersectionObserver(entries => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const id = entry.target.id;
+                        document.querySelectorAll('.toc-item').forEach(item => {
+                            const a = item.querySelector('a');
+                            if (a.getAttribute('href') === `#${id}`) {
+                                item.classList.add('active');
+                                item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                            } else {
+                                item.classList.remove('active');
+                            }
+                        });
+                    }
+                });
+            }, observerOptions);
+
+            headings.forEach(heading => observer.observe(heading));
+
+            // 6. Search Bar Filter for TOC & Highlight Page Content
+            const searchInput = document.getElementById('search-input');
+            let searchTimeout = null;
+
+            searchInput.addEventListener('input', (e) => {
+                clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => {
+                    performSearch(e.target.value);
+                }, 250);
+            });
+
+            searchInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    const firstMatch = document.querySelector('mark.search-highlight');
+                    if (firstMatch) {
+                        firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    } else {
+                        const visibleLink = document.querySelector('.toc-item:not([style*="display: none"]) a');
+                        if (visibleLink) {
+                            visibleLink.click();
+                        }
+                    }
+                    searchInput.blur();
+                }
+            });
+
+            function performSearch(query) {
+                clearHighlights();
+                
+                if (!query || query.trim().length < 2) {
+                    document.querySelectorAll('.toc-item').forEach(item => item.style.display = 'block');
+                    return;
+                }
+                
+                const queryNormalized = query.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+                // Highlight content
+                const article = document.querySelector('.markdown-body');
+                if (!article) return;
+                
+                highlightNode(article, queryNormalized);
+
+                // Collect all heading elements (h2 and h3)
+                const headings = Array.from(article.querySelectorAll('h2, h3'));
+                const activeHeadingIds = new Set();
+
+                // 1. Add headings whose own text matches the query
+                headings.forEach(heading => {
+                    const headingText = heading.textContent.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+                    if (headingText.includes(queryNormalized)) {
+                        activeHeadingIds.add(heading.id);
+                    }
+                });
+
+                // 2. Add headings that precede any search highlight in the page content
+                const highlights = article.querySelectorAll('mark.search-highlight');
+                highlights.forEach(mark => {
+                    let precedingHeading = null;
+                    for (const heading of headings) {
+                        if (heading.compareDocumentPosition(mark) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                            precedingHeading = heading;
+                        } else {
+                            break;
+                        }
+                    }
+                    if (precedingHeading) {
+                        activeHeadingIds.add(precedingHeading.id);
+                    }
+                });
+
+                // 3. Filter TOC items based on activeHeadingIds
+                document.querySelectorAll('.toc-item').forEach(item => {
+                    const a = item.querySelector('a');
+                    const href = a.getAttribute('href');
+                    const id = href.substring(1);
+                    item.style.display = activeHeadingIds.has(id) ? 'block' : 'none';
+                });
+                
+                // Scroll to first match
+                const firstMatch = article.querySelector('mark.search-highlight');
+                if (firstMatch) {
+                    firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+
+            function clearHighlights() {
+                const article = document.querySelector('.markdown-body');
+                if (!article) return;
+                
+                const highlights = article.querySelectorAll('mark.search-highlight');
+                highlights.forEach(highlight => {
+                    const parent = highlight.parentNode;
+                    parent.replaceChild(document.createTextNode(highlight.textContent), highlight);
+                    parent.normalize();
+                });
+
+                const wrappers = article.querySelectorAll('span.search-highlight-wrapper');
+                wrappers.forEach(wrapper => {
+                    const parent = wrapper.parentNode;
+                    while (wrapper.firstChild) {
+                        parent.insertBefore(wrapper.firstChild, wrapper);
+                    }
+                    parent.removeChild(wrapper);
+                    parent.normalize();
+                });
+            }
+
+            function highlightNode(node, query) {
+                if (node.nodeType === 3) { // Text Node
+                    const text = node.nodeValue;
+                    const textNormalized = text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+                    const index = textNormalized.indexOf(query);
+                    
+                    if (index >= 0) {
+                        const span = document.createElement('span');
+                        span.className = 'search-highlight-wrapper';
+                        
+                        let remainingText = text;
+                        let remainingTextNormalized = textNormalized;
+                        let currentIdx = remainingTextNormalized.indexOf(query);
+                        
+                        while (currentIdx >= 0) {
+                            const before = remainingText.substring(0, currentIdx);
+                            span.appendChild(document.createTextNode(before));
+                            
+                            const matchText = remainingText.substring(currentIdx, currentIdx + query.length);
+                            const mark = document.createElement('mark');
+                            mark.className = 'search-highlight';
+                            mark.textContent = matchText;
+                            span.appendChild(mark);
+                            
+                            remainingText = remainingText.substring(currentIdx + query.length);
+                            remainingTextNormalized = remainingTextNormalized.substring(currentIdx + query.length);
+                            currentIdx = remainingTextNormalized.indexOf(query);
+                        }
+                        
+                        if (remainingText.length > 0) {
+                            span.appendChild(document.createTextNode(remainingText));
+                        }
+                        
+                        node.parentNode.replaceChild(span, node);
+                    }
+                } else if (node.nodeType === 1 && node.childNodes && !['SCRIPT', 'STYLE', 'PRE'].includes(node.tagName.toUpperCase())) {
+                    const children = Array.from(node.childNodes);
+                    children.forEach(child => highlightNode(child, query));
+                }
+            }
+
+            // 7. Theme Toggle with Prism.js styling
+            const themeToggle = document.getElementById('theme-toggle');
+            const root = document.documentElement;
+            const prismThemeLink = document.getElementById('prism-theme');
+
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            setTheme(savedTheme);
+
+            themeToggle.addEventListener('click', () => {
+                const currentTheme = root.getAttribute('data-theme');
+                const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+                setTheme(newTheme);
+            });
+
+            function setTheme(theme) {
+                root.setAttribute('data-theme', theme);
+                localStorage.setItem('theme', theme);
+                
+                if (theme === 'light') {
+                    themeToggle.innerHTML = '<i data-lucide="moon"></i>';
+                    prismThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css';
+                } else {
+                    themeToggle.innerHTML = '<i data-lucide="sun"></i>';
+                    prismThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css';
+                }
+                lucide.createIcons();
+                
+                if (window.mermaid) {
+                    renderMermaid(theme);
+                }
+            }
+
+            function renderMermaid(theme) {
+                const isLight = theme === 'light';
+                const themeVariables = {
+                    fontFamily: 'var(--font-mono), monospace',
+                    fontSize: '13px',
+                    background: isLight ? '#ffffff' : '#101417',
+                    primaryColor: isLight ? '#ffffff' : '#171d21',
+                    primaryTextColor: isLight ? '#101417' : '#f8f3ea',
+                    primaryBorderColor: isLight ? '#d97706' : '#ffb347',
+                    lineColor: isLight ? '#0f766e' : '#51d6a9', // Muxiveo Teal / Green
+                    arrowheadColor: isLight ? '#0f766e' : '#51d6a9',
+                    secondaryColor: isLight ? '#f2eadf' : '#101417',
+                    secondaryTextColor: isLight ? '#d97706' : '#ffb347',
+                    secondaryBorderColor: isLight ? '#d97706' : '#ffb347',
+                    tertiaryColor: isLight ? '#fdfbf7' : '#101417',
+                    tertiaryTextColor: isLight ? '#737c78' : '#b8c0bd',
+                    tertiaryBorderColor: isLight ? '#cbd5e1' : '#cbd5e1'
+                };
+
+                document.querySelectorAll('.mermaid').forEach(el => {
+                    const source = el.getAttribute('data-mermaid-source');
+                    if (source) {
+                        el.removeAttribute('data-processed');
+                        el.textContent = source;
+                        el.innerHTML = source;
+                    }
+                });
+
+                mermaid.initialize({
+                    startOnLoad: false,
+                    theme: 'base',
+                    themeVariables: themeVariables,
+                    securityLevel: 'loose',
+                    flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis', padding: 15 }
+                });
+
+                try {
+                    mermaid.init(undefined, '.mermaid');
+                } catch (e) {
+                    console.error('Mermaid render error:', e);
+                }
+            }
+
+            // 8. Scroll to Top Button
+            const scrollTopBtn = document.getElementById('scroll-top-btn');
+            window.addEventListener('scroll', () => {
+                if (window.scrollY > 300) {
+                    scrollTopBtn.classList.add('visible');
+                } else {
+                    scrollTopBtn.classList.remove('visible');
+                }
+            });
+
+            scrollTopBtn.addEventListener('click', () => {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            });
+
+            // 9. Desktop Retractable Sidebar Logic
+            const desktopToggleBtn = document.getElementById('sidebar-toggle');
+            
+            // Restore sidebar status
+            const isCollapsed = localStorage.getItem('sidebar-collapsed') === 'true';
+            if (isCollapsed) {
+                document.body.classList.add('sidebar-collapsed');
+                desktopToggleBtn.textContent = '>';
+            } else {
+                desktopToggleBtn.textContent = '<';
+            }
+
+            desktopToggleBtn.addEventListener('click', () => {
+                document.body.classList.toggle('sidebar-collapsed');
+                const collapsed = document.body.classList.contains('sidebar-collapsed');
+                localStorage.setItem('sidebar-collapsed', collapsed);
+                desktopToggleBtn.textContent = collapsed ? '>' : '<';
+            });
+
+            // 10. Mobile Menu Controls (Collapses completely to side)
+            const header = document.querySelector('.top-header');
+            const mobileBtn = document.createElement('button');
+            mobileBtn.className = 'mobile-menu-btn';
+            mobileBtn.innerHTML = '<i data-lucide="menu"></i>';
+            const headerLeft = document.querySelector('.header-left');
+            headerLeft.insertBefore(mobileBtn, headerLeft.firstChild);
+            lucide.createIcons();
+
+            const sidebarPanel = document.getElementById('sidebar');
+            mobileBtn.addEventListener('click', () => {
+                sidebarPanel.classList.toggle('open');
+                const isOpen = sidebarPanel.classList.contains('open');
+                mobileBtn.innerHTML = isOpen ? '<i data-lucide="x"></i>' : '<i data-lucide="menu"></i>';
+                lucide.createIcons();
+            });
+
+            document.querySelectorAll('.toc-item a').forEach(link => {
+                link.addEventListener('click', () => {
+                    if (window.innerWidth <= 1024) {
+                        sidebarPanel.classList.remove('open');
+                        mobileBtn.innerHTML = '<i data-lucide="menu"></i>';
+                        lucide.createIcons();
+                    }
+                });
+            });
+
+            // 11. Clickable Code Boxes with Dropdown Link
+            const toolUrls = {
+                'ffmpeg': 'https://ffmpeg.org/',
+                'ffprobe': 'https://ffmpeg.org/',
+                'mediainfo': 'https://mediaarea.net/en/MediaInfo',
+                'mkvmerge': 'https://mkvtoolnix.download/',
+                'dovi_tool': 'https://github.com/quietvoid/dovi_tool',
+                'hdr10plus_tool': 'https://github.com/quietvoid/hdr10plus_tool',
+                'muxiveo': 'https://www.muxiveo.fr/'
+            };
+
+            document.querySelectorAll('.markdown-body :not(pre) > code').forEach(codeEl => {
+                const text = codeEl.textContent.trim();
+                const lowerText = text.toLowerCase();
+                if (toolUrls.hasOwnProperty(lowerText)) {
+                    codeEl.classList.add('clickable-code-box');
+                    codeEl.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        showCodeDropdown(codeEl, text, toolUrls[lowerText]);
+                    });
+                }
+            });
+
+            function showCodeDropdown(element, name, url) {
+                const existing = document.querySelector('.code-dropdown');
+                if (existing) existing.remove();
+
+                const dropdown = document.createElement('div');
+                dropdown.className = 'code-dropdown animate__animated animate__fadeIn';
+                
+                dropdown.innerHTML = `
+                    <a href="${url}" target="_blank" class="code-dropdown-item">
+                        <i data-lucide="external-link" style="width: 14px; height: 14px;"></i>
+                        Consulter le site de l'éditeur
+                    </a>
+                `;
+                
+                document.body.appendChild(dropdown);
+                lucide.createIcons();
+
+                // Position dropdown
+                const rect = element.getBoundingClientRect();
+                dropdown.style.position = 'fixed';
+                dropdown.style.left = `${rect.left}px`;
+                dropdown.style.top = `${rect.bottom + 6}px`;
+                dropdown.style.zIndex = '200';
+            }
+
+            document.addEventListener('click', () => {
+                const existing = document.querySelector('.code-dropdown');
+                if (existing) existing.remove();
+            });
+        });
+    </script>
+</body>
+</html>

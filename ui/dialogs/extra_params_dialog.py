@@ -24,16 +24,14 @@ Conception :
 from __future__ import annotations
 
 import shlex
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt
-from PySide6.QtGui import QCursor, QPainter
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QScrollArea, QSpinBox, QStyle, QStyleOptionTab, QStylePainter,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QScrollArea, QSpinBox, QStyle, QStyleOptionTab, QStylePainter,
     QTabBar, QTabWidget, QToolTip, QVBoxLayout, QWidget,
 )
 
@@ -2332,7 +2330,6 @@ class _ParamRow(QWidget):
             w.setText(str(raw))
 
     def value(self) -> tuple[bool, Any]:
-        spec = self._spec
         w = self._value_widget
         if isinstance(w, QSpinBox):
             return (self._enabled_cb.isChecked(), w.value())
@@ -2514,7 +2511,7 @@ class ExtraParamsDialog(QDialog):
     ) -> QWidget:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}")
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
         inner = QWidget()
         inner.setStyleSheet(f"background:{_C.BG_CARD};")
         v = QVBoxLayout(inner)

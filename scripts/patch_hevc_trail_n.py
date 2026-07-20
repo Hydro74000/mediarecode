@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+# Imports applicatifs placés après l'ajout explicite de la racine du dépôt.
+# ruff: noqa: E402
+
 import argparse
 import json
 import mmap
@@ -19,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from audit_mkv import ToolError, ToolRunner, _extract_dovi_rpu_with_fallback
 from core.workflows.encode.runtime.metadata_inject import _build_dovi_record_from_rpu
-from core.workflows.matroska_dovi_block_addition import MatroskaDoviBlockAdditionEditor
+from core.matroska.editors.dovi import MatroskaDoviBlockAdditionEditor
 
 
 @dataclass(frozen=True)

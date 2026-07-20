@@ -17,6 +17,7 @@ _CONTENT_ENCODINGS_ID = bytes.fromhex("6d80")
 _CONTENT_ENCODING_ID = bytes.fromhex("6240")
 _CONTENT_COMPRESSION_ID = bytes.fromhex("5034")
 _CONTENT_ENCRYPTION_ID = bytes.fromhex("5035")
+_INFO_DURATION_ID = bytes.fromhex("4489")
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,10 @@ def payload_children(payload: bytes) -> Iterator[tuple[bytes, bytes]]:
             raise ValueError("Conteneur EBML invalide")
         stream.seek(child.payload_offset)
         yield child.element_id, _read_exact(stream, child.size)
-        stream.seek(child.end)
+        child_end = child.end
+        if child_end is None:
+            raise ValueError("Conteneur EBML de taille inconnue")
+        stream.seek(child_end)
 
 
 class MatroskaReader:
@@ -170,6 +174,14 @@ class MatroskaReader:
     LANGUAGE = bytes.fromhex("22b59c")
     LANGUAGE_BCP47 = bytes.fromhex("22b59d")
     NAME = bytes.fromhex("536e")
+    FLAG_ENABLED_ID = bytes.fromhex("b9")
+    FLAG_DEFAULT_ID = bytes.fromhex("88")
+    FLAG_FORCED_ID = bytes.fromhex("55aa")
+    FLAG_HEARING_IMPAIRED_ID = bytes.fromhex("55ab")
+    FLAG_VISUAL_IMPAIRED_ID = bytes.fromhex("55ac")
+    FLAG_ORIGINAL_ID = bytes.fromhex("55ae")
+    FLAG_COMMENTARY_ID = bytes.fromhex("55af")
+    DEFAULT_DURATION_ID = bytes.fromhex("23e383")
     VIDEO_ID = bytes.fromhex("e0")
     AUDIO_ID = bytes.fromhex("e1")
     COLOUR_ID = bytes.fromhex("55b0")
@@ -246,7 +258,10 @@ class MatroskaReader:
                     return
                 if item.size is not None:
                     yield item
-                    fh.seek(item.end)
+                    item_end = item.end
+                    if item_end is None:
+                        raise ValueError("Élément Matroska de taille inconnue")
+                    fh.seek(item_end)
                     continue
                 if item.element_id != self.CLUSTER_ID:
                     yield item
@@ -290,11 +305,12 @@ class MatroskaReader:
     def raw_top_level(self, element_id: bytes) -> tuple[bytes, ...]:
         return tuple(self.raw_element(item) for item in self.top_level() if item.element_id == element_id)
 
-    def attachments(self) -> list["MatroskaAttachment"]:
+    def attachment_headers(self) -> list["MatroskaAttachmentHeader"]:
+        """Métadonnées d'attachments sans charger les contenus ``FileData``."""
         root = next((item for item in self.top_level() if item.element_id == self.ATTACHMENTS_ID), None)
         if root is None:
             return []
-        result: list[MatroskaAttachment] = []
+        result: list[MatroskaAttachmentHeader] = []
         size = self.path.stat().st_size
         with self.path.open("rb") as fh:
             fh.seek(root.payload_offset)
@@ -302,17 +318,62 @@ class MatroskaReader:
                 if attached.element_id != self.ATTACHED_FILE_ID:
                     continue
                 values: dict[bytes, bytes] = {}
+                data_offset = 0
+                data_size = 0
                 fh.seek(attached.payload_offset)
                 for child in iter_children(fh, attached, file_size=size):
-                    if child.size is not None:
-                        values[child.element_id] = self.payload(child)
-                text = lambda key: values.get(key, b"").decode("utf-8", "replace").rstrip("\0")
-                result.append(MatroskaAttachment(
+                    if child.size is None:
+                        continue
+                    if child.element_id == self.FILE_DATA_ID:
+                        data_offset = child.payload_offset
+                        data_size = child.size
+                    else:
+                        fh.seek(child.payload_offset)
+                        values[child.element_id] = _read_exact(fh, child.size)
+                def text(key: bytes) -> str:
+                    return values.get(key, b"").decode("utf-8", "replace").rstrip("\0")
+
+                result.append(MatroskaAttachmentHeader(
                     uid=int.from_bytes(values.get(self.FILE_UID_ID, b"\0"), "big"),
                     name=text(self.FILE_NAME_ID), media_type=text(self.FILE_MEDIA_TYPE_ID),
-                    description=text(self.FILE_DESCRIPTION_ID), data=values.get(self.FILE_DATA_ID, b""),
+                    description=text(self.FILE_DESCRIPTION_ID), size=data_size,
+                    data_offset=data_offset,
                 ))
         return result
+
+    def attachments(self) -> list["MatroskaAttachment"]:
+        result: list[MatroskaAttachment] = []
+        with self.path.open("rb") as fh:
+            for header in self.attachment_headers():
+                fh.seek(header.data_offset)
+                result.append(MatroskaAttachment(
+                    uid=header.uid,
+                    name=header.name,
+                    media_type=header.media_type,
+                    description=header.description,
+                    data=_read_exact(fh, header.size),
+                ))
+        return result
+
+    def attachment_data(self, attachment_index: int) -> bytes:
+        """Read one attachment payload without loading the other payloads."""
+        if attachment_index < 0:
+            raise ValueError("Index d'attachement négatif.")
+        headers = self.attachment_headers()
+        try:
+            header = headers[attachment_index]
+        except IndexError as exc:
+            raise ValueError(
+                f"Attachement Matroska introuvable à l'index {attachment_index}."
+            ) from exc
+        if header.data_offset <= 0:
+            raise ValueError(
+                "Attachement Matroska incomplet: FileData manquant pour "
+                f"{header.name or attachment_index}."
+            )
+        with self.path.open("rb") as fh:
+            fh.seek(header.data_offset)
+            return _read_exact(fh, header.size)
 
     def chapter_editions(self) -> tuple["MatroskaEdition", ...]:
         editions: list[MatroskaEdition] = []
@@ -405,6 +466,10 @@ class MatroskaReader:
                         self.TRACK_NUMBER_ID, self.TRACK_UID_ID, self.TRACK_TYPE_ID,
                         self.CODEC_ID, self.CODEC_PRIVATE, self.LANGUAGE,
                         self.LANGUAGE_BCP47, self.NAME,
+                        self.FLAG_ENABLED_ID, self.FLAG_DEFAULT_ID, self.FLAG_FORCED_ID,
+                        self.FLAG_HEARING_IMPAIRED_ID, self.FLAG_VISUAL_IMPAIRED_ID,
+                        self.FLAG_ORIGINAL_ID, self.FLAG_COMMENTARY_ID,
+                        self.DEFAULT_DURATION_ID,
                     }:
                         fields[child.element_id] = self.payload(child)
                 def uint(key: bytes, default: int = 0) -> int:
@@ -502,21 +567,27 @@ class MatroskaReader:
                     codec_private=fields.get(self.CODEC_PRIVATE, b""),
                     language_bcp47=text(self.LANGUAGE_BCP47), language=text(self.LANGUAGE) or "und",
                     name=text(self.NAME), raw_entry=self.payload(entry),
+                    default_duration_ns=uint(self.DEFAULT_DURATION_ID),
                     video=video, audio=audio,
                     block_addition_mappings=tuple(block_addition_mappings),
+                    flag_enabled=bool(uint(self.FLAG_ENABLED_ID, 1)),
+                    flag_default=bool(uint(self.FLAG_DEFAULT_ID, 1)),
+                    flag_forced=bool(uint(self.FLAG_FORCED_ID, 0)),
+                    flag_hearing_impaired=bool(uint(self.FLAG_HEARING_IMPAIRED_ID, 0)),
+                    flag_visual_impaired=bool(uint(self.FLAG_VISUAL_IMPAIRED_ID, 0)),
+                    flag_original=bool(uint(self.FLAG_ORIGINAL_ID, 0)),
+                    flag_commentary=bool(uint(self.FLAG_COMMENTARY_ID, 0)),
                 ))
         return out
 
-    def content_encoding_capabilities(self) -> tuple[bool, bool]:
-        """Return ``(uses_compression, uses_encryption)`` for all tracks."""
-        compression = False
-        encryption = False
+    def content_encodings_by_track(self) -> list[tuple[bool, bool]]:
+        """Retourne ``(compression, chiffrement)`` pour chaque piste, dans l'ordre du fichier."""
+        from io import BytesIO
+
         container_ids = {_CONTENT_ENCODINGS_ID, _CONTENT_ENCODING_ID}
+        capabilities: list[tuple[bool, bool]] = []
 
-        def inspect(payload: bytes) -> None:
-            nonlocal compression, encryption
-            from io import BytesIO
-
+        def inspect(payload: bytes, state: dict[str, bool]) -> None:
             stream = BytesIO(payload)
             while stream.tell() < len(payload):
                 child = read_element(stream, limit=len(payload))
@@ -525,17 +596,19 @@ class MatroskaReader:
                 stream.seek(child.payload_offset)
                 child_payload = _read_exact(stream, child.size)
                 if child.element_id == _CONTENT_COMPRESSION_ID:
-                    compression = True
+                    state["compression"] = True
                 elif child.element_id == _CONTENT_ENCRYPTION_ID:
-                    encryption = True
+                    state["encryption"] = True
                 elif child.element_id in container_ids:
-                    inspect(child_payload)
-                stream.seek(child.end)
+                    inspect(child_payload, state)
+                child_end = child.end
+                if child_end is None:
+                    raise ValueError("ContentEncodings de taille inconnue")
+                stream.seek(child_end)
 
         for track in self.tracks():
+            state = {"compression": False, "encryption": False}
             stream_payload = track.raw_entry
-            from io import BytesIO
-
             stream = BytesIO(stream_payload)
             while stream.tell() < len(stream_payload):
                 child = read_element(stream, limit=len(stream_payload))
@@ -543,9 +616,44 @@ class MatroskaReader:
                     raise ValueError("TrackEntry EBML invalide")
                 if child.element_id == _CONTENT_ENCODINGS_ID:
                     stream.seek(child.payload_offset)
-                    inspect(_read_exact(stream, child.size))
-                stream.seek(child.end)
+                    inspect(_read_exact(stream, child.size), state)
+                child_end = child.end
+                if child_end is None:
+                    raise ValueError("TrackEntry de taille inconnue")
+                stream.seek(child_end)
+            capabilities.append((state["compression"], state["encryption"]))
+        return capabilities
+
+    def content_encoding_capabilities(self) -> tuple[bool, bool]:
+        """Return ``(uses_compression, uses_encryption)`` for all tracks."""
+        compression = False
+        encryption = False
+        for track_compression, track_encryption in self.content_encodings_by_track():
+            compression = compression or track_compression
+            encryption = encryption or track_encryption
         return compression, encryption
+
+    def segment_duration_ns(self) -> int | None:
+        """Durée du segment en nanosecondes (Info.Duration × TimestampScale), ou None."""
+        info = next((item for item in self.top_level() if item.element_id == self.INFO_ID), None)
+        if info is None:
+            return None
+        size = self.path.stat().st_size
+        duration_raw: bytes | None = None
+        with self.path.open("rb") as fh:
+            fh.seek(info.payload_offset)
+            for child in iter_children(fh, info, file_size=size):
+                if child.element_id == _INFO_DURATION_ID and child.size is not None:
+                    duration_raw = self.payload(child)
+        if not duration_raw:
+            return None
+        if len(duration_raw) == 4:
+            duration_ticks = float(struct.unpack(">f", duration_raw)[0])
+        elif len(duration_raw) == 8:
+            duration_ticks = float(struct.unpack(">d", duration_raw)[0])
+        else:
+            raise ValueError("Info.Duration EBML de taille invalide")
+        return round(duration_ticks * self.timestamp_scale_ns())
 
     def segment_info_apps(self) -> tuple[str, str]:
         info = next((item for item in self.top_level() if item.element_id == self.INFO_ID), None)
@@ -585,7 +693,19 @@ class MatroskaReader:
         return 1_000_000
 
     @staticmethod
-    def _decode_block(raw: bytes, cluster_timestamp: int, **metadata: object) -> tuple["MatroskaBlock", ...]:
+    def _decode_block(
+        raw: bytes,
+        cluster_timestamp: int,
+        *,
+        duration_ms: int | None = None,
+        references: tuple[int, ...] = (),
+        discard_padding_ns: int = 0,
+        codec_state: bytes = b"",
+        block_additions: bytes = b"",
+        duration_ns: int | None = None,
+        references_ns: tuple[int, ...] = (),
+        is_keyframe: bool | None = None,
+    ) -> tuple["MatroskaBlock", ...]:
         track_no, length = _read_vint_value(raw)
         if len(raw) < length + 3:
             raise ValueError("Block Matroska tronqué")
@@ -596,16 +716,16 @@ class MatroskaReader:
         return tuple(MatroskaBlock(
             track_number=track_no, timestamp_ms=cluster_timestamp + relative,
             flags=flags, payload=frame, lace_index=index, lace_count=len(frames),
-            duration_ms=metadata.get("duration_ms"),
-            references=tuple(metadata.get("references", ())),
-            discard_padding_ns=int(metadata.get("discard_padding_ns", 0)),
-            codec_state=bytes(metadata.get("codec_state", b"")),
-            block_additions=bytes(metadata.get("block_additions", b"")),
-            duration_ns=metadata.get("duration_ns"),
-            references_ns=tuple(metadata.get("references_ns", ())),
+            duration_ms=duration_ms,
+            references=references,
+            discard_padding_ns=discard_padding_ns,
+            codec_state=codec_state,
+            block_additions=block_additions,
+            duration_ns=duration_ns,
+            references_ns=references_ns,
             lacing_mode=(flags >> 1) & 0x03,
             encoded_frames_payload=encoded_frames_payload,
-            is_keyframe=bool(metadata.get("is_keyframe", flags & 0x80)),
+            is_keyframe=bool(flags & 0x80) if is_keyframe is None else is_keyframe,
         ) for index, frame in enumerate(frames))
 
     def blocks(self) -> Iterator["MatroskaBlock"]:
@@ -643,8 +763,16 @@ class MatroskaReader:
                         raw_blocks = values.get(self.BLOCK_ID, [])
                         if not raw_blocks:
                             raise ValueError("BlockGroup sans Block")
-                        uint = lambda key: int.from_bytes(values.get(key, [b""])[0], "big") if values.get(key) else 0
-                        sint_values = lambda key: tuple(int.from_bytes(item, "big", signed=True) for item in values.get(key, []))
+                        def uint(key: bytes) -> int:
+                            entries = values.get(key)
+                            return int.from_bytes(entries[0], "big") if entries else 0
+
+                        def sint_values(key: bytes) -> tuple[int, ...]:
+                            return tuple(
+                                int.from_bytes(item, "big", signed=True)
+                                for item in values.get(key, [])
+                            )
+
                         references = sint_values(self.REFERENCE_BLOCK_ID)
                         decoded = self._decode_block(
                             raw_blocks[0], timestamp,
@@ -681,9 +809,18 @@ class MatroskaTrack:
     language: str
     name: str
     raw_entry: bytes
+    #: DefaultDuration du TrackEntry (ns par frame), 0 si absent.
+    default_duration_ns: int = 0
     video: dict[str, int | float] = field(default_factory=dict)
     audio: dict[str, int | float] = field(default_factory=dict)
     block_addition_mappings: tuple[dict[str, int | str | bytes], ...] = ()
+    flag_enabled: bool = True
+    flag_default: bool = True
+    flag_forced: bool = False
+    flag_hearing_impaired: bool = False
+    flag_visual_impaired: bool = False
+    flag_original: bool = False
+    flag_commentary: bool = False
 
 @dataclass(frozen=True)
 class MatroskaBlock:
@@ -717,6 +854,16 @@ class MatroskaAttachment:
 
 
 @dataclass(frozen=True)
+class MatroskaAttachmentHeader:
+    uid: int
+    name: str
+    media_type: str
+    description: str
+    size: int
+    data_offset: int
+
+
+@dataclass(frozen=True)
 class MatroskaChapter:
     uid: int
     start_ns: int
@@ -738,7 +885,7 @@ class MatroskaTag:
 
 
 __all__ = [
-    "EbmlElement", "MatroskaAttachment", "MatroskaBlock", "MatroskaChapter",
+    "EbmlElement", "MatroskaAttachment", "MatroskaAttachmentHeader", "MatroskaBlock", "MatroskaChapter",
     "MatroskaEdition", "MatroskaReader", "MatroskaTag", "MatroskaTrack",
     "iter_children", "payload_children", "read_element",
 ]

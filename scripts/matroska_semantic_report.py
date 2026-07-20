@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.workflows.matroska_reader import MatroskaChapter, MatroskaReader  # noqa: E402
+from core.matroska.reader import MatroskaChapter, MatroskaReader  # noqa: E402
 from core.lang_tags import Rfc5646LanguageTags as LanguageTags  # noqa: E402
 
 
@@ -52,10 +52,12 @@ def semantic_report(path: Path) -> dict:
     native_tracks = reader.tracks()
 
     def effective_language(legacy: str, bcp47: str = "") -> str:
+        # Comparaison sur la langue de base : Muxiveo régionalise le BCP-47
+        # (ex. 'de-DE'), l'oracle passthrough conserve la balise legacy —
+        # l'identité sémantique comparée est le code ISO 639-2/T commun.
         value = str(bcp47 or legacy or "und")
-        if "-" in value:
-            return value.lower()
-        return LanguageTags.to_iso639_2(value) or "und"
+        base = value.split("-", 1)[0] if "-" in value else value
+        return LanguageTags.to_iso639_2(base) or "und"
     streams = []
     for stream in probe.get("streams", []):
         if stream.get("codec_type") == "attachment":
@@ -176,12 +178,12 @@ def compare_reports(
     def visit(left: object, right: object, location: str) -> None:
         if type(left) is not type(right):
             failures.append(f"{location}: type {type(left).__name__} != {type(right).__name__}")
-        elif isinstance(left, dict):
+        elif isinstance(left, dict) and isinstance(right, dict):
             if left.keys() != right.keys():
                 failures.append(f"{location}: clés {sorted(left)} != {sorted(right)}")
             for key in left.keys() & right.keys():
                 visit(left[key], right[key], f"{location}.{key}")
-        elif isinstance(left, list):
+        elif isinstance(left, list) and isinstance(right, list):
             if len(left) != len(right):
                 failures.append(f"{location}: longueur {len(left)} != {len(right)}")
             for index, (left_item, right_item) in enumerate(zip(left, right)):

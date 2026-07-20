@@ -24,7 +24,7 @@ MUX_BACKENDS = frozenset({"auto", "native", "ffmpeg"})
 
 def normalize_mux_backend(value: str | None) -> str:
     """Return a stable public backend name, rejecting unknown contracts."""
-    backend = str(value or "auto").strip().lower()
+    backend = str(value or "ffmpeg").strip().lower()
     if backend not in MUX_BACKENDS:
         raise ValueError(
             "mux_backend invalide : attendu 'auto', 'native' ou 'ffmpeg'."
@@ -245,8 +245,10 @@ class RemuxConfig:
     #: Autorise une preview CLI à construire la commande même si le dossier de
     #: sortie n'existe pas encore. Ne doit pas être utilisé pour une exécution.
     allow_missing_output_dir: bool = False
-    #: Backend public du remux. ``auto`` préserve les exact-job v1 existants.
-    mux_backend: str = "auto"
+    #: Backend public du remux. Défaut ``ffmpeg`` (filet pour les constructions
+    #: directes) ; la distinction « champ absent » vs « choix explicite » est
+    #: portée par les loaders, qui résolvent le réglage global [matroska].
+    mux_backend: str = "ffmpeg"
 
 
 # =============================================================================

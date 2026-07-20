@@ -11,7 +11,7 @@ from core.workflows.hevc_static_hdr_metadata import (
     inject_static_hdr_sei,
     inject_static_hdr_sei_file,
 )
-from core.workflows.matroska_hevc_au_splitter import split_into_access_units
+from core.matroska.hevc.access_units import split_into_access_units
 
 
 _MASTER_DISPLAY = "G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1)"

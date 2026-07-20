@@ -50,11 +50,11 @@ from core.workflows.encode.runtime.frame_count_guard import (
     FrameCountGuard,
 )
 from core.workflows.hevc_static_hdr_metadata import inject_static_hdr_sei_file
-from core.workflows.matroska_dovi_block_addition import (
+from core.matroska.editors.dovi import (
     DolbyVisionConfigRecord,
     MatroskaDoviBlockAdditionEditor,
 )
-from core.workflows.matroska_video_timecode_patcher import MatroskaVideoTimecodePatcher
+from core.matroska.editors.video_timecodes import MatroskaVideoTimecodePatcher
 
 # Outils dont la barre de progression XX% n'est émise qu'en TTY.
 _PTY_PROGRESS_TOOLS: frozenset[str] = frozenset({"dovi_tool", "hdr10plus_tool"})

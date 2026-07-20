@@ -19,7 +19,7 @@ from core.workflows.encode.catalog import (
     needs_static_hdr_bitstream_patch_codec,
     static_hdr_metadata_mode,
 )
-from core.workflows.matroska_dovi_block_addition import (
+from core.matroska.editors.dovi import (
     MatroskaDoviBlockAdditionEditor,
 )
 

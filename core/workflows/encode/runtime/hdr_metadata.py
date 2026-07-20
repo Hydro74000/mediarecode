@@ -957,7 +957,10 @@ class HdrMetadataProbeService:
         if not primaries:
             return ""
         (gx, gy), (bx, by), (rx, ry), (wx, wy) = primaries
-        c = lambda f: int(round(f * 50000))
+
+        def c(value: float) -> int:
+            return int(round(value * 50000))
+
         return (
             f"G({c(gx)},{c(gy)})"
             f"B({c(bx)},{c(by)})"
@@ -1061,8 +1064,13 @@ class HdrMetadataProbeService:
             lmin = lmax = 0.0
         if primaries and lmax > 0:
             (gx, gy), (bx, by), (rx, ry), (wx, wy) = primaries
-            c = lambda f: int(round(f * 50000))
-            l_ = lambda f: int(round(f * 10000))
+
+            def c(value: float) -> int:
+                return int(round(value * 50000))
+
+            def l_(value: float) -> int:
+                return int(round(value * 10000))
+
             master_display = (
                 f"G({c(gx)},{c(gy)})"
                 f"B({c(bx)},{c(by)})"

@@ -21,21 +21,10 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from pathlib import Path
 
 import pytest
 
 from core.workflows.encode.models import (
-    AUDIO_CODECS,
-    HARDWARE_VIDEO_CODECS,
-    AMF_PRESETS,
-    NVENC_PRESETS,
-    QSV_PRESETS,
-    SOFTWARE_VIDEO_CODECS,
-    SVTAV1_PRESETS,
-    VAAPI_PRESETS,
-    TONEMAP_ALGORITHMS,
-    X265_PRESETS,
     AudioTrackSettings,
     EncodeConfig,
     EncodeError,
@@ -47,9 +36,21 @@ from core.workflows.encode.models import (
     VideoEncodeSettings,
     VideoFilterSettings,
     VideoResizeSettings,
+)
+from core.workflows.encode.catalog import (
+    AMF_PRESETS,
+    AUDIO_CODECS,
+    HARDWARE_VIDEO_CODECS,
+    HEVC_NVENC_PRESETS,
+    NVENC_PRESETS,
+    QSV_PRESETS,
+    SOFTWARE_VIDEO_CODECS,
+    SVTAV1_PRESETS,
+    TONEMAP_ALGORITHMS,
+    VAAPI_PRESETS,
+    X265_PRESETS,
     presets_for_codec,
 )
-from core.workflows.encode.catalog import HEVC_NVENC_PRESETS
 
 
 # ===========================================================================
@@ -408,10 +409,8 @@ class TestPackageReexports:
 
     def test_all_symbols_importable_from_package(self):
         from core.workflows.encode import (
-            AUDIO_CODECS, HARDWARE_VIDEO_CODECS, SOFTWARE_VIDEO_CODECS,
-            TONEMAP_ALGORITHMS, AudioTrackSettings, EncodeConfig,
-            EncodeError, EncodePreset, EncodeWorkflow, HardwareEncoderDetector,
-            ProfileManager, QualityMode, TrackTimeOffset, VideoEncodeSettings, presets_for_codec,
+            EncodeError, EncodeWorkflow, HardwareEncoderDetector,
+            ProfileManager, QualityMode, TrackTimeOffset,
         )
         assert EncodeWorkflow is not None
         assert HardwareEncoderDetector is not None

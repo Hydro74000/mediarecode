@@ -79,7 +79,10 @@ class _TrackInfoDelegate(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         opt.text = ""
         widget = opt.widget
-        get_style = lambda o: o.style() if isinstance(o, QWidget) else None
+
+        def get_style(obj):
+            return obj.style() if isinstance(obj, QWidget) else None
+
         style = get_style(widget) or get_style(self.parent())
 
         if style is None:

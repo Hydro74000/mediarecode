@@ -88,7 +88,12 @@ def estimate_inject_storage_requirements(
     if config.chapter_overrides:
         sidecars += 16 * 1024 * 1024
 
-    work_required = (2 * video_bytes) + sidecars
+    # Pic du pipeline lot 3 avec squelette de timing : au plus deux copies
+    # vidéo coexistent (MKV encodé + annexB à l'extraction, puis annexB
+    # courant + injecté, puis injecté + MKV réécrit) ; le squelette (payloads
+    # vides) est couvert par un forfait fixe.
+    skeleton_allowance = 64 * 1024 * 1024
+    work_required = (2 * video_bytes) + skeleton_allowance + sidecars
 
     encoded_audio_bytes = 0
     for audio in config.audio_tracks:

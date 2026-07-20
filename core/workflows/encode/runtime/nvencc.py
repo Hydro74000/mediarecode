@@ -822,6 +822,19 @@ def nvencc_intermediate_path(work_dir: Path, codec: str, base_name: str = "nvenc
     return Path(work_dir) / f"{base_name}{ext}"
 
 
+def is_expected_nvencc_pipe_producer_exit(returncode: int, stderr: str) -> bool:
+    """True si FFmpeg s'est arrêté normalement avec le consommateur NVEncC.
+
+    Selon le timing, la fermeture du pipe par NVEncC est rapportée soit comme
+    SIGPIPE (``-13``), soit comme un code FFmpeg générique ``1`` accompagné du
+    diagnostic ``Broken pipe``. Ce dernier n'est acceptable qu'après succès du
+    consommateur ; les appelants doivent donc toujours vérifier NVEncC d'abord.
+    """
+    if returncode in (0, -13):
+        return True
+    return returncode == 1 and "broken pipe" in stderr.casefold()
+
+
 __all__ = [
     "NVENCC_VIDEO_CODECS",
     "NVENCC_DYNAMIC_HDR_CODECS",
@@ -848,4 +861,5 @@ __all__ = [
     "normalize_nvencc_qp_triplet",
     "sanitize_nvencc_extra_params",
     "nvencc_intermediate_path",
+    "is_expected_nvencc_pipe_producer_exit",
 ]

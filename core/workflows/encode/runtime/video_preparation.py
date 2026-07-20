@@ -135,6 +135,53 @@ class VideoOnlyCommandBuilder:
         cmd.extend(["-an", "-sn", "-dn", str(output_path)])
         return [cmd]
 
+    def build_video_only_mkv_commands(
+        self,
+        config: EncodeConfig,
+        video: VideoEncodeSettings,
+        source: Path,
+        output_mkv: Path,
+        *,
+        offset_ms: int = 0,
+        passlog_prefix: Path | None = None,
+        thread_count: int | None = None,
+    ) -> list[list[str]]:
+        """Encode vidéo-seule vers un MKV mono-piste horodaté (lot 3).
+
+        ``-fps_mode passthrough`` préserve les timestamps produits par le
+        graphe (CFR comme VFR) : le MKV encodé devient la source de vérité
+        temporelle, plus jamais réassociée aux timestamps de la source.
+        """
+        stream_index = self._cb.video_stream_from_settings(video)
+        if video.quality_mode == QualityMode.SIZE:
+            bitrate = self._cb.size_to_bitrate_kbps_for_video(config, video)
+            pass1 = self.build_video_track_base_cmd(
+                video=video, source=source, stream_index=stream_index,
+                offset_ms=offset_ms, thread_count=thread_count,
+            )
+            self.append_video_codec_and_hdr_args(pass1, video, bitrate_kbps=bitrate, include_hdr_meta=False)
+            if passlog_prefix is not None:
+                pass1.extend(["-passlogfile", str(passlog_prefix)])
+            pass1.extend(["-pass", "1", "-fps_mode", "passthrough", "-an", "-sn", "-dn", "-f", "null", os.devnull])
+
+            pass2 = self.build_video_track_base_cmd(
+                video=video, source=source, stream_index=stream_index,
+                offset_ms=offset_ms, thread_count=thread_count,
+            )
+            self.append_video_codec_and_hdr_args(pass2, video, bitrate_kbps=bitrate)
+            if passlog_prefix is not None:
+                pass2.extend(["-passlogfile", str(passlog_prefix)])
+            pass2.extend(["-pass", "2", "-fps_mode", "passthrough", "-an", "-sn", "-dn", str(output_mkv)])
+            return [pass1, pass2]
+
+        cmd = self.build_video_track_base_cmd(
+            video=video, source=source, stream_index=stream_index,
+            offset_ms=offset_ms, thread_count=thread_count,
+        )
+        self.append_video_codec_and_hdr_args(cmd, video)
+        cmd.extend(["-fps_mode", "passthrough", "-an", "-sn", "-dn", str(output_mkv)])
+        return [cmd]
+
     def build_video_only_cmd(self, config: EncodeConfig, output_hevc: Path) -> list[str]:
         video = self._cb.primary_video_settings(config)
         return self.build_video_only_cmd_for_track(

@@ -1,5 +1,5 @@
 """
-core/workflows/matroska_language_editor.py
+core/matroska/editors/language.py
 
 Post-action EBML qui corrige les champs Language / LanguageBCP47 des
 TrackEntry dans un MKV.
@@ -22,10 +22,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable
 
-from core.lang_tags import Rfc5646LanguageTags as LangTags
-from core.workflows.matroska_header_editor import (
+from ..language import canonicalize_bcp47, iso639_2_bibliographic
+from .segment_info import (
     MatroskaSegmentInfoHeaderEditor,
     MatroskaSegmentInfoHeaderEditorOptions,
 )
@@ -35,71 +34,6 @@ _TRACKS_ID = b"\x16\x54\xae\x6b"
 _TRACK_ENTRY_ID = b"\xae"
 _LANGUAGE_ID = b"\x22\xb5\x9c"
 _LANGUAGE_BCP47_ID = b"\x22\xb5\x9d"
-
-
-# Table /T → /B (bibliographique) : le champ ``Language`` Matroska utilise
-# historiquement la forme /B (``fre``, ``ger``, ``dut``…). On obtient d'abord
-# le /T via ``Rfc5646LanguageTags.to_iso639_2`` puis on convertit ici.
-_ISO639_2_T_TO_B: dict[str, str] = {
-    "sqi": "alb", "hye": "arm", "eus": "baq", "zho": "chi",
-    "ces": "cze", "nld": "dut", "fra": "fre", "kat": "geo",
-    "deu": "ger", "ell": "gre", "isl": "ice", "mkd": "mac",
-    "msa": "may", "fas": "per", "ron": "rum", "slk": "slo",
-    "cym": "wel",
-}
-
-
-def matroska_legacy_language(tag: str) -> str:
-    """Return the ISO 639-2/B value used by Matroska ``Language``."""
-    iso_t = LangTags.to_iso639_2(str(tag or "")) or "und"
-    return _ISO639_2_T_TO_B.get(iso_t, iso_t)
-
-
-def _canonicalize_bcp47(tag: str) -> str:
-    """Normalise un tag BCP-47 à la forme canonique (RFC 5646 §2.1.1).
-
-    Règles appliquées :
-    - sous-tag primaire (langue) en minuscules,
-    - région 2 lettres ou 3 chiffres en MAJUSCULES,
-    - script 4 lettres en Title-case (Latn, Hans, …),
-    - variants / extensions en minuscules,
-    - ``x-`` (private-use) en minuscules.
-
-    Cette fonction est volontairement simple : on ne reconstruit pas le
-    registre IANA. Si le tag est invalide on le renvoie tel quel — le code
-    appelant est responsable de la validation préalable.
-    """
-    parts = [p for p in tag.strip().split("-") if p]
-    if not parts:
-        return tag
-
-    out: list[str] = []
-    seen_primary = False
-    private_use = False
-    for i, part in enumerate(parts):
-        if private_use:
-            out.append(part.lower())
-            continue
-        if part.lower() == "x":
-            out.append("x")
-            private_use = True
-            continue
-        if not seen_primary:
-            out.append(part.lower())
-            seen_primary = True
-            continue
-        # Subséquents : détection par longueur/forme.
-        if len(part) == 4 and part.isalpha():
-            out.append(part[0].upper() + part[1:].lower())  # Script
-        elif len(part) == 2 and part.isalpha():
-            out.append(part.upper())  # Region alpha-2
-        elif len(part) == 3 and part.isdigit():
-            out.append(part)  # Region numérique UN M.49
-        elif len(part) == 3 and part.isalpha():
-            out.append(part.lower())  # extlang
-        else:
-            out.append(part.lower())  # variant/extension
-    return "-".join(out)
 
 
 @dataclass(frozen=True)
@@ -364,11 +298,10 @@ class MatroskaLanguageEditor:
         if source_bcp is None:
             return None, None
 
-        normalized = _canonicalize_bcp47(source_bcp)
-        iso_t = LangTags.to_iso639_2(normalized)
-        if iso_t is None:
+        normalized = canonicalize_bcp47(source_bcp)
+        iso_b = iso639_2_bibliographic(normalized)
+        if iso_b is None:
             return None, None
-        iso_b = _ISO639_2_T_TO_B.get(iso_t, iso_t)
         return normalized, iso_b
 
     # ------------------------------------------------------------------
@@ -380,58 +313,3 @@ class MatroskaLanguageEditor:
             if e.element_id == _TRACKS_ID and not e.unknown_size:
                 return e
         return None
-
-
-class MatroskaLanguagePostAction:
-    """Wrapper post-action workflow (mirroir de MatroskaMuxingAppPostAction)."""
-
-    def __init__(
-        self,
-        *,
-        editor: MatroskaLanguageEditor | None = None,
-        log_cb: Callable[[str, str], None] | None = None,
-    ) -> None:
-        self._editor = editor or MatroskaLanguageEditor()
-        self._log_cb = log_cb
-
-    def apply_if_mkv(
-        self,
-        output_path: Path,
-        *,
-        log_cb: Callable[[str, str], None] | None = None,
-    ) -> MatroskaLanguagePatchResult | None:
-        cb = log_cb or self._log_cb
-
-        if output_path.suffix.lower() != ".mkv":
-            return None
-        if not output_path.is_file():
-            return None
-
-        result = self._editor.apply(output_path)
-        if cb is not None:
-            if result.applied:
-                details = ", ".join(
-                    f"'{f.language_before}'→'{f.language_after}' / BCP47='{f.language_bcp47_after}'"
-                    for f in result.fixes
-                )
-                cb(
-                    "INFO",
-                    f"Langues Matroska normalisées ({len(result.fixes)} piste(s)): {details}",
-                )
-            elif result.skipped and result.reason:
-                cb("WARN", f"Post-action langues ignorée: {result.reason}")
-            elif result.reason:
-                cb("INFO", f"Post-action langues: {result.reason}")
-        return result
-
-    def bind_on_success(
-        self,
-        signals,
-        output_path: Path,
-        *,
-        log_cb: Callable[[str, str], None] | None = None,
-    ) -> None:
-        def _patch_after_success(*_args) -> None:
-            self.apply_if_mkv(output_path, log_cb=log_cb)
-
-        signals.finished.connect(_patch_after_success)

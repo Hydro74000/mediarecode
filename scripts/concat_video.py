@@ -858,7 +858,8 @@ def select_mux_backend(requested="auto"):
     return "ffmpeg"
 
 
-def concat_videos(main_path, output_path, intro_path=None, outro_path=None, workdir=None, mode="crop", mux_backend="auto"):
+# Ce script historique dépasse la limite d'analyse de flux de Pyright.
+def concat_videos(main_path, output_path, intro_path=None, outro_path=None, workdir=None, mode="crop", mux_backend="auto"):  # pyright: ignore[reportGeneralTypeIssues]
     global FFMPEG, FFPROBE, MEDIAINFO, DOVI_TOOL, HDR10PLUS_TOOL
     if str(mux_backend or "auto").lower() != "mkvmerge" and is_tool_available(MUXIVEO):
         muxiveo_tools = get_muxiveo_tool_paths(MUXIVEO)
@@ -925,7 +926,7 @@ def concat_videos(main_path, output_path, intro_path=None, outro_path=None, work
                 print("Erreur : Impossible d'analyser la vidéo d'outro.")
                 return False
             
-        print(f"Vidéo principale détectée :")
+        print("Vidéo principale détectée :")
         print(f"  - Résolution : {video_meta['width']}x{video_meta['height']} @ {video_meta['fps']} FPS")
         print(f"  - Codec : {video_meta['codec']} ({video_meta['pix_fmt']})")
         print(f"  - Couleurs : Primaries={video_meta['color_primaries']}, Transfer={video_meta['color_transfer']}, Matrix={video_meta['color_space']}")
@@ -957,20 +958,8 @@ def concat_videos(main_path, output_path, intro_path=None, outro_path=None, work
         }
         v_encoder = codec_map[video_codec]
         
-        a_encoder = "copy"
         if audio_meta:
             print(f"Audio principal détecté : Codec={audio_meta['codec']}, Freq={audio_meta['sample_rate']}Hz, Canaux={audio_meta['channels']}")
-            audio_codec_map = {
-                "aac": "aac",
-                "ac3": "ac3",
-                "eac3": "eac3",
-                "flac": "flac",
-                "truehd": "truehd",
-                "dts": "dts",
-                "opus": "opus",
-                "mp3": "libmp3lame"
-            }
-            a_encoder = audio_codec_map.get(audio_meta["codec"], "aac")
         else:
             print("Pas d'audio détecté sur la vidéo principale.")
  

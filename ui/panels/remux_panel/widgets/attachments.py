@@ -1446,7 +1446,6 @@ class _AttachmentPanel(QFrame):
 
     def _update_state(self) -> None:
         has = bool(self._items)
-        has_tags = any(i.is_tag for i in self._items) or self._panel_tag_overrides is not None
         self._placeholder.setVisible(not has)
         self._items_widget.setVisible(has)
         self._edit_tags_btn.setEnabled(True)

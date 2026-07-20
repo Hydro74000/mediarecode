@@ -1,5 +1,5 @@
 """
-core/workflows/matroska_dovi_block_addition.py
+core/matroska/editors/dovi.py
 
 Injection native (pure Python) du ``BlockAdditionMapping`` Dolby Vision dans
 le ``TrackEntry`` HEVC d'un fichier Matroska, sans outil externe.
@@ -38,10 +38,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from core.workflows.matroska_header_editor import (
+from .segment_info import (
     MatroskaSegmentInfoHeaderEditor,
     MatroskaSegmentInfoHeaderEditorOptions,
-    _EbmlElement,
 )
 
 

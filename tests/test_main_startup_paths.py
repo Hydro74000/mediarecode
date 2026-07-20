@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import types
 import sys
-from pathlib import Path
 from typing import Callable
 from unittest.mock import MagicMock, patch
 

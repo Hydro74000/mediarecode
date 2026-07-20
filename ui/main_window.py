@@ -44,10 +44,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING, cast
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal, QSize, QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, Signal, QTimer
 from PySide6.QtGui import (
-    QColor, QFont, QIcon,
-    QTextCharFormat, QTextCursor,
+    QColor, QFont, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -84,7 +83,7 @@ from ui.design_system import DesignSystem, colors as _Colors, font_px as _font_p
 
 if TYPE_CHECKING:
     from core.workflows.encode.models import EncodeConfig
-    from core.workflows.remux_models import RemuxConfig, TrackEntry
+    from core.workflows.remux_models import RemuxConfig
 
 
 # ---------------------------------------------------------------------------
@@ -1870,6 +1869,10 @@ class MainWindow(QMainWindow):
         self._encode_panel.set_tmdb_cover_provider(self._remux_panel.current_tmdb_cover)
         self._encode_panel.set_tag_overrides_provider(self._remux_panel.current_tag_overrides)
         self._encode_panel.set_chapters_provider(self._remux_panel.current_chapter_overrides)
+        self._encode_panel.set_mux_backend_provider(self._remux_panel.current_mux_backend)
+        self._remux_panel.mux_backend_changed.connect(
+            lambda _backend: self._encode_panel.refresh_command_preview()
+        )
         # État "prêt" → bouton Exécuter
         self._remux_panel.ready_changed.connect(self._on_ready_changed)
         self._encode_panel.ready_changed.connect(self._on_ready_changed)

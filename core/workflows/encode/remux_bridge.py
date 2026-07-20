@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace as dataclasses_replace
 from pathlib import Path
 
 from core.workflows.common.track_types import TrackMetaPatch, TrackOffset, TrackType
@@ -167,7 +168,11 @@ def merge_remux_into_encode_config(
         and encode_cfg.keep_chapters == remux_cfg.keep_chapters
         and remux_cfg.chapter_overrides is None
     ):
-        return encode_cfg
+        # Le choix de backend de muxage du job conteneur reste propagé, sans
+        # reconstruire l'objet quand rien ne change.
+        if encode_cfg.mux_backend == remux_cfg.mux_backend:
+            return encode_cfg
+        return dataclasses_replace(encode_cfg, mux_backend=remux_cfg.mux_backend)
 
     return EncodeConfig(
         source=encode_cfg.source,
@@ -192,4 +197,5 @@ def merge_remux_into_encode_config(
         file_title=encode_cfg.file_title,
         extra_attachments=encode_cfg.extra_attachments,
         tmdb_cover=encode_cfg.tmdb_cover,
+        mux_backend=remux_cfg.mux_backend,
     )

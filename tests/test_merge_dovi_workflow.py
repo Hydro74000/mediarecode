@@ -17,7 +17,6 @@ from core.workflows.merge_dovi import (
     _format_master_display_from_mediainfo,
     _format_max_cll_from_mediainfo,
 )
-from core.dovi_profile_detector import DoviSubProfile
 
 
 def _paths(tmp_path: Path, film1: Path, basename: str = "out") -> _WorkflowPaths:

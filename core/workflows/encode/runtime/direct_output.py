@@ -30,8 +30,10 @@ class DirectOutputRunnerCallbacks:
     run_two_pass: Callable[[list[list[str]], Path | None, TaskSignals | None], TaskSignals]
     run_cmd: Callable[[list[str], Path | None, str, Callable[[str], None], TaskSignals], str]
     run_tool: Callable[[list[str], Path | None, str], TaskSignals]
+    finalize_ffmpeg: Callable[..., str]
     bind_live_sync_cleanup: Callable[[TaskSignals, LiveSyncSession | None], None]
     cleanup_two_pass_logs: Callable[[Path | None], None]
+    before_async_start: Callable[[TaskSignals], None] = lambda _signals: None
 
 
 class DirectOutputRunner:
@@ -54,7 +56,7 @@ class DirectOutputRunner:
         cb.log_step(5, "Construction de la commande ffmpeg (sortie directe)")
         encode_plan = plan or cb.build_encode_plan(config)
 
-        if len(encode_plan.all_sources) > 1:
+        if len(encode_plan.all_sources) > 1 or prep_signals is None:
             return self.run_multisource_async(
                 config=config,
                 cleanup_paths=cleanup_paths,
@@ -89,7 +91,19 @@ class DirectOutputRunner:
                 cleanup_paths.extend(sync_cleanup_paths)
                 cb.check_cancelled(prep_signals)
                 cb.log_step(7, "Exécution ffmpeg en 2 passes (sortie directe)")
-                signals = cb.run_two_pass(cmds, cwd, prep_signals)
+                cb.log_info("Passe 1/2 (analyse)…")
+                cb.run_cmd(
+                    cmds[0], cwd, "ffmpeg-pass1",
+                    lambda line: prep_signals.progress.emit(line), prep_signals,
+                )
+                cb.check_cancelled(prep_signals)
+                cb.log_info("Passe 2/2 (encodage)…")
+                output = cb.finalize_ffmpeg(
+                    config, cmds[1], cwd, "ffmpeg-pass2", prep_signals,
+                    plan=encode_plan,
+                )
+                prep_signals.finished.emit(output)
+                signals = prep_signals
             except Exception:
                 if live_sync_session is not None:
                     live_sync_session.close()
@@ -111,18 +125,12 @@ class DirectOutputRunner:
             cleanup_paths.extend(single_sync_cleanup_paths)
             cb.check_cancelled(prep_signals)
             cb.log_step(7, "Exécution ffmpeg en single pass (sortie directe)")
-            if prep_signals is not None:
-                output = cb.run_cmd(
-                    cmd,
-                    cwd,
-                    "ffmpeg",
-                    lambda line: prep_signals.progress.emit(line),
-                    prep_signals,
-                )
-                prep_signals.finished.emit(output)
-                signals = prep_signals
-            else:
-                signals = cb.run_tool(cmd, cwd, "ffmpeg")
+            assert prep_signals is not None
+            output = cb.finalize_ffmpeg(
+                config, cmd, cwd, "ffmpeg", prep_signals, plan=encode_plan,
+            )
+            prep_signals.finished.emit(output)
+            signals = prep_signals
         except Exception:
             if live_sync_session is not None:
                 live_sync_session.close()
@@ -141,6 +149,8 @@ class DirectOutputRunner:
     ) -> TaskSignals:
         cb = self._callbacks
         signals = prep_signals or TaskSignals()
+        if prep_signals is None:
+            cb.before_async_start(signals)
         executor = ThreadPoolExecutor(max_workers=1)
 
         def _task() -> None:
@@ -186,12 +196,9 @@ class DirectOutputRunner:
                     )
                     cb.check_cancelled(signals)
                     cb.log_info("Passe 2/2 (encodage)…")
-                    output = cb.run_cmd(
-                        cmds[1],
-                        cwd,
-                        "ffmpeg-pass2",
-                        lambda line: signals.progress.emit(line),
-                        signals,
+                    output = cb.finalize_ffmpeg(
+                        config, cmds[1], cwd, "ffmpeg-pass2", signals,
+                        plan=encode_plan,
                     )
                     signals.finished.emit(output)
                 else:
@@ -208,12 +215,9 @@ class DirectOutputRunner:
                             signals._register_proc(proc)
                     cb.check_cancelled(signals)
                     cb.log_step(7, "Exécution ffmpeg en single pass (sortie directe)")
-                    output = cb.run_cmd(
-                        cmd,
-                        cwd,
-                        "ffmpeg",
-                        lambda line: signals.progress.emit(line),
-                        signals,
+                    output = cb.finalize_ffmpeg(
+                        config, cmd, cwd, "ffmpeg", signals,
+                        plan=encode_plan,
                     )
                     signals.finished.emit(output)
             except TaskCancelledError:

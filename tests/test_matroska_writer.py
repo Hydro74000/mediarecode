@@ -2,16 +2,16 @@ from pathlib import Path
 
 import pytest
 
-from core.workflows.ebml_writer import ascii_element, element, string_element, uint_element
-from core.workflows.matroska_element_ids import CODEC_ID_ID, TRACK_NUMBER_ID, TRACK_TYPE_ID, TRACK_UID_ID
-from core.workflows.matroska_element_ids import CUES_ID, INFO_ID, SEEK_HEAD_ID, TRACKS_ID
-from core.workflows.matroska_element_ids import (
+from core.matroska.ebml import ascii_element, element, string_element, uint_element
+from core.matroska.ids import CODEC_ID_ID, TRACK_NUMBER_ID, TRACK_TYPE_ID, TRACK_UID_ID
+from core.matroska.ids import CUES_ID, INFO_ID, SEEK_HEAD_ID, TRACKS_ID
+from core.matroska.ids import (
     SIMPLE_TAG_ID, TAGS_ID, TAG_ID, TAG_NAME_ID, TAG_STRING_ID,
     TAG_TRACK_UID_ID, TARGETS_ID,
 )
-from core.workflows.matroska_mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack, deterministic_uid
-from core.workflows.matroska_reader import MatroskaBlock, MatroskaReader, MatroskaTrack
-from core.workflows.matroska_writer import MatroskaWriter, rewrite_tag_target_uids
+from core.matroska.mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack, deterministic_uid
+from core.matroska.reader import MatroskaBlock, MatroskaReader, MatroskaTrack
+from core.matroska.writer import MatroskaWriter, rewrite_tag_target_uids
 
 
 def source_track(number: int, uid: int, codec: str, kind: int) -> MatroskaTrack:
@@ -42,7 +42,7 @@ def test_writer_roundtrips_multiple_tracks_and_packets(tmp_path: Path) -> None:
 
 
 def test_streaming_packets_match_tuple_output_and_patch_duration(tmp_path: Path) -> None:
-    from core.workflows.matroska_writer import _interleave_packets
+    from core.matroska.writer import _interleave_packets
 
     video = source_track(7, 70, "V_MPEG4/ISO/AVC", 1)
     audio = source_track(7, 71, "A_AAC", 2)
@@ -97,7 +97,7 @@ def test_copied_track_tag_uid_is_remapped() -> None:
 
 
 def test_stale_source_crc32_is_stripped_from_rebuilt_tags() -> None:
-    from core.workflows.matroska_element_ids import CRC32_ID
+    from core.matroska.ids import CRC32_ID
 
     simple = element(
         SIMPLE_TAG_ID,

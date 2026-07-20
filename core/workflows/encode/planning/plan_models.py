@@ -70,6 +70,31 @@ class PlannedVideoTrack:
 
 
 @dataclass(frozen=True)
+class PlannedTrackFlags:
+    """Flags effectifs d'une piste finale, ``None`` quand ils sont inconnus."""
+
+    enabled: bool | None = None
+    default: bool | None = None
+    forced: bool | None = None
+    hearing_impaired: bool | None = None
+    visual_impaired: bool | None = None
+    original: bool | None = None
+    commentary: bool | None = None
+
+
+@dataclass(frozen=True)
+class PlannedTrackMetadata:
+    """Métadonnées effectives d'une piste, dans l'ordre de la sortie."""
+
+    track_type: str
+    source: Path
+    stream_index: int
+    name: str | None = None
+    language: str | None = None
+    flags: PlannedTrackFlags | None = None
+
+
+@dataclass(frozen=True)
 class SyncMappedTrackPlan:
     source_file_index: int
     stream_index: int
@@ -125,6 +150,7 @@ class EncodePlan:
     video_input_idx: int
     video_default_map: tuple[int, int]
     video_tracks: tuple[PlannedVideoTrack, ...]
+    track_metadata: tuple[PlannedTrackMetadata, ...]
     sync_analysis: SyncAnalysisPlan
     container_metadata: ContainerMetadataPlan
 

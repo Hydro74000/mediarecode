@@ -11,6 +11,7 @@ from .plan_models import EncodePlan, PlannedVideoTrack
 from .sources import resolve_source_layout
 from .subtitles import resolve_subtitle_tracks_for_encode
 from .sync_plan import build_sync_analysis_plan
+from .track_metadata import resolve_track_metadata
 
 
 def build_planned_video_tracks(
@@ -84,6 +85,11 @@ def build_encode_plan(
         video_tracks=video_tracks,
         video_source_from_settings=video_source_from_settings,
     )
+    track_metadata = resolve_track_metadata(
+        config,
+        video_refs=((item.source, item.stream_index) for item in planned_video_tracks),
+        subtitle_refs=resolved_subtitles,
+    )
     sync_analysis = build_sync_analysis_plan(
         config,
         all_sources,
@@ -105,6 +111,7 @@ def build_encode_plan(
         video_input_idx=int(input_idx),
         video_default_map=(int(input_idx), int(stream_index)),
         video_tracks=planned_video_tracks,
+        track_metadata=track_metadata,
         sync_analysis=sync_analysis,
         container_metadata=container_metadata,
     )

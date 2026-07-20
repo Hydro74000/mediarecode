@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFrame, QGroupBox,

@@ -49,6 +49,19 @@ def sanitize_filename(name: str, fallback: str) -> str:
     return clean or fallback
 
 
+def canonical_attachment_output_name(path: Path) -> str:
+    """Nom de sortie d'un attachment fichier — délègue à la règle commune.
+
+    Implémentation unique dans :mod:`core.matroska.assembly` : commandes de
+    muxage, assembleur natif et contrats doivent produire le même nom.
+    """
+    from core.matroska.assembly import (
+        canonical_attachment_output_name as _canonical_name,
+    )
+
+    return _canonical_name(path)
+
+
 def attachment_filename_from_meta(meta: dict[str, object], stream_idx: int) -> str:
     raw_name = str(meta.get("filename") or "").strip()
     name = Path(raw_name).name if raw_name else f"attachment_{stream_idx}"

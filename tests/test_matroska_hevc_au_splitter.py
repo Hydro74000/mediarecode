@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from core.workflows.matroska_hevc_au_splitter import (
-    HevcAccessUnit,
-    HevcNalUnit,
+from core.matroska.hevc.access_units import (
     split_into_access_units,
 )
 
@@ -77,17 +75,19 @@ class TestSplitIntoAccessUnits:
         au2_types = [n.nal_type for n in aus[1].nal_units]
         assert 39 in au2_types
 
-    def test_dovi_rpu_treated_as_prefix(self):
-        # NAL type 62 (DV RPU) doit être traité comme prefix entre frames.
+    def test_dovi_rpu_treated_as_suffix(self):
+        # NAL type 62 (DV RPU) est un suffixe : dovi_tool l'écrit après les
+        # slices de SA frame — il doit rester dans l'AU courant, sinon les
+        # métadonnées DV glissent d'une frame (corpus réel).
         stream = _stream(
             _nal(19, first_slice=True),  # frame 1
-            _nal(62),                    # DV RPU
+            _nal(62),                    # DV RPU de la frame 1
             _nal(1, first_slice=True),   # frame 2
         )
         aus = split_into_access_units(stream)
         assert len(aus) == 2
-        au2_types = [n.nal_type for n in aus[1].nal_units]
-        assert 62 in au2_types
+        assert [n.nal_type for n in aus[0].nal_units] == [19, 62]
+        assert [n.nal_type for n in aus[1].nal_units] == [1]
 
     def test_short_start_code_supported(self):
         # Start code 3 octets (0x000001) au lieu de 4.

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from core.bluray import append_ffmpeg_input_args
-from core.workflows.common.attachments import mime_for_path
+from core.workflows.common.attachments import canonical_attachment_output_name, mime_for_path
 from core.workflows.common.metadata import (
     disposition_value as _common_disposition_value,
     normalize_track_language as _common_normalize_track_language,
@@ -15,6 +15,7 @@ from core.workflows.common.metadata import (
 from core.workflows.encode.domain import audio_codec_args as _audio_codec_args_domain
 from core.workflows.encode.models import EncodeConfig, VideoEncodeSettings
 from core.workflows.encode.planning.plan_models import EncodePlan
+from core.workflows.encode.planning.track_metadata import resolve_track_metadata
 from core.workflows.encode.planning.sources import source_input_index_map as _source_input_index_map_plan
 
 
@@ -112,7 +113,9 @@ class EncodeStreamMappingService:
         existing_att = len(mapped_attachment_meta)
         for i, att_path in enumerate(config.extra_attachments):
             att_idx = existing_att + i
-            att_name = "cover" if att_path.stem.lower() == "cover" else att_path.name
+            # Nom partagé avec le contrat de validation (cover-art Matroska :
+            # extension conservée, stem canonique en minuscules).
+            att_name = canonical_attachment_output_name(att_path)
             cmd.extend(["-attach", str(att_path)])
             cmd.extend([f"-metadata:s:t:{att_idx}", f"mimetype={mime_for_path(att_path)}"])
             cmd.extend([f"-metadata:s:t:{att_idx}", f"filename={att_name}"])
@@ -204,7 +207,10 @@ class EncodeFinalMuxBuilder:
             else:
                 input_args = []
             cmd.extend(input_args)
-            append_ffmpeg_input_args(cmd, spec["path"])
+            input_path = spec["path"]
+            if not isinstance(input_path, (Path, str)):
+                raise TypeError("Chemin d'entrée vidéo invalide")
+            append_ffmpeg_input_args(cmd, input_path)
 
         plan = plan or cb.build_encode_plan(config)
         all_sources = list(plan.all_sources)
@@ -262,33 +268,58 @@ class TrackMetadataArgsBuilder:
     def __init__(self, callbacks: TrackMetadataArgsBuilderCallbacks) -> None:
         self._cb = callbacks
 
-    def build(self, config: EncodeConfig) -> list[str]:
+    def build(self, config: EncodeConfig, *, plan: EncodePlan | None = None) -> list[str]:
         args: list[str] = []
-        if not config.track_meta_edits:
-            return args
+        if plan is not None:
+            metadata_items = plan.track_metadata
+        else:
+            videos = self._cb.video_tracks(config)
+            metadata_items = resolve_track_metadata(
+                config,
+                video_refs=(
+                    (
+                        Path(getattr(video, "source_path", None) or config.source),
+                        int(getattr(video, "stream_index", 0) or 0),
+                    )
+                    for video in videos
+                ),
+                subtitle_refs=((Path(path), int(index)) for path, index in config.subtitle_tracks),
+            )
 
-        video_count = max(1, len(self._cb.video_tracks(config)))
-        audio_count = len(config.audio_tracks)
+        valid_positions = set(range(1, len(metadata_items) + 1))
         for edit in config.track_meta_edits:
-            spec = track_spec_for_track_order(int(edit.track_order), video_count, audio_count)
-            if spec is None:
+            if int(edit.track_order) not in valid_positions:
                 self._cb.log_warn(f"Piste invalide en édition metadata: @{edit.track_order}")
-                continue
-            stream_type, out_idx = spec
+        type_indexes = {"video": 0, "audio": 0, "subtitle": 0}
+        for metadata in metadata_items:
+            stream_type = {"video": "v", "audio": "a", "subtitle": "s"}[metadata.track_type]
+            out_idx = type_indexes[metadata.track_type]
+            type_indexes[metadata.track_type] += 1
             stream_spec = f"-metadata:s:{stream_type}:{out_idx}"
             disposition_spec = f"-disposition:{stream_type}:{out_idx}"
 
-            language = (edit.language or "").strip()
-            if language:
-                lang_value = normalized_track_language_value(language, edit.title)
+            if metadata.language is not None:
+                lang_value = normalized_track_language_value(metadata.language, metadata.name)
                 if lang_value:
                     args.extend([stream_spec, f"language={lang_value}"])
                     args.extend([stream_spec, "language-ietf="])
 
-            if edit.title is not None:
-                args.extend([stream_spec, f"title={edit.title}"])
+            if metadata.name is not None:
+                args.extend([stream_spec, f"title={metadata.name}"])
 
-            disposition = disposition_value_from_edit(edit)
+            flags = metadata.flags
+            disposition = (
+                _common_disposition_value(
+                    flag_default=flags.default,
+                    flag_forced=flags.forced,
+                    flag_hearing_impaired=flags.hearing_impaired,
+                    flag_visual_impaired=flags.visual_impaired,
+                    flag_original=flags.original,
+                    flag_commentary=flags.commentary,
+                )
+                if flags is not None
+                else None
+            )
             if disposition is not None:
                 args.extend([disposition_spec, disposition])
         return args

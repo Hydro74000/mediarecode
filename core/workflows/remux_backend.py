@@ -5,61 +5,64 @@ an exact-job can request a backend without coupling its JSON shape to an
 implementation.  The native backend is capability-gated; ``auto`` remains
 backwards compatible by selecting FFmpeg when a plan needs a feature that has
 not yet been materialised by the native writer.
+
+La planification (préflight scopé, canonicalisation sélective, variantes
+audio, rapport structuré) vit dans :mod:`core.workflows.remux_plan` ; ce
+module conserve les backends et le runner natif.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-import heapq
-import mimetypes
-import re
-from math import gcd
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Callable, Protocol
 
-from core.runner import TaskSignals
-from core.bluray import append_ffmpeg_input_args
-from core.subtitle_codec import plan_subtitle_codec
-from core.workflows.matroska_mux_plan import (
-    MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack,
-    deterministic_source_identity, deterministic_uid,
+from core.runner import TaskCancelledError, TaskSignals
+from core.matroska.assembly import (
+    MatroskaAssemblyAttachment,
+    MatroskaAssemblyPlan,
+    MatroskaAssemblyTrack,
+    MatroskaTrackFlags,
+    compile_assembly_plan,
 )
-from core.workflows.matroska_element_ids import CHAPTERS_ID, TAGS_ID
-from core.workflows.matroska_language_editor import matroska_legacy_language
-from core.workflows.matroska_reader import MatroskaAttachment, MatroskaReader
-from core.workflows.matroska_writer import (
-    MatroskaWriter, build_attachments_element, build_chapters_element,
-    build_tags_element, rewrite_tag_target_uids,
+from core.matroska.mux_plan import (
+    MatroskaMuxPlan,
+    deterministic_source_identity,
 )
-from core.workflows.remux_mapping import resolve_mapped_tracks
+from core.matroska.assembly import canonical_attachment_output_name
+from core.matroska.contract import without_expected_attachment
+from core.matroska.validation import validate_matroska_output
+from core.matroska.writer import (
+    MatroskaWriteCancelled, MatroskaWriteProgress, MatroskaWriter,
+)
+from core.workflows.remux_mapping import resolve_mapped_tracks, track_order_parts
 from core.workflows.remux_mapping import normalized_language_value, resolved_global_tags
-from core.workflows.remux_models import RemuxConfig, SourceInput, normalize_mux_backend
-from core.workflows.common.sync_rewrite import (
-    audio_bitrate_kbps_from_display_info,
-    normalized_rewrite_codec,
+from core.workflows.remux_models import RemuxConfig, SourceInput
+from core.workflows.remux_plan import (
+    MATROSKA_EXTENSIONS,
+    MuxBackendDecision,
+    MuxExecutionPlan,
+    build_audio_variant_command,
+    build_canonicalization_command,
+    mux_backend_report,
+    native_capability_reasons,
+    native_preparation_commands,
+    participating_source_indexes,
+    plan_remux,
+    select_mux_backend,
 )
-from core.subprocess_utils import subprocess_windows_no_window_kwargs
-from core.version import APP_VERSION_LABEL
-from core.workdir import download_tmdb_cover
-
-
-MATROSKA_EXTENSIONS = frozenset({".mkv", ".webm", ".mka", ".mks", ".mk3d"})
-
-
-@dataclass(frozen=True)
-class MuxBackendDecision:
-    requested: str
-    selected: str
-    native_reasons: tuple[str, ...] = ()
-
-    @property
-    def uses_fallback(self) -> bool:
-        return self.requested == "auto" and self.selected == "ffmpeg"
+from core.subprocess_utils import subprocess_text_kwargs
+from core.workdir import (
+    download_tmdb_cover,
+    normalized_tmdb_cover_filename,
+    prepare_process_work_dir,
+    relocate_tmdb_covers_to_process_dir,
+    remove_path,
+)
 
 
 class RemuxBackend(Protocol):
@@ -79,6 +82,7 @@ class NativeMatroskaBackend:
     ffmpeg_bin: str
     ffprobe_bin: str = "ffprobe"
     finalize: Callable[[Path], None] = lambda _path: None
+    plan: MuxExecutionPlan | None = None
     name: str = "native"
 
     def validate(self, config: RemuxConfig) -> tuple[str, ...]:
@@ -96,7 +100,7 @@ class NativeMatroskaBackend:
         return run_native_remux(
             config, log=self.log, log_step=self.log_step,
             ffmpeg_bin=self.ffmpeg_bin, ffprobe_bin=self.ffprobe_bin,
-            finalize=self.finalize,
+            finalize=self.finalize, plan=self.plan,
         )
 
 
@@ -124,266 +128,95 @@ class FfmpegRemuxBackend:
         return self.execute_callback(config)
 
 
-def native_capability_reasons(config: RemuxConfig) -> tuple[str, ...]:
-    """Return blockers without silently weakening a native exact-job.
-
-    Keeping this check central means writer increments only remove blockers;
-    they never silently change v1 semantics.
-    """
-    reasons: list[str] = []
-    if config.output.suffix.lower() != ".mkv":
-        reasons.append("le backend natif écrit uniquement des sorties .mkv")
-    for source in config.sources:
-        for track in source.tracks:
-            if track.track_type == "subtitle":
-                try:
-                    plan_subtitle_codec(track.codec)
-                except ValueError as exc:
-                    reasons.append(f"{source.path.name}: {exc}")
-            if track.sync_rewrite_label and track.time_shift_ms:
-                reasons.append(
-                    f"{source.path.name}: réécriture de synchronisation avancée à matérialiser par FFmpeg"
-                )
-        if source.path.suffix.lower() not in MATROSKA_EXTENSIONS:
-            continue
-        if not source.path.is_file():
-            continue
-        try:
-            reader = MatroskaReader(source.path)
-            reader.segment()
-            if not reader.tracks():
-                reasons.append(f"{source.path.name}: aucune piste Matroska lisible")
-                continue
-            _compression, encryption = reader.content_encoding_capabilities()
-            if encryption:
-                reasons.append(f"{source.path.name}: piste Matroska chiffrée non transposable")
-        except (OSError, ValueError) as exc:
-            reasons.append(f"{source.path.name}: structure Matroska illisible ({exc})")
-    return tuple(reasons)
-
-
-def select_mux_backend(config: RemuxConfig) -> MuxBackendDecision:
-    requested = normalize_mux_backend(config.mux_backend)
-    reasons = native_capability_reasons(config)
-    if requested == "ffmpeg":
-        return MuxBackendDecision(requested=requested, selected="ffmpeg")
-    if not reasons:
-        return MuxBackendDecision(requested=requested, selected="native")
-    if requested == "native":
-        return MuxBackendDecision(requested=requested, selected="native", native_reasons=reasons)
-    return MuxBackendDecision(requested=requested, selected="ffmpeg", native_reasons=reasons)
-
-
-def native_preparation_commands(config: RemuxConfig, ffmpeg_bin: str) -> list[list[str]]:
-    commands: list[list[str]] = []
-    for source in config.sources:
-        if source.path.suffix.lower() in MATROSKA_EXTENSIONS:
-            continue
-        commands.append(build_canonicalization_command(
-            source, Path(f"<temporary>/source_{source.file_index}.mkv"), ffmpeg_bin,
-        ))
-    return commands
-
-
-def build_canonicalization_command(source: SourceInput, target: Path, ffmpeg_bin: str) -> list[str]:
-    command = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error"]
-    raw_video_suffixes = {
-        ".264", ".avc", ".h264", ".x264", ".265", ".hevc", ".h265", ".x265",
-        ".av1", ".obu", ".ivf", ".vc1", ".m1v", ".m2v", ".mpv",
-    }
-    if source.path.suffix.lower() in raw_video_suffixes:
-        display = next((track.display_info for track in source.tracks if track.track_type == "video"), "")
-        fps_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:fps|FPS)", display)
-        if fps_match:
-            command.extend(["-r", fps_match.group(1).replace(",", ".")])
-    append_ffmpeg_input_args(command, source.path)
-    command.extend(["-map", "0", "-c", "copy"])
-    subtitle_index = 0
-    for track in source.tracks:
-        if track.track_type != "subtitle":
-            continue
-        codec_arg, _warning = plan_subtitle_codec(track.codec)
-        if codec_arg != "copy":
-            command.extend([f"-c:s:{subtitle_index}", codec_arg])
-        subtitle_index += 1
-    command.append(str(target))
-    return command
-
-
-def mux_backend_report(config: RemuxConfig, *, ffmpeg_bin: str = "ffmpeg") -> dict[str, object]:
-    decision = select_mux_backend(config)
-    return {
-        "requested_backend": decision.requested,
-        "selected_backend": decision.selected,
-        "plan_version": 1,
-        "fallback": decision.uses_fallback,
-        "fallback_reason": "; ".join(decision.native_reasons) if decision.uses_fallback else "",
-        "native_diagnostics": list(decision.native_reasons),
-        "preparation_commands": native_preparation_commands(config, ffmpeg_bin) if decision.selected == "native" else [],
-    }
-
-
-def build_native_plan(config: RemuxConfig) -> MatroskaMuxPlan:
+def remux_assembly_plan(config: RemuxConfig) -> MatroskaAssemblyPlan:
+    """Compile la configuration remux vers le contrat d'assemblage partagé."""
     mapped = resolve_mapped_tracks(config)
-    readers = {source.file_index: MatroskaReader(source.path) for source in config.sources}
-    native_tracks = {index: reader.tracks() for index, reader in readers.items()}
-    source_identities = {
+    participating = participating_source_indexes(config)
+    source_by_index = {source.file_index: source for source in config.sources}
+    identities = {
         source.file_index: source.origin_identity or deterministic_source_identity(source.path)
         for source in config.sources
+        if source.file_index in participating
     }
-    timestamp_scale_ns = 0
-    for reader in readers.values():
-        timestamp_scale_ns = gcd(timestamp_scale_ns, reader.timestamp_scale_ns())
+
+    ordered_tracks: list[MatroskaAssemblyTrack] = []
     for item in mapped:
-        timestamp_scale_ns = gcd(timestamp_scale_ns, abs(int(item.track.time_shift_ms or 0)) * 1_000_000)
-    timestamp_scale_ns = timestamp_scale_ns or 1_000_000
-    output_tracks: list[MatroskaMuxTrack] = []
-    track_uid_maps: dict[int, dict[int, int]] = {}
-    # source_file_index → numéro de piste source → [(piste sortie, offset ms)].
-    # Permet une seule passe streaming par source, sans matérialiser les blocks.
-    packet_routes: dict[int, dict[int, list[tuple[int, int]]]] = {}
-    for output_index, item in enumerate(mapped, start=1):
-        tracks = native_tracks[item.source_file_index]
-        if not 0 <= item.stream_index < len(tracks):
-            raise ValueError(
-                f"Piste native introuvable : source={item.source_file_index}, stream={item.stream_index}"
-            )
-        source_track = tracks[item.stream_index]
-        uid = deterministic_uid(
-            source_identities[item.source_file_index], source_track.uid, output_index,
-            normalized_language_value(item.track), item.track.title,
-            item.track.flag_default, item.track.flag_forced,
-        )
-        track_uid_maps.setdefault(item.source_file_index, {})[source_track.uid] = uid
-        output_tracks.append(MatroskaMuxTrack(
-            source=Path(item.source_path), source_track=source_track,
-            output_number=output_index, output_uid=uid,
-            language=matroska_legacy_language(normalized_language_value(item.track)),
-            language_bcp47=(
-                source_track.language_bcp47
-                if (item.track.language or "und").lower() == (source_track.language_bcp47 or "").lower()
-                else ""
+        track = item.track
+        ordered_tracks.append(MatroskaAssemblyTrack(
+            artifact=Path(item.source_path),
+            artifact_track_index=item.stream_index,
+            source_identity=identities[item.source_file_index],
+            language_value=normalized_language_value(track),
+            name=track.title,
+            flags=MatroskaTrackFlags(
+                enabled=track.flag_enabled,
+                default=track.flag_default,
+                forced=track.flag_forced,
+                hearing_impaired=track.flag_hearing_impaired,
+                visual_impaired=track.flag_visual_impaired,
+                original=track.flag_original,
+                commentary=track.flag_commentary,
             ),
-            name=item.track.title,
-            flag_enabled=item.track.flag_enabled,
-            flag_default=item.track.flag_default,
-            flag_forced=item.track.flag_forced,
-            flag_hearing_impaired=item.track.flag_hearing_impaired,
-            flag_visual_impaired=item.track.flag_visual_impaired,
-            flag_original=item.track.flag_original,
-            flag_commentary=item.track.flag_commentary,
+            time_shift_ms=int(track.time_shift_ms or 0),
         ))
-        offset = int(item.track.time_shift_ms or 0)
-        packet_routes.setdefault(item.source_file_index, {}).setdefault(
-            source_track.number, []).append((output_index, offset))
 
-    def source_packet_stream(source_index: int) -> Iterator[MatroskaMuxPacket]:
-        """Une passe streaming sur les blocks d'une source (mémoire bornée)."""
-        routes = packet_routes.get(source_index, {})
-        for source_sequence, block in enumerate(readers[source_index].blocks()):
-            targets = routes.get(block.track_number)
-            if not targets:
-                continue
-            if block.lace_count > 1 and block.lace_index > 0:
-                continue
-            source_timestamp_ns = block.timestamp_ns if block.timestamp_ns is not None else block.timestamp_ms * 1_000_000
-            for output_index, offset_ms in targets:
-                shifted_timestamp_ns = source_timestamp_ns + offset_ms * 1_000_000
-                if shifted_timestamp_ns < 0:
-                    continue
-                shifted = block if not offset_ms else block.__class__(**{
-                    **block.__dict__,
-                    "timestamp_ms": round(shifted_timestamp_ns / 1_000_000),
-                    "timestamp_ns": shifted_timestamp_ns,
-                })
-                yield MatroskaMuxPacket(output_index, shifted, source_sequence)
-
-    active_sources = [index for index in readers if packet_routes.get(index)]
-    if len(active_sources) <= 1:
-        packet_stream: Iterator[MatroskaMuxPacket] = (
-            source_packet_stream(active_sources[0]) if active_sources else iter(())
+    attachments = tuple(
+        MatroskaAssemblyAttachment(
+            artifact=source.path,
+            local_index=selected.local_index,
+            source_identity=identities[source.file_index],
         )
-    else:
-        # Ordre interne de chaque source préservé ; fusion inter-sources par
-        # timestamp décalé (heapq.merge ne réordonne jamais au sein d'un flux).
-        packet_stream = heapq.merge(
-            *(source_packet_stream(index) for index in active_sources),
-            key=lambda packet: (
-                packet.block.timestamp_ns
-                if packet.block.timestamp_ns is not None
-                else packet.block.timestamp_ms * 1_000_000
-            ),
-        )
-    opaque: list[bytes] = []
-
-    attachments: list[MatroskaAttachment] = []
-    attachment_uid_maps: dict[int, dict[int, int]] = {}
-    source_by_index = {source.file_index: source for source in config.sources}
-    for source_index, source in source_by_index.items():
-        available = readers[source_index].attachments()
-        for selected in source.selected_attachments:
-            if not 0 <= selected.local_index < len(available):
-                raise ValueError(f"Attachment natif introuvable : {source.path} #{selected.local_index}")
-            item = available[selected.local_index]
-            output_uid = deterministic_uid(source_identities[source_index], item.uid, item.name)
-            attachment_uid_maps.setdefault(source_index, {})[item.uid] = output_uid
-            attachments.append(MatroskaAttachment(
-                uid=output_uid, name=item.name,
-                media_type=item.media_type, description=item.description, data=item.data,
-            ))
-    for path in config.extra_attachments:
-        attachment_path = Path(path)
-        attachments.append(MatroskaAttachment(
-            uid=deterministic_uid(deterministic_source_identity(attachment_path), attachment_path.name),
-            name=attachment_path.name,
-            media_type=mimetypes.guess_type(attachment_path.name)[0] or "application/octet-stream",
-            description="", data=attachment_path.read_bytes(),
-        ))
-    attachment_element = build_attachments_element(attachments)
-    if attachment_element:
-        opaque.append(attachment_element)
-
-    if config.chapter_overrides is not None:
-        chapter_element = build_chapters_element(list(config.chapter_overrides))
-        if chapter_element:
-            opaque.append(chapter_element)
-    elif config.keep_chapters:
-        chapter_source = config.chapter_source_index
-        if chapter_source is None or chapter_source not in readers:
-            chapter_source = next((source.file_index for source in config.sources if source.has_chapters), config.sources[0].file_index)
-        opaque.extend(readers[chapter_source].raw_top_level(CHAPTERS_ID))
-
-    if config.tag_overrides is not None:
-        tag_element = build_tags_element(resolved_global_tags(config))
-        if tag_element:
-            opaque.append(tag_element)
-    else:
-        for source in config.sources:
-            if source.copy_tags:
-                opaque.extend(
-                    rewrite_tag_target_uids(
-                        raw,
-                        track_uids=track_uid_maps.get(source.file_index, {}),
-                        attachment_uids=attachment_uid_maps.get(source.file_index, {}),
-                        drop_chapter_targets=config.chapter_overrides is not None,
-                    )
-                    for raw in readers[source.file_index].raw_top_level(TAGS_ID)
-                )
-        if config.file_title:
-            title_tag = build_tags_element({"title": config.file_title.strip()})
-            if title_tag:
-                opaque.append(title_tag)
-    first_reader = readers[config.sources[0].file_index]
-    _, source_writing_app = first_reader.segment_info_apps()
-    segment_title = config.file_title.strip() or first_reader.segment_title()
-    return MatroskaMuxPlan(
-        config.output, tuple(output_tracks), packet_stream, duration_ms=0,
-        duration_ns=0, timestamp_scale_ns=timestamp_scale_ns,
-        muxing_app=f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}",
-        writing_app=source_writing_app or "Muxiveo",
-        title=segment_title,
-        opaque_top_level=tuple(opaque),
+        for source in config.sources
+        for selected in source.selected_attachments
     )
+
+    chapter_entries = tuple(config.chapter_overrides) if config.chapter_overrides is not None else None
+    chapter_source: Path | None = None
+    if chapter_entries is None and config.keep_chapters:
+        chapter_index = config.chapter_source_index
+        if chapter_index is None or chapter_index not in participating:
+            chapter_index = next(
+                (source.file_index for source in config.sources if source.has_chapters),
+                config.sources[0].file_index,
+            )
+        if chapter_index not in participating:
+            chapter_index = config.sources[0].file_index
+        chapter_source = source_by_index[chapter_index].path
+
+    return MatroskaAssemblyPlan(
+        output=config.output,
+        ordered_tracks=tuple(ordered_tracks),
+        attachments=attachments,
+        extra_attachment_files=tuple(Path(path) for path in config.extra_attachments),
+        chapter_entries=chapter_entries,
+        chapter_source=chapter_source,
+        tag_overrides=resolved_global_tags(config) if config.tag_overrides is not None else None,
+        tag_copy_sources=tuple(source.path for source in config.sources if source.copy_tags),
+        segment_title=(
+            config.file_title
+            if config.file_title.strip() or config.tag_overrides is not None
+            else None
+        ),
+        title_tag_value=config.file_title,
+        artifact_order=tuple(
+            source.path for source in config.sources if source.file_index in participating
+        ),
+        segment_info_source=config.sources[0].path,
+    )
+
+
+def build_native_plan(
+    config: RemuxConfig,
+    *,
+    output_contract=None,
+) -> MatroskaMuxPlan:
+    """Plan bas niveau du writer, compilé via le contrat d'assemblage partagé."""
+    assembly = remux_assembly_plan(config)
+    if output_contract is None:
+        from core.matroska.assembly import assembly_output_contract
+        output_contract = assembly_output_contract(assembly)
+    assembly = replace(assembly, expected_output_contract=output_contract)
+    return compile_assembly_plan(assembly)
 
 
 def run_native_remux(
@@ -394,143 +227,290 @@ def run_native_remux(
     ffmpeg_bin: str,
     ffprobe_bin: str = "ffprobe",
     finalize: Callable[[Path], None] = lambda _path: None,
+    plan: MuxExecutionPlan | None = None,
 ) -> TaskSignals:
+    """Runner natif : mêmes signaux ``TaskSignals`` que le runner FFmpeg.
+
+    Toutes les commandes externes sont enregistrées dans les signaux (donc
+    annulables), les fichiers temporaires sont nettoyés, et l'écriture native
+    transmet une progression en compteurs (paquets/octets) sans pourcentage
+    artificiel.
+    """
+    work_root = config.work_dir or Path(tempfile.gettempdir())
+    process_work_dir = prepare_process_work_dir(
+        work_root,
+        output_path=config.output,
+        fallback_name="remux_job",
+    )
+    relocated_attachments = relocate_tmdb_covers_to_process_dir(
+        [Path(path) for path in config.extra_attachments],
+        work_root=work_root,
+        process_dir=process_work_dir,
+    )
+    runtime_config = replace(config, extra_attachments=relocated_attachments)
     signals = TaskSignals()
 
     def task() -> None:
         canonical_root: Path | None = None
+        partial = config.output.with_suffix(config.output.suffix + ".partial")
+
+        def _check_cancel() -> None:
+            if signals._cancel_event.is_set():
+                raise TaskCancelledError()
+
+        def _run_external(cmd: list[str], label: str) -> None:
+            """Commande externe enregistrée dans TaskSignals, annulable proprement."""
+            _check_cancel()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                **subprocess_text_kwargs(),
+            )
+            signals._register_proc(proc)
+            try:
+                output, _ = proc.communicate()
+            finally:
+                signals._unregister_proc(proc)
+            _check_cancel()
+            if proc.returncode:
+                raise RuntimeError(f"{label}: {str(output or '').strip()}")
+
+        def _ensure_canonical_root() -> Path:
+            nonlocal canonical_root
+            if canonical_root is None:
+                canonical_root = Path(tempfile.mkdtemp(
+                    prefix="Muxiveo_native_", dir=process_work_dir,
+                ))
+            return canonical_root
+
         try:
+            execution_plan = plan or plan_remux(
+                runtime_config, ffmpeg_bin=ffmpeg_bin, ffprobe_bin=ffprobe_bin,
+            )
             log("INFO", "Backend Matroska natif multi-pistes sélectionné (plan v1).")
-            run_config = replace(config, sources=[
+            run_config = replace(runtime_config, sources=[
                 replace(
                     source,
                     origin_identity=source.origin_identity or deterministic_source_identity(source.path),
                 )
                 for source in config.sources
             ])
+            output_contract = execution_plan.output_contract
             if config.tmdb_cover is not None:
-                work_root = config.work_dir or Path(tempfile.gettempdir())
-                work_root.mkdir(parents=True, exist_ok=True)
-                canonical_root = Path(tempfile.mkdtemp(prefix="Muxiveo_native_", dir=work_root))
                 cover_url, cover_name = config.tmdb_cover
-                cover = download_tmdb_cover(cover_url, cover_name, canonical_root / "attachments")
-                run_config = replace(run_config, extra_attachments=[*run_config.extra_attachments, cover], tmdb_cover=None)
+                cover_name = normalized_tmdb_cover_filename(cover_name)
+                try:
+                    cover = download_tmdb_cover(cover_url, cover_name, _ensure_canonical_root() / "attachments")
+                    run_config = replace(run_config, extra_attachments=[*run_config.extra_attachments, cover], tmdb_cover=None)
+                except Exception as exc:
+                    # Parité avec le backend FFmpeg : la cover est optionnelle —
+                    # warning, poursuite sans cover et attente retirée du contrat
+                    # (clé = nom canonique, identique à l'attente).
+                    log("WARN", f"Impossible de télécharger la cover TMDB : {exc}")
+                    run_config = replace(run_config, tmdb_cover=None)
+                    output_contract = without_expected_attachment(
+                        output_contract,
+                        canonical_attachment_output_name(Path(cover_name)),
+                    )
+            _check_cancel()
+
+            # Attachments de type attached_pic provenant d'un conteneur non-MKV :
+            # le plan les matérialise en fichiers, puis l'assembleur les traite
+            # comme attachments externes (aucun local_index canonicalisé).
+            attachment_actions = [
+                action for action in execution_plan.preparation_actions
+                if action.kind == "extract_attachment"
+            ]
+            if attachment_actions:
+                root = _ensure_canonical_root() / "attachments"
+                root.mkdir(parents=True, exist_ok=True)
+                extracted: list[Path] = []
+                extracted_sources = {
+                    action.source_file_index for action in attachment_actions
+                    if action.source_file_index is not None
+                }
+                for action in attachment_actions:
+                    target = root / action.target_name
+                    command = list(action.command)
+                    command[-1] = str(target)
+                    _run_external(command, action.description)
+                    extracted.append(target)
+                run_config = replace(
+                    run_config,
+                    extra_attachments=[*run_config.extra_attachments, *extracted],
+                    sources=[
+                        replace(
+                            source,
+                            selected_attachments=[
+                                attachment for attachment in source.selected_attachments
+                                if not (
+                                    source.file_index in extracted_sources
+                                    and bool(getattr(attachment, "is_attached_pic", False))
+                                )
+                            ],
+                        )
+                        for source in run_config.sources
+                    ],
+                )
+                _check_cancel()
+
+            canonical_source_indexes = {
+                action.source_file_index
+                for action in execution_plan.preparation_actions
+                if action.kind == "canonicalize_source" and action.source_file_index is not None
+            }
             non_matroska = [
-                source for source in config.sources
-                if source.path.suffix.lower() not in MATROSKA_EXTENSIONS
+                source for source in run_config.sources
+                if source.file_index in canonical_source_indexes
             ]
             if non_matroska:
                 log_step(2, "Canonicalisation Matroska des sources non-MKV")
-                work_root = config.work_dir or Path(tempfile.gettempdir())
-                work_root.mkdir(parents=True, exist_ok=True)
-                if canonical_root is None:
-                    canonical_root = Path(tempfile.mkdtemp(prefix="Muxiveo_canonical_", dir=work_root))
+                root = _ensure_canonical_root()
                 replacements: dict[int, Path] = {}
                 for source in non_matroska:
-                    target = canonical_root / f"source_{source.file_index}.mkv"
-                    cmd = build_canonicalization_command(source, target, ffmpeg_bin)
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True,
-                        **subprocess_windows_no_window_kwargs(),
+                    index_map = execution_plan.canonical_index_map(source.file_index)
+                    target = root / f"source_{source.file_index}.mkv"
+                    cmd = build_canonicalization_command(
+                        source, target, ffmpeg_bin,
+                        selected_streams=sorted(index_map),
                     )
-                    if result.returncode:
-                        raise RuntimeError(
-                            f"Canonicalisation impossible pour {source.path.name}: {result.stderr or result.stdout}"
-                        )
+                    _run_external(cmd, f"Canonicalisation impossible pour {source.path.name}")
                     replacements[source.file_index] = target
-                run_config = replace(run_config, sources=[
-                    replace(source, path=replacements.get(source.file_index, source.path))
-                    for source in run_config.sources
-                ])
-            # Materialise encoded audio variants as isolated Matroska sources;
-            # the native writer still owns the final multi-track document.
-            source_by_index = {source.file_index: source for source in run_config.sources}
-            next_source_index = max(source_by_index, default=-1) + 1
-            new_sources = list(run_config.sources)
-            new_order: list[tuple[int, int] | tuple[int, int, str]] = []
-            codec_encoders = {
-                "aac": "aac", "ac3": "ac3", "eac3": "eac3", "flac": "flac",
-            }
-            for order_index, order_item in enumerate(run_config.track_order):
-                source_index, stream_index = int(order_item[0]), int(order_item[1])
-                entry_id = str(order_item[2]) if len(order_item) > 2 else ""
-                source = source_by_index[source_index]
-                candidates = [track for track in source.tracks if track.mkv_tid == stream_index]
-                track = next((item for item in candidates if not entry_id or item.entry_id == entry_id), None)
-                if track is None:
-                    raise ValueError(
-                        f"Piste de variante introuvable : source={source_index}, stream={stream_index}"
+                # Correspondance explicite index source original → index canonique
+                new_sources: list[SourceInput] = []
+                for source in run_config.sources:
+                    if source.file_index not in replacements:
+                        new_sources.append(source)
+                        continue
+                    index_map = execution_plan.canonical_index_map(source.file_index)
+                    kept_tracks = [
+                        replace(track, mkv_tid=index_map[track.mkv_tid])
+                        for track in source.tracks
+                        if track.mkv_tid in index_map
+                    ]
+                    new_sources.append(replace(
+                        source,
+                        path=replacements[source.file_index],
+                        tracks=kept_tracks or source.tracks,
+                    ))
+                new_order: list[tuple[int, int] | tuple[int, int, str]] = []
+                for order_item in run_config.track_order:
+                    file_index, mkv_tid, entry_id = track_order_parts(order_item)
+                    if file_index in replacements:
+                        mkv_tid = execution_plan.canonical_index_map(file_index).get(mkv_tid, mkv_tid)
+                    new_order.append((file_index, mkv_tid, entry_id) if entry_id else (file_index, mkv_tid))
+                run_config = replace(run_config, sources=new_sources, track_order=new_order)
+                _check_cancel()
+
+            # Matérialisation des variantes audio planifiées (preview == exécution) ;
+            # le writer natif garde la main sur le document multi-pistes final.
+            if execution_plan.audio_variants:
+                root = _ensure_canonical_root()
+                source_by_index = {source.file_index: source for source in run_config.sources}
+                next_source_index = max(source_by_index, default=-1) + 1
+                new_sources = list(run_config.sources)
+                variant_order: list[tuple[int, int] | tuple[int, int, str]] = []
+                variants_by_index = {variant.order_index: variant for variant in execution_plan.audio_variants}
+                for order_index, order_item in enumerate(run_config.track_order):
+                    variant = variants_by_index.get(order_index)
+                    if variant is None:
+                        variant_order.append(order_item)
+                        continue
+                    file_index, mkv_tid, entry_id = track_order_parts(order_item)
+                    source = source_by_index[file_index]
+                    candidates = [track for track in source.tracks if track.mkv_tid == mkv_tid]
+                    track = next(
+                        (item for item in candidates if not entry_id or item.entry_id == entry_id),
+                        None,
                     )
-                target = normalized_rewrite_codec(track.codec)
-                original = normalized_rewrite_codec(track.orig_codec or track.codec)
-                needs_audio_encode = (
-                    track.track_type == "audio"
-                    and target in codec_encoders
-                    and (track.is_new or target != original)
-                )
-                if not needs_audio_encode:
-                    new_order.append(order_item)
-                    continue
-                if canonical_root is None:
-                    work_root = config.work_dir or Path(tempfile.gettempdir())
-                    canonical_root = Path(tempfile.mkdtemp(prefix="Muxiveo_native_", dir=work_root))
-                target_path = canonical_root / f"audio_variant_{order_index}.mkv"
-                cmd = [
-                    ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-                    "-i", str(source.path), "-map", f"0:{stream_index}",
-                    "-c:a", codec_encoders[target],
-                ]
-                bitrate = audio_bitrate_kbps_from_display_info(track.display_info)
-                if target != "flac" and bitrate:
-                    cmd.extend(["-b:a", f"{int(bitrate)}k"])
-                channel_match = re.search(r"\b(\d)\.(\d)\b", str(track.display_info or ""))
-                channel_count = sum(map(int, channel_match.groups())) if channel_match else 0
-                if target == "ac3" and channel_count > 6:
-                    cmd.extend(["-ac:a", "6", "-channel_layout:a", "5.1"])
-                cmd.append(str(target_path))
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True,
-                    **subprocess_windows_no_window_kwargs(),
-                )
-                if result.returncode:
-                    raise RuntimeError(f"Variante audio {target} impossible: {result.stderr or result.stdout}")
-                materialized_track = replace(track, mkv_tid=0, orig_codec=track.codec, is_new=False)
-                new_source = SourceInput(
-                    target_path, next_source_index, [materialized_track],
-                    origin_identity=f"{source.origin_identity}:audio:{stream_index}:{target}",
-                )
-                new_sources.append(new_source)
-                new_order.append((next_source_index, 0, materialized_track.entry_id))
-                next_source_index += 1
-            run_config = replace(run_config, sources=new_sources, track_order=new_order)
+                    if track is None:
+                        raise ValueError(
+                            f"Piste de variante introuvable : source={file_index}, stream={mkv_tid}"
+                        )
+                    target_path = root / variant.target_name
+                    cmd = build_audio_variant_command(
+                        variant, source.path, mkv_tid, target_path, ffmpeg_bin,
+                    )
+                    _run_external(cmd, f"Variante audio {variant.target_codec} impossible")
+                    materialized_track = replace(track, mkv_tid=0, orig_codec=track.codec, is_new=False)
+                    new_source = SourceInput(
+                        target_path, next_source_index, [materialized_track],
+                        origin_identity=f"{source.origin_identity}:audio:{variant.stream_index}:{variant.target_codec}",
+                    )
+                    new_sources.append(new_source)
+                    variant_order.append((next_source_index, 0, materialized_track.entry_id))
+                    next_source_index += 1
+                run_config = replace(run_config, sources=new_sources, track_order=variant_order)
+                _check_cancel()
+
             log_step(3, "Construction du plan Matroska natif")
-            plan = build_native_plan(run_config)
+            plan_matroska = build_native_plan(
+                run_config, output_contract=output_contract,
+            )
             log_step(4, "Écriture Matroska native multi-pistes")
+
             def validate_partial(path: Path) -> None:
-                result = subprocess.run(
+                errors = validate_matroska_output(path, output_contract)
+                if errors:
+                    raise RuntimeError(
+                        "Validation sémantique de la sortie native échouée : "
+                        + " ; ".join(errors)
+                    )
+                _run_external(
                     [
                         ffprobe_bin, "-v", "error", "-show_entries",
                         "format=format_name", "-of", "json", str(path),
                     ],
-                    capture_output=True, text=True,
-                    **subprocess_windows_no_window_kwargs(),
+                    "Validation ffprobe de la sortie native impossible",
                 )
-                if result.returncode:
-                    raise RuntimeError(
-                        "Validation ffprobe de la sortie native impossible: "
-                        + str(result.stderr or result.stdout)
+
+            progress_state = {"packets": 0, "bytes": 0}
+
+            def on_write_progress(progress: MatroskaWriteProgress) -> None:
+                # Étape indéterminée avec compteurs : pas de pourcentage artificiel.
+                if progress.stage != "clusters":
+                    signals.progress.emit(
+                        f"Écriture Matroska ({progress.stage}) : "
+                        f"{progress.packets_written} paquets, "
+                        f"{progress.bytes_written / (1024 * 1024):.1f} Mio"
+                    )
+                    return
+                if (
+                    progress.packets_written - progress_state["packets"] >= 2000
+                    or progress.bytes_written - progress_state["bytes"] >= 64 * 1024 * 1024
+                ):
+                    progress_state["packets"] = progress.packets_written
+                    progress_state["bytes"] = progress.bytes_written
+                    signals.progress.emit(
+                        f"Écriture Matroska : {progress.packets_written} paquets, "
+                        f"{progress.bytes_written / (1024 * 1024):.1f} Mio"
                     )
 
-            MatroskaWriter().write(plan, external_validator=validate_partial)
+            MatroskaWriter().write(
+                plan_matroska,
+                external_validator=validate_partial,
+                cancel_cb=signals._cancel_event.is_set,
+                progress_cb=on_write_progress,
+            )
             log_step(5, "Validation structure native terminée")
-            finalize(config.output)
-            signals.finished.emit(str(config.output))
+            # Un échec NFO après commit ne transforme plus un média valide en
+            # workflow échoué.
+            try:
+                finalize(runtime_config.output)
+            except Exception as exc:
+                log("WARN", f"Post-traitement (NFO) échoué après commit : {exc}")
+            signals.finished.emit(str(runtime_config.output))
+        except (TaskCancelledError, MatroskaWriteCancelled):
+            partial.unlink(missing_ok=True)
+            signals.cancelled.emit()
         except Exception as exc:
-            config.output.with_suffix(config.output.suffix + ".partial").unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
             signals.failed.emit(str(exc), exc)
         finally:
             if canonical_root is not None:
                 shutil.rmtree(canonical_root, ignore_errors=True)
+            remove_path(process_work_dir)
 
     executor = ThreadPoolExecutor(max_workers=1)
     executor.submit(task)
@@ -539,10 +519,12 @@ def run_native_remux(
 
 
 __all__ = [
-    "FfmpegRemuxBackend", "MuxBackendDecision", "NativeMatroskaBackend",
+    "FfmpegRemuxBackend", "MuxBackendDecision", "MuxExecutionPlan",
+    "NativeMatroskaBackend",
     "RemuxBackend", "build_native_plan", "mux_backend_report",
     "build_canonicalization_command",
     "MATROSKA_EXTENSIONS",
     "native_capability_reasons", "native_preparation_commands",
+    "plan_remux",
     "run_native_remux", "select_mux_backend",
 ]

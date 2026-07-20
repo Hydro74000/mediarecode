@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from core.workflows.matroska_dovi_block_addition import DolbyVisionConfigRecord
-from core.workflows.matroska_element_ids import (
+from core.matroska.editors.dovi import DolbyVisionConfigRecord
+from core.matroska.ids import (
+    BLOCK_GROUP_ID,
     CLUSTER_ID,
     EBML_HEADER_ID,
     SEGMENT_ID,
@@ -19,7 +19,8 @@ from core.workflows.matroska_element_ids import (
     TIMESTAMP_ID,
     TRACKS_ID,
 )
-from core.workflows.matroska_native_muxer import MatroskaNativeMuxer
+from core.matroska.native_muxer import MatroskaNativeMuxer
+from core.matroska.reader import MatroskaReader, payload_children
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ class TestMatroskaNativeMuxerSmoke:
         out = tmp_path / "out.mkv"
 
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0,
                 stdout=_make_packets_json([0.0, 0.041666, 0.083333]),
@@ -119,7 +120,7 @@ class TestMatroskaNativeMuxerSmoke:
             bl_signal_compat_id=1,
         )
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0,
                 stdout=_make_packets_json([0.0, 0.041666]),
@@ -141,6 +142,57 @@ class TestMatroskaNativeMuxerSmoke:
         # BlockAdditionMapping ID
         assert b"\x41\xe4" in data
 
+    def test_blocks_are_hvcc_length_prefixed_simpleblocks(self, tmp_path):
+        """MKV-S4 : NAL length-prefixed (toutes conservées), SimpleBlocks,
+        vrai bit keyframe — plus de BlockGroups tous vus keyframes."""
+        hevc = tmp_path / "in.hevc"
+        hevc.write_bytes(_build_fake_hevc(frame_count=3))
+        out = tmp_path / "out.mkv"
+
+        with patch(
+            "core.matroska.timestamps.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0,
+                stdout=_make_packets_json([0.0, 0.041666, 0.083333]),
+                stderr="",
+            ),
+        ):
+            MatroskaNativeMuxer().mux(
+                hevc_input=hevc,
+                source_for_timestamps=tmp_path / "src.mkv",
+                output=out,
+                pixel_width=1920,
+                pixel_height=1080,
+            )
+
+        reader = MatroskaReader(out)
+        track = reader.tracks()[0]
+        # lengthSizeMinusOne du hvcC = 3 → longueurs NAL sur 4 octets.
+        length_size = (track.codec_private[21] & 0x03) + 1
+        assert length_size == 4
+
+        blocks = list(reader.blocks())
+        # Seule la frame IDR porte le bit keyframe.
+        assert [bool(block.flags & 0x80) for block in blocks] == [True, False, False]
+        # AU 1 : VPS/SPS/PPS + IDR conservés dans l'ordre, préfixés longueur.
+        first_au_nals = [
+            _nal(32, extra=b"\x40\x01"),
+            _nal(33, extra=b"\x42\x01"),
+            _nal(34, extra=b"\x44\x01"),
+            _nal(19, first_slice=True, extra=b"\x00" * 32),
+        ]
+        assert blocks[0].payload == b"".join(
+            len(nal).to_bytes(length_size, "big") + nal for nal in first_au_nals
+        )
+        trail = _nal(1, first_slice=True, extra=bytes([1]) * 16)
+        assert blocks[1].payload == len(trail).to_bytes(length_size, "big") + trail
+        # SimpleBlocks uniquement : aucun BlockGroup dans les Clusters.
+        for item in reader.top_level():
+            if item.element_id == CLUSTER_ID:
+                child_ids = [child_id for child_id, _ in payload_children(reader.payload(item))]
+                assert BLOCK_GROUP_ID not in child_ids
+                assert SIMPLE_BLOCK_ID in child_ids
+
     def test_raises_on_frame_count_misalignment(self, tmp_path):
         # 3 frames HEVC mais seulement 2 PTS source → désaligné.
         hevc = tmp_path / "in.hevc"
@@ -148,7 +200,7 @@ class TestMatroskaNativeMuxerSmoke:
         out = tmp_path / "out.mkv"
 
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0,
                 stdout=_make_packets_json([0.0, 0.041666]),
@@ -172,7 +224,7 @@ class TestMatroskaNativeMuxerSmoke:
 
         # PTS : 0, 40 ms, 100 ms (gap VFR), 140 ms
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0,
                 stdout=_make_packets_json([0.0, 0.040, 0.100, 0.140]),
@@ -200,7 +252,7 @@ class TestMatroskaNativeMuxerFfprobeRoundTrip:
         out = tmp_path / "out.mkv"
 
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0,
                 stdout=_make_packets_json([i * 0.041666 for i in range(5)]),

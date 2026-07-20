@@ -1,12 +1,12 @@
 """
-core/workflows/matroska_element_ids.py
+core/matroska/ids.py
 
 IDs binaires des éléments EBML/Matroska utilisés par les muxers et
 éditeurs natifs Python du projet.
 
-Source : ``matroska_elements_reference.json`` (RFC officielle, 2026-04-13).
+Source : ``data/elements_reference.json`` (RFC officielle, 2026-04-13).
 Les IDs sont stockés en bytes pour usage direct avec les primitives
-``ebml_writer`` (qui n'effectuent pas de re-encodage).
+``ebml`` (qui n'effectue pas de réencodage).
 """
 
 from __future__ import annotations
@@ -170,6 +170,7 @@ CUE_TRACK_POSITIONS_ID = _hex_to_bytes("0xB7")
 CUE_TRACK_ID = _hex_to_bytes("0xF7")
 CUE_CLUSTER_POSITION_ID = _hex_to_bytes("0xF1")
 CUE_RELATIVE_POSITION_ID = _hex_to_bytes("0xF0")
+CUE_DURATION_ID = _hex_to_bytes("0xB2")
 
 # Attachments
 ATTACHMENTS_ID = _hex_to_bytes("0x1941A469")
@@ -245,6 +246,7 @@ __all__ = [
     "CRC32_ID",
     "CUES_ID",
     "CUE_CLUSTER_POSITION_ID",
+    "CUE_DURATION_ID",
     "CUE_POINT_ID",
     "CUE_RELATIVE_POSITION_ID",
     "CUE_TIME_ID",

@@ -27,6 +27,7 @@ from core.workflows.encode.runtime.nvencc import (
     build_decode_pipe_cmd as _build_decode_pipe_cmd_runtime,
     build_nvencc_command as _build_nvencc_command_runtime,
     is_nvencc_codec as _is_nvencc_codec_runtime,
+    is_expected_nvencc_pipe_producer_exit,
     nvencc_ffmpeg_filter_vf as _nvencc_ffmpeg_filter_vf_runtime,
     nvencc_intermediate_path as _nvencc_intermediate_path_runtime,
     nvencc_pipe_encode_video as _nvencc_pipe_encode_video_runtime,
@@ -236,7 +237,10 @@ class NvenccPipeExecutor:
             if encode_rc != 0:
                 tail = "\n".join(encode_lines[-40:])
                 raise EncodeError(f"NVEncC a échoué.\n{tail}")
-            if decode_rc not in (0, -13):
+            if not is_expected_nvencc_pipe_producer_exit(
+                decode_rc,
+                "\n".join(decode_lines),
+            ):
                 tail = "\n".join(decode_lines[-40:])
                 raise EncodeError(f"FFmpeg decode a échoué.\n{tail}")
             return "\n".join(encode_lines[-400:])
@@ -378,6 +382,9 @@ class NvenccDirectOutputRunnerCallbacks:
     resolve_input_routing: Callable[[EncodeConfig], NvenccInputRouting]
     build_runtime_remux_cmd: Callable[..., tuple[list[str], LiveSyncSession | None, list[Path]]]
     run_cmd: Callable[[list[str], Path | None, str, Callable[[str], None], TaskSignals], str]
+    finalize_ffmpeg: Callable[..., str]
+    #: Assemblage final Matroska natif (lot 2). None → remux final FFmpeg.
+    native_assemble: Callable[..., None] | None = None
 
 
 class NvenccDirectOutputRunner:
@@ -471,18 +478,20 @@ class NvenccDirectOutputRunner:
                         stream_index=routing.stream_index,
                         vf=_nvencc_ffmpeg_filter_vf_runtime(runtime_video),
                     )
-                remux_cmd, live_sync_session, sync_cleanup_paths = cb.build_runtime_remux_cmd(
-                    config,
-                    intermediate,
-                    video_offset_ms=video_offset_ms,
-                    chapter_materialize_dir=chapter_dir,
-                    signals=signals,
-                    plan=plan,
-                )
-                cleanup_paths.extend(sync_cleanup_paths)
-                if live_sync_session is not None:
-                    for proc in live_sync_session.processes:
-                        signals._register_proc(proc)
+                remux_cmd: list[str] | None = None
+                if cb.native_assemble is None:
+                    remux_cmd, live_sync_session, sync_cleanup_paths = cb.build_runtime_remux_cmd(
+                        config,
+                        intermediate,
+                        video_offset_ms=video_offset_ms,
+                        chapter_materialize_dir=chapter_dir,
+                        signals=signals,
+                        plan=plan,
+                    )
+                    cleanup_paths.extend(sync_cleanup_paths)
+                    if live_sync_session is not None:
+                        for proc in live_sync_session.processes:
+                            signals._register_proc(proc)
 
                 cb.check_cancelled(signals)
                 cb.log_step(6, "Encodage NVEncC")
@@ -502,15 +511,29 @@ class NvenccDirectOutputRunner:
                         signals,
                     )
                 cb.check_cancelled(signals)
-                cb.log_step(7, "Remux final ffmpeg")
-                output = cb.run_cmd(
-                    remux_cmd,
-                    cwd,
-                    "ffmpeg-remux",
-                    lambda line: signals.progress.emit(line),
-                    signals,
-                )
-                signals.finished.emit(output)
+                if cb.native_assemble is not None:
+                    cb.log_step(7, "Assemblage final Matroska natif")
+                    cb.native_assemble(
+                        config,
+                        intermediate=intermediate,
+                        video_offset_ms=video_offset_ms,
+                        signals=signals,
+                        plan=plan,
+                        work_dir=cwd,
+                    )
+                    signals.finished.emit(str(config.output))
+                else:
+                    cb.log_step(7, "Remux final ffmpeg")
+                    assert remux_cmd is not None
+                    output = cb.finalize_ffmpeg(
+                        config,
+                        remux_cmd,
+                        cwd,
+                        "ffmpeg-remux",
+                        signals,
+                        plan=plan,
+                    )
+                    signals.finished.emit(output)
             except TaskCancelledError:
                 signals.cancelled.emit()
             except Exception as exc:
