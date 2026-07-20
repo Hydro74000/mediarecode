@@ -987,6 +987,13 @@ class RemuxPanel(QWidget):
             self._config.sync_rewrite_enabled,
             advanced_audio_enabled=self._config.sync_advanced_audio_rewrite_enabled,
         )
+        backend_index = self._mux_backend_combo.findData(
+            self._config.matroska_mux_backend
+        )
+        if backend_index >= 0 and backend_index != self._mux_backend_combo.currentIndex():
+            # Le réglage Matroska est global : sa sauvegarde doit affecter le
+            # prochain job sans redémarrage ni recréation du panneau.
+            self._mux_backend_combo.setCurrentIndex(backend_index)
         self._rebuild_preview()
 
     def update_audio_track_meta(

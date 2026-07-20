@@ -48,6 +48,11 @@ _PATCHED_TRACK_FLAG_FIELDS = {
     FLAG_COMMENTARY_ID,
 }
 _PATCHED_TRACK_LANGUAGE_FIELDS = {LANGUAGE_ID, LANGUAGE_BCP47_ID}
+_TRACK_STATISTICS_TAGS = frozenset({
+    "BPS", "DURATION", "NUMBER_OF_FRAMES", "NUMBER_OF_BYTES",
+    "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC",
+    "_STATISTICS_TAGS",
+})
 
 
 def _raw_children(payload: bytes) -> list[tuple[bytes, bytes]]:
@@ -78,14 +83,28 @@ def _element_payload(raw: bytes) -> bytes:
     return raw[item.payload_offset:item.end]
 
 
+def _simple_tag_name(raw_simple_tag: bytes) -> str:
+    """Return a direct SimpleTag name without altering nested tag payloads."""
+    for child_id, child_raw in _raw_children(_element_payload(raw_simple_tag)):
+        if child_id == TAG_NAME_ID:
+            return _element_payload(child_raw).decode("utf-8", "replace").rstrip("\0")
+    return ""
+
+
 def rewrite_tag_target_uids(
     raw_tags: bytes,
     *,
     track_uids: dict[int, int],
     attachment_uids: dict[int, int],
     drop_chapter_targets: bool = False,
+    drop_track_statistics: bool = False,
 ) -> bytes:
-    """Remap copied Tag targets and discard tags whose target was not selected."""
+    """Remap copied Tag targets and discard tags whose target was not selected.
+
+    Fresh per-track statistics are generated from packets by the native
+    assembler.  When requested, stale technical statistics attached to a
+    selected source track are dropped before those fresh values are appended.
+    """
     rebuilt_tags: list[bytes] = []
     for child_id, child_raw in _raw_children(_element_payload(raw_tags)):
         if child_id != TAG_ID:
@@ -93,9 +112,22 @@ def rewrite_tag_target_uids(
             continue
         rebuilt_tag: list[bytes] = []
         keep_tag = True
+        remapped_track_target = False
+        has_tag_value = False
         for tag_child_id, tag_child_raw in _raw_children(_element_payload(child_raw)):
+            if tag_child_id == SIMPLE_TAG_ID:
+                if (
+                    drop_track_statistics
+                    and remapped_track_target
+                    and _simple_tag_name(tag_child_raw).upper() in _TRACK_STATISTICS_TAGS
+                ):
+                    continue
+                rebuilt_tag.append(tag_child_raw)
+                has_tag_value = True
+                continue
             if tag_child_id != TARGETS_ID:
                 rebuilt_tag.append(tag_child_raw)
+                has_tag_value = True
                 continue
             rebuilt_targets: list[bytes] = []
             for target_id, target_raw in _raw_children(_element_payload(tag_child_raw)):
@@ -110,11 +142,13 @@ def rewrite_tag_target_uids(
                 if old_uid and old_uid not in uid_map:
                     keep_tag = False
                     break
+                if target_id == TAG_TRACK_UID_ID and old_uid in track_uids:
+                    remapped_track_target = True
                 rebuilt_targets.append(uint_element(target_id, uid_map.get(old_uid, old_uid)))
             if not keep_tag:
                 break
             rebuilt_tag.append(element(TARGETS_ID, b"".join(rebuilt_targets)))
-        if keep_tag:
+        if keep_tag and has_tag_value:
             rebuilt_tags.append(element(TAG_ID, b"".join(rebuilt_tag)))
     return element(TAGS_ID, b"".join(rebuilt_tags))
 
@@ -314,6 +348,50 @@ def build_tags_element(tags: dict[str, str]) -> bytes:
         body = string_element(TAG_NAME_ID, str(name).upper()) + string_element(TAG_STRING_ID, str(value))
         simple.append(element(SIMPLE_TAG_ID, body))
     return element(TAGS_ID, element(TAG_ID, element(TARGETS_ID, b"") + b"".join(simple))) if simple else b""
+
+
+def _format_statistics_duration(duration_ns: int) -> str:
+    seconds, nanos = divmod(max(0, duration_ns), 1_000_000_000)
+    hours, seconds = divmod(seconds, 3_600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{nanos:09d}"
+
+
+def build_track_statistics_tags_element(
+    statistics: dict[int, tuple[int, int, int]],
+) -> bytes:
+    """Build stable, interoperable per-track statistics.
+
+    Each value is ``(frame_count, payload_bytes, duration_ns)``.  These are
+    ordinary Matroska tags rather than EBML fields; MediaInfo uses
+    ``NUMBER_OF_FRAMES`` as the text-subtitle element count.
+    """
+    tags: list[bytes] = []
+    for track_uid, (frame_count, payload_bytes, duration_ns) in sorted(statistics.items()):
+        if frame_count <= 0:
+            continue
+        # Keep statistics at millisecond precision even when the Matroska
+        # TimestampScale is finer; this is what common inspection tools
+        # expect when presenting BPS and DURATION.
+        statistics_duration_ns = ((max(0, duration_ns) + 500_000) // 1_000_000) * 1_000_000
+        values = {
+            "BPS": str((payload_bytes * 8_000_000_000) // statistics_duration_ns) if statistics_duration_ns else "0",
+            "DURATION": _format_statistics_duration(statistics_duration_ns),
+            "NUMBER_OF_FRAMES": str(frame_count),
+            "NUMBER_OF_BYTES": str(payload_bytes),
+        }
+        simple = b"".join(
+            element(
+                SIMPLE_TAG_ID,
+                string_element(TAG_NAME_ID, name) + string_element(TAG_STRING_ID, value),
+            )
+            for name, value in values.items()
+        )
+        tags.append(element(
+            TAG_ID,
+            element(TARGETS_ID, uint_element(TAG_TRACK_UID_ID, track_uid)) + simple,
+        ))
+    return element(TAGS_ID, b"".join(tags)) if tags else b""
 
 
 def _plan_info(plan: MatroskaMuxPlan, duration_ns: int) -> bytes:
@@ -583,5 +661,6 @@ class MatroskaWriter:
 __all__ = [
     "MatroskaWriteCancelled", "MatroskaWriteProgress", "MatroskaWriter",
     "build_attachments_element", "build_chapters_element",
-    "build_tags_element", "rewrite_tag_target_uids",
+    "build_tags_element", "build_track_statistics_tags_element",
+    "rewrite_tag_target_uids",
 ]

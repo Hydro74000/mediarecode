@@ -3088,3 +3088,14 @@ def test_remux_panel_backend_selector_is_initialized_but_job_local(qt_app):
 
     assert panel._mux_backend_combo.currentData() == "ffmpeg"
     assert config.matroska_mux_backend == "native"
+
+
+def test_remux_panel_refreshes_backend_after_settings_save(qt_app):
+    config = AppConfig()
+    config.matroska_mux_backend = "native"
+    panel = RemuxPanel(config)
+
+    config.matroska_mux_backend = "ffmpeg"
+    panel.refresh_runtime_settings()
+
+    assert panel._mux_backend_combo.currentData() == "ffmpeg"

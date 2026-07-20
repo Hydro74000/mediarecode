@@ -207,7 +207,7 @@ Backend remux Matroska natif (par défaut via `auto`) :
 - écrit exclusivement des sorties `.mkv` multi-pistes avec ordre, timecodes et payloads conservés ;
 - conserve les propriétés imbriquées des pistes, le lacing, les BlockGroups, HDR10/HDR10+/Dolby Vision, chapitres, tags ciblés et pièces jointes lorsque le plan les sélectionne ;
 - produit des UIDs stables et écrit d'abord `sortie.mkv.partial`, validé par le lecteur interne et `ffprobe`, avant renommage atomique ;
-- ne cherche, n'embarque et n'exécute jamais `mkvmerge` ;
+- ne dépend d'aucun muxeur Matroska externe ;
 - canonicalise les conteneurs non Matroska en MKV temporaire par copie de flux avec FFmpeg ;
 - en mode `auto`, replie sur FFmpeg lorsque le diagnostic natif annonce une fonction non transposable ; `native` interdit ce repli.
 
@@ -215,7 +215,7 @@ Backend remux `ffmpeg` (forçable avec `mux_backend: "ffmpeg"`) :
 
 - sortie limitée à `MKV`
 - écrit la langue de piste en BCP47 sur `language` (ex. `fr-FR`) et purge le champ legacy `language-ietf` pour éviter les doublons incohérents
-- corrige au besoin les tags de langue Matroska en post-action, sans repasser par MKVToolNix
+- corrige au besoin les tags de langue Matroska en post-action, sans outil externe
 - permet la recopie ou l'édition des chapitres
 - permet d'écrire les tags globaux choisis
 - permet de recopier les pièces jointes source sélectionnées et d'ajouter des fichiers externes (cover incluse)
@@ -223,14 +223,14 @@ Backend remux `ffmpeg` (forçable avec `mux_backend: "ffmpeg"`) :
 - télécharge la cover TMDB différée juste avant l'exécution (dans le dossier temporaire du process), puis nettoie ce dossier en fin de run
 - purge explicitement les balises techniques source `ENCODER` et `CREATION_TIME` avant écriture des métadonnées de sortie
 - n'écrit plus le tag libre `MUXING_APPLICATION` via `-metadata`
-- applique un patch binaire post-action (sans MKVToolNix) sur le header Matroska pour écrire **MuxingApp** (`0x4D80`) à la valeur unique `Muxiveo {version}` ; **WritingApp** (`0x5741`) reste intact
+- applique un patch binaire post-action sur le header Matroska pour écrire **MuxingApp** (`0x4D80`) à la valeur unique `Muxiveo {version}` ; **WritingApp** (`0x5741`) reste intact
 
 Limites diagnostiquées :
 
 - une piste chiffrée, une structure EBML illisible ou un sous-titre nécessitant OCR est refusé en `native` ;
 - une réécriture de synchronisation avancée encore matérialisée par FFmpeg déclenche le repli en `auto` ;
 - le backend FFmpeg historique ne garantit pas les structures avancées de tags ciblés ni `track-enabled` ;
-- l'équivalence annoncée avec MKVToolNix est sémantique, jamais octet à octet.
+- l'équivalence annoncée avec les muxeurs de référence est sémantique, jamais octet à octet.
 
 Le script autonome `scripts/concat_video.py` est l'unique exception : `--mkvmerge`
 force MKVToolNix et, sans option, la sélection est Muxiveo puis `mkvmerge` puis
@@ -578,7 +578,7 @@ Règles importantes :
 - l'écart de frame count doit être **<= 4 images**
 - le remux final conserve l'audio et les sous-titres de Film 1
 
-Le workflow UI Fusion DoVi/HDR10+ est désormais **FFmpeg-only** pour l'extraction HEVC et le remux final (plus de dépendance MKVToolNix dans ce panneau).
+Le workflow UI Fusion DoVi/HDR10+ est désormais **FFmpeg-only** pour l'extraction HEVC et le remux final.
 
 Profils Dolby Vision proposés :
 

@@ -76,8 +76,6 @@ class ToolPaths:
     mediainfo: str
     dovi_tool: str
     hdr10plus_tool: str
-    mkvinfo: str
-    mkvmerge: str
 
 
 @dataclass(frozen=True)
@@ -196,8 +194,6 @@ def create_tool_wrappers(distrobox_name: str | None = None) -> ToolPaths:
         mediainfo=_resolve_tool("mediainfo", distrobox_name=distrobox_name),
         dovi_tool=_resolve_tool("dovi_tool", distrobox_name=distrobox_name),
         hdr10plus_tool=_resolve_tool("hdr10plus_tool", distrobox_name=distrobox_name),
-        mkvinfo=_resolve_tool("mkvinfo", distrobox_name=distrobox_name),
-        mkvmerge=_resolve_tool("mkvmerge", distrobox_name=distrobox_name),
     )
 
 
@@ -208,8 +204,6 @@ def tool_versions(tools: ToolPaths) -> dict[str, str]:
         "mediainfo": first_line(run_cmd([tools.mediainfo, "--Version"]).stdout),
         "dovi_tool": first_line(run_cmd([tools.dovi_tool, "--version"]).stdout),
         "hdr10plus_tool": first_line(run_cmd([tools.hdr10plus_tool, "--version"]).stdout),
-        "mkvinfo": first_line(run_cmd([tools.mkvinfo, "--version"]).stdout),
-        "mkvmerge": first_line(run_cmd([tools.mkvmerge, "--version"]).stdout),
     }
 
 
@@ -904,28 +898,22 @@ def finalize_case(
     return result
 
 
-def append_oracle_checks(result: dict[str, Any], tools: ToolPaths) -> dict[str, Any]:
+def append_output_checks(result: dict[str, Any], tools: ToolPaths) -> dict[str, Any]:
     output = Path(str(result.get("output") or ""))
     if result.get("status") == "fail" or not output.is_file():
-        result["oracle_checks"] = {
-            "mkvinfo_check_mode": False,
-            "mkvmerge_identify": False,
-        }
+        result["output_checks"] = {"ffprobe": False}
         return result
     checks: dict[str, bool] = {}
     diagnostics: list[str] = []
-    for name, command in (
-        ("mkvinfo_check_mode", [tools.mkvinfo, "--check-mode", str(output)]),
-        ("mkvmerge_identify", [tools.mkvmerge, "-J", str(output)]),
-    ):
+    for name, command in (("ffprobe", [tools.ffprobe, "-v", "error", "-show_format", str(output)]),):
         proc = run_cmd(command, check=False)
         checks[name] = proc.returncode == 0
         if proc.returncode != 0:
             diagnostics.append(f"{name}: {(proc.stderr or proc.stdout or '').strip()}")
-    result["oracle_checks"] = checks
+    result["output_checks"] = checks
     if not all(checks.values()):
         result["status"] = "fail"
-        result["error"] = "Oracle MKVToolNix échoué : " + " ; ".join(diagnostics)
+        result["error"] = "Validation de sortie échouée : " + " ; ".join(diagnostics)
     return result
 
 
@@ -1815,7 +1803,7 @@ def build_summary_markdown(report: dict[str, Any]) -> str:
         else:
             functional = "OK" if (not case.get("error") and all(case.get("functional_checks", {}).values())) else "KO"
             cleanup = "OK" if (not case.get("error") and all(case.get("cleanup_checks", {}).values())) else "KO"
-        oracles = "OK" if all(case.get("oracle_checks", {}).values()) else "KO"
+        oracles = "OK" if all(case.get("output_checks", {}).values()) else "KO"
         notes = "; ".join(case.get("notes", [])[:2])
         lines.append(
             "| "
@@ -1904,7 +1892,7 @@ def main(argv: list[str] | None = None) -> int:
         result = runner()
         if not result.get("backend"):
             result["backend"] = "ffmpeg"
-        result = append_oracle_checks(result, tools)
+        result = append_output_checks(result, tools)
         append_case_result(report, result)
 
     final_report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))

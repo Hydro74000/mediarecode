@@ -44,6 +44,7 @@ from .validation import TRACK_TYPE_LABELS
 from .writer import (
     build_attachments_element,
     build_chapters_element,
+    build_track_statistics_tags_element,
     build_tags_element,
     rewrite_tag_target_uids,
 )
@@ -268,6 +269,7 @@ def compile_assembly_plan(plan: MatroskaAssemblyPlan) -> MatroskaMuxPlan:
     timestamp_scale_ns = timestamp_scale_ns or 1_000_000
 
     output_tracks: list[MatroskaMuxTrack] = []
+    statistics_sources: list[tuple[int, Path, int, int, int]] = []
     track_uid_maps: dict[Path, dict[int, int]] = {}
     # artefact → numéro de piste source → [(piste sortie, offset ms)].
     packet_routes: dict[Path, dict[int, list[tuple[int, int]]]] = {}
@@ -330,6 +332,13 @@ def compile_assembly_plan(plan: MatroskaAssemblyPlan) -> MatroskaMuxPlan:
             patch_flags=track.flags is not None,
         ))
         offset = int(track.time_shift_ms or 0)
+        statistics_sources.append((
+            uid,
+            track.artifact,
+            source_track.number,
+            offset * 1_000_000,
+            source_track.default_duration_ns,
+        ))
         packet_routes.setdefault(track.artifact, {}).setdefault(
             source_track.number, []).append((output_index, offset))
 
@@ -419,6 +428,7 @@ def compile_assembly_plan(plan: MatroskaAssemblyPlan) -> MatroskaMuxPlan:
                     track_uids=track_uid_maps.get(source, {}),
                     attachment_uids=attachment_uid_maps.get(source, {}),
                     drop_chapter_targets=plan.chapter_entries is not None,
+                    drop_track_statistics=True,
                 )
                 for raw in readers[source].raw_top_level(TAGS_ID)
             )
@@ -426,6 +436,68 @@ def compile_assembly_plan(plan: MatroskaAssemblyPlan) -> MatroskaMuxPlan:
             title_tag = build_tags_element({"title": plan.title_tag_value.strip()})
             if title_tag:
                 opaque.append(title_tag)
+
+    # Regenerate BPS, DURATION, NUMBER_OF_FRAMES and NUMBER_OF_BYTES from the
+    # selected output packets:
+    # source values are stale after selection, offsets or a track remap.  This
+    # remains a bounded streaming pass and does not materialize packet data.
+    statistics_routes: dict[Path, dict[int, list[tuple[int, int, int]]]] = {}
+    statistics: dict[int, dict[str, int]] = {}
+    for output_uid, source_path, source_track_number, offset_ns, default_duration_ns in statistics_sources:
+        statistics_routes.setdefault(source_path, {}).setdefault(
+            source_track_number, [],
+        ).append((output_uid, offset_ns, default_duration_ns))
+        statistics[output_uid] = {
+            "frame_count": 0,
+            "payload_bytes": 0,
+            "duration_ns": 0,
+            "last_timestamp_ns": -1,
+            "last_delta_ns": 0,
+        }
+    for source_path, routes in statistics_routes.items():
+        for block in readers[source_path].blocks():
+            targets = routes.get(block.track_number)
+            if not targets:
+                continue
+            timestamp_ns = (
+                block.timestamp_ns
+                if block.timestamp_ns is not None
+                else block.timestamp_ms * 1_000_000
+            )
+            explicit_duration_ns = (
+                block.duration_ns
+                if block.duration_ns is not None
+                else ((block.duration_ms or 0) * 1_000_000 if block.duration_ms is not None else None)
+            )
+            for output_uid, offset_ns, default_duration_ns in targets:
+                shifted_timestamp_ns = timestamp_ns + offset_ns
+                if shifted_timestamp_ns < 0:
+                    continue
+                item = statistics[output_uid]
+                item["frame_count"] += 1
+                item["payload_bytes"] += len(block.payload)
+                previous_timestamp_ns = item["last_timestamp_ns"]
+                if shifted_timestamp_ns > previous_timestamp_ns >= 0:
+                    item["last_delta_ns"] = shifted_timestamp_ns - previous_timestamp_ns
+                item["last_timestamp_ns"] = shifted_timestamp_ns
+                duration_ns = explicit_duration_ns
+                if duration_ns is None and default_duration_ns:
+                    duration_ns = default_duration_ns * max(1, block.lace_count)
+                if duration_ns is None:
+                    duration_ns = item["last_delta_ns"]
+                item["duration_ns"] = max(
+                    item["duration_ns"], shifted_timestamp_ns + duration_ns,
+                )
+    statistics_tags = build_track_statistics_tags_element({
+        output_uid: (
+            values["frame_count"],
+            values["payload_bytes"],
+            values["duration_ns"],
+        )
+        for output_uid, values in statistics.items()
+    })
+    if statistics_tags:
+        opaque.append(statistics_tags)
 
     info_source = plan.segment_info_source or plan.ordered_tracks[0].artifact
     info_reader = readers[info_source]

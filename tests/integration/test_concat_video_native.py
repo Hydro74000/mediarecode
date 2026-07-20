@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(
     [(True, False), (False, True), (True, True)],
     ids=("intro", "outro", "intro-outro"),
 )
-def test_concat_uses_muxiveo_native_without_mkvmerge(
+def test_concat_uses_muxiveo_native(
     tmp_path: Path,
     monkeypatch,
     use_intro: bool,
@@ -41,7 +41,6 @@ def test_concat_uses_muxiveo_native_without_mkvmerge(
     make_av_container(intro, duration=0.3, vcodec="libx264", acodec="aac")
     make_av_container(outro, duration=0.3, vcodec="libx264", acodec="aac")
     monkeypatch.setattr(concat_video, "MUXIVEO", str(ROOT / "main.py"))
-    monkeypatch.setattr(concat_video, "MKVMERGE", str(tmp_path / "missing-mkvmerge"))
     monkeypatch.setattr(concat_video, "FFMPEG", shutil.which("ffmpeg"))
     monkeypatch.setattr(concat_video, "FFPROBE", shutil.which("ffprobe"))
     monkeypatch.setattr(concat_video, "MEDIAINFO", shutil.which("mediainfo"))

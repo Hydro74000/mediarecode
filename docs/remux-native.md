@@ -36,6 +36,9 @@ commande FFmpeg v1 comme référence et ajoute `selected_backend`, `plan_version
 - propriétés vidéo/audio/sous-titres imbriquées, CodecPrivate, langues legacy
   et BCP-47, flags, couleur/mastering, CLL/FALL et `BlockAdditionMapping` ;
 - chapitres, tags ciblés et attachments recopiés avec remappage de leurs UIDs ;
+- statistiques mkvmerge de chaque piste régénérées (`BPS`, `DURATION`,
+  `NUMBER_OF_FRAMES`, `NUMBER_OF_BYTES`) pour conserver le compteur
+  d'éléments dans MediaInfo et lors d'une réinspection ;
 - Cues de keyframes avec `CueRelativePosition`, plus index audio seul ;
 - écriture dans `.partial`, validation interne puis `ffprobe`, et renommage
   atomique. Un échec supprime le partiel et préserve une sortie antérieure.

@@ -11,7 +11,11 @@ from core.matroska.ids import (
 )
 from core.matroska.mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack, deterministic_uid
 from core.matroska.reader import MatroskaBlock, MatroskaReader, MatroskaTrack
-from core.matroska.writer import MatroskaWriter, rewrite_tag_target_uids
+from core.matroska.writer import (
+    MatroskaWriter,
+    build_track_statistics_tags_element,
+    rewrite_tag_target_uids,
+)
 
 
 def source_track(number: int, uid: int, codec: str, kind: int) -> MatroskaTrack:
@@ -80,6 +84,34 @@ def test_writer_emits_segment_title(tmp_path: Path) -> None:
     )
     MatroskaWriter().write(plan)
     assert MatroskaReader(output).segment_title() == "Titre exact"
+
+
+def test_track_statistics_tag_exposes_subtitle_element_count() -> None:
+    """Track statistics remain visible to MediaInfo after native remux."""
+    tags = build_track_statistics_tags_element({
+        1234: (2, 29, 550_000_000),
+        5678: (0, 0, 0),
+    })
+
+    for name in (b"BPS", b"DURATION", b"NUMBER_OF_FRAMES", b"NUMBER_OF_BYTES"):
+        assert name in tags
+    assert b"00:00:00.550000000" in tags
+    assert b"421" in tags
+    assert uint_element(TAG_TRACK_UID_ID, 1234) in tags
+    assert uint_element(TAG_TRACK_UID_ID, 5678) not in tags
+
+
+def test_fresh_track_statistics_replace_copied_source_statistics() -> None:
+    old_statistics = build_track_statistics_tags_element({1234: (1, 10, 100_000_000)})
+
+    rewritten = rewrite_tag_target_uids(
+        old_statistics,
+        track_uids={1234: 5678},
+        attachment_uids={},
+        drop_track_statistics=True,
+    )
+
+    assert b"NUMBER_OF_FRAMES" not in rewritten
 
 
 def test_copied_track_tag_uid_is_remapped() -> None:

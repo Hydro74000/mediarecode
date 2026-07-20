@@ -37,13 +37,13 @@ def test_distrobox_wrapper_pins_inner_absolute_tool_path(
         matrix.subprocess,
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
-            args=args[0], returncode=0, stdout="/usr/bin/mkvmerge\n", stderr="",
+            args=args[0], returncode=0, stdout="/usr/bin/mediainfo\n", stderr="",
         ),
     )
 
-    wrapper = Path(matrix._resolve_tool("mkvmerge", distrobox_name="my-distrobox"))
+    wrapper = Path(matrix._resolve_tool("mediainfo", distrobox_name="my-distrobox"))
     content = wrapper.read_text(encoding="utf-8")
 
     assert "'/usr/bin/distrobox' 'enter' '-n' 'my-distrobox'" in content
-    assert "'/usr/bin/mkvmerge'" in content
-    assert "'mkvmerge'" not in content
+    assert "'/usr/bin/mediainfo'" in content
+    assert "'mediainfo'" not in content
