@@ -63,7 +63,7 @@ def test_cli_inspect_validate_preview_on_synthetic_media(tmp_path: Path) -> None
     preview = _run_cli(root, "preview", "--config", str(config))
     assert preview.returncode == 0, preview.stderr
     assert "ffmpeg" in preview.stdout
-    assert str(out) in preview.stdout
+    assert out.as_posix() in preview.stdout
 
     validate_json = _run_cli(root, "validate", "--config", str(config), "--json")
     assert validate_json.returncode == 0, validate_json.stderr
@@ -371,7 +371,7 @@ def test_cli_batch_input_dir_supports_exact_job_template(tmp_path: Path) -> None
         "--dry-run",
     )
     assert result.returncode == 0, result.stderr
-    assert str(out_root / "episode.mkv") in result.stdout
+    assert (out_root / "episode.mkv").as_posix() in result.stdout
 
 
 def test_cli_preview_respects_multisource_explicit_track_order(tmp_path: Path) -> None:
