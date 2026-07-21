@@ -217,3 +217,20 @@ class TestLauncherWindowsControlledFolderAccess:
         fake_cli.main.assert_called_once_with(["preview", "--config", "job.json"])
         fake_main.main.assert_not_called()
         mock_setup.assert_not_called()
+
+
+class TestLauncherMacOSFirstInstall:
+    def test_missing_homebrew_blocks_setup_without_creating_config_marker(self, tmp_path):
+        fake_setup = SimpleNamespace(_default_prefix=lambda: tmp_path / "tools")
+
+        with patch.object(launcher.sys, "platform", "darwin"), \
+             patch("platform.system", return_value="Darwin"), \
+             patch.dict(sys.modules, {"setup": fake_setup}), \
+             patch.object(launcher.shutil, "which", return_value=None), \
+             patch.object(launcher, "_macos_show_homebrew_required_popup") as popup, \
+             patch("builtins.input", return_value=""):
+            rc = launcher._run_first_time_setup(tmp_path)
+
+        assert rc == launcher.SETUP_RC_ERROR
+        assert not (tmp_path / "config.ini").exists()
+        popup.assert_called_once_with()

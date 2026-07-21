@@ -103,7 +103,7 @@ facultatif et son absence conserve tous les jobs v1 existants :
 
 `--mux-backend auto|native|ffmpeg` surcharge le job pour `validate`, `preview`,
 `run`, `remux`, `batch` et les variantes basées sur un profil. La préférence
-persistée `[remux] mux_backend = auto` ne remplace pas un choix explicite du job.
+persistée `[matroska] mux_backend = auto` ne remplace pas un choix explicite du job.
 
 ### `sources`
 

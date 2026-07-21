@@ -326,8 +326,15 @@ GITHUB_TOOLS: dict[str, dict] = {
             # Linux : .deb (Debian/Ubuntu) puis fallback .rpm (Fedora/RHEL).
             ("Linux",   "x86_64"): {"suffix": "_amd64.deb",       "fmt": "deb",
                                     "alt_suffix": ".x86_64.rpm",  "alt_fmt": "rpm"},
-            # Windows : archive 7z. Nécessite py7zr (déclaré ci-dessous).
-            ("Windows", "x86_64"): {"suffix": "_x64.7z",          "fmt": "7z"},
+            # Le ZIP officiel AviUtl contient la distribution x64 complète de
+            # NVEncC (exe et DLL). Il est extrait avec Expand-Archive, présent
+            # nativement dans PowerShell, plutôt qu'avec un décompresseur 7z
+            # ajouté à l'installation utilisateur.
+            ("Windows", "x86_64"): {
+                "name_prefix": "Aviutl_NVEnc_",
+                "suffix": ".zip",
+                "fmt": "zip",
+            },
         },
     },
 }
@@ -1209,7 +1216,8 @@ def install_python_packages(dry_run: bool, force: bool = False) -> None:
 
     missing = []
     for pkg in PYTHON_PACKAGES:
-        module = pkg.split("[")[0].lower().replace("-", "_")
+        module = re.split(r"[<>=!~]", pkg, maxsplit=1)[0]
+        module = module.split("[", 1)[0].lower().replace("-", "_")
         try:
             __import__(module)
             ok(f"{pkg} already installed")
@@ -1927,15 +1935,16 @@ def _windows_download_file(url: str, dest: Path) -> None:
         stderr = (result.stderr or "").strip()
         raise RuntimeError(stderr or f"curl exited with {result.returncode}")
 
-def _find_asset(release: dict, suffix: str) -> Optional[str]:
-    """Return the browser_download_url of the first asset whose name ends with suffix."""
+def _find_asset(release: dict, suffix: str, *, name_prefix: str = "") -> Optional[str]:
+    """Return the URL of the first release asset matching a suffix and optional prefix."""
     for asset in release.get("assets", []):
-        if asset["name"].endswith(suffix):
+        name = str(asset.get("name") or "")
+        if name.endswith(suffix) and (not name_prefix or name.startswith(name_prefix)):
             return asset["browser_download_url"]
     return None
 
 def _extract_binary(archive_path: Path, binary_name: str, fmt: str, dest_dir: Path) -> Path:
-    """Extract binary_name from archive (tar.gz / zip / deb / rpm / 7z) into dest_dir."""
+    """Extract binary_name from a tar.gz, ZIP, deb or RPM archive into dest_dir."""
     if fmt == "tar.gz":
         with tarfile.open(archive_path, "r:gz") as tar:
             member = next(
@@ -1962,8 +1971,6 @@ def _extract_binary(archive_path: Path, binary_name: str, fmt: str, dest_dir: Pa
         _extract_deb_binary(archive_path, binary_name, dest_dir)
     elif fmt == "rpm":
         _extract_rpm_binary(archive_path, binary_name, dest_dir)
-    elif fmt == "7z":
-        _extract_7z_binary(archive_path, binary_name, dest_dir)
     else:
         raise RuntimeError(f"Unknown archive format: {fmt}")
 
@@ -2053,26 +2060,52 @@ def _extract_rpm_binary(archive_path: Path, binary_name: str, dest_dir: Path) ->
     shutil.copy2(candidates[0], dest_dir / binary_name)
 
 
-def _extract_7z_binary(archive_path: Path, binary_name: str, dest_dir: Path) -> None:
-    """Extrait ``binary_name`` d'une archive .7z via ``py7zr`` (Python pur)."""
-    try:
-        import py7zr  # type: ignore[import-not-found]
-    except ImportError as exc:
+def _install_windows_nvencc_zip(archive_path: Path, dest_dir: Path) -> Path:
+    """Install the complete x64 NVEncC distribution with native PowerShell ZIP support."""
+    powershell = _windows_powershell()
+    if not powershell:
         raise RuntimeError(
-            "py7zr required to extract .7z archives. "
-            "Install via 'pip install py7zr' (auto-installé par setup.py si requirements.txt à jour)."
-        ) from exc
-    extract_dir = dest_dir / "_7z_extracted"
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    with py7zr.SevenZipFile(archive_path, mode="r") as z:
-        z.extractall(path=extract_dir)
-    candidates = list(extract_dir.rglob(binary_name))
+            "PowerShell is required to extract the official NVEncC ZIP archive on Windows."
+        )
+
+    extract_dir = archive_path.parent / "nvencc_zip"
+    env = os.environ.copy()
+    env["MR_ARCHIVE"] = str(archive_path)
+    env["MR_EXTRACT"] = str(extract_dir)
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "Expand-Archive -LiteralPath $env:MR_ARCHIVE "
+        "-DestinationPath $env:MR_EXTRACT -Force"
+    )
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        **_windows_no_window_subprocess_kwargs(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "PowerShell Expand-Archive failed").strip())
+
+    binary_name = WINDOWS_TOOL_FILENAMES["nvencc"][0]
+    candidates = [
+        path for path in extract_dir.rglob("*")
+        if path.is_file() and path.name.lower() == binary_name.lower()
+    ]
     if not candidates:
-        candidates = [p for p in extract_dir.rglob("*")
-                      if p.is_file() and p.name.lower() == binary_name.lower()]
-    if not candidates:
-        raise RuntimeError(f"Binary '{binary_name}' not found inside .7z archive")
-    shutil.copy2(candidates[0], dest_dir / binary_name)
+        raise RuntimeError(f"Binary '{binary_name}' not found inside NVEncC ZIP archive")
+
+    source_dir = candidates[0].parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for source in source_dir.iterdir():
+        if source.is_file():
+            shutil.copy2(source, dest_dir / source.name)
+
+    installed = dest_dir / binary_name
+    if not installed.is_file():
+        raise RuntimeError(f"NVEncC installation is incomplete: {installed} is missing")
+    return installed
 
 
 def _is_atomic_distro() -> bool:
@@ -2323,7 +2356,11 @@ def install_github_tools(
         info(f"Latest release: {tag}")
 
         # Sélection asset : suffix principal puis alt_suffix (ex: .deb → .rpm).
-        download_url = _find_asset(release, pattern["suffix"])
+        download_url = _find_asset(
+            release,
+            pattern["suffix"],
+            name_prefix=pattern.get("name_prefix", ""),
+        )
         chosen_fmt = pattern["fmt"]
         if not download_url and pattern.get("alt_suffix"):
             download_url = _find_asset(release, pattern["alt_suffix"])
@@ -2362,14 +2399,21 @@ def install_github_tools(
 
             # Fallback : extraction binaire pure (pas de gestion des deps libs).
             try:
-                extracted = _extract_binary(archive_path, binary_name, chosen_fmt, tmp_path)
+                if OS == "Windows" and exe == "nvencc" and chosen_fmt == "zip":
+                    extracted = _install_windows_nvencc_zip(archive_path, bin_dir)
+                else:
+                    extracted = _extract_binary(archive_path, binary_name, chosen_fmt, tmp_path)
             except RuntimeError as exc:
                 warn(f"{exe}: extraction failed ({exc}). Skipping.")
                 continue
 
             info(f"Installing to {dest}")
 
-            if use_sudo and not is_root():
+            if OS == "Windows" and exe == "nvencc" and chosen_fmt == "zip":
+                # The native extractor above already copied the complete runtime
+                # next to NVEncC64.exe, including its required DLLs.
+                dest = extracted
+            elif use_sudo and not is_root():
                 run(sudo + ["mkdir", "-p", str(bin_dir)])
                 run(sudo + ["install", "-m", "755", str(extracted), str(dest)])
             else:

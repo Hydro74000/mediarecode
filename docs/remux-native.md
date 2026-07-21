@@ -10,8 +10,9 @@ différer.
 ## Sélection du backend
 
 Le job v1 accepte `"mux_backend": "auto" | "native" | "ffmpeg"`. Le champ est
-facultatif et vaut `auto` par défaut. L'interface propose le même choix pour le
-job courant et initialise le sélecteur depuis `[remux] mux_backend`.
+facultatif : lorsqu'il est absent, le réglage global `[matroska] mux_backend`
+est utilisé, avec `ffmpeg` comme défaut. L'interface propose le même choix pour
+le job courant et initialise le sélecteur depuis ce réglage global.
 
 - `auto` inspecte les sources et les préparations, puis utilise le natif si le
   contrat est transposable. Sinon le repli FFmpeg est explicite dans le log.

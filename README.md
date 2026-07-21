@@ -4,7 +4,7 @@ FULL Vibecoded App for Proof of Concept - no human code, only human prompts and 
 
 Interface graphique pour préparer des fichiers vidéo, remuxer sans perte, réencoder avec `ffmpeg` (et `NVencC` en option pour NVidia), et fusionner des métadonnées Dolby Vision / HDR10+.
 
-Cette documentation correspond à **Muxiveo v3.1.0**.
+Cette documentation correspond à **Muxiveo v3.1.2**.
 
 ## Sommaire
 
@@ -68,7 +68,7 @@ L'appimage AllInc inclue toutes les dépendances.
 | Cible | Binaire | 
 |-------|----------|
 | AppImage Linux | Muxiveo-x86_64_allinc-<version>.AppImage` + `dist/releases/Muxiveo-x86_64_allinc-<version>.AppImage.zsync` |
-| Package macOS natif | `Muxiveo-<version>.dmg` |
+| Package macOS natif | `Muxiveo-<version>.dmg` (Homebrew requis au premier lancement pour installer les outils système) |
 | Installateur Windows | `dist/releases/Muxiveo-Setup-<version>.exe` |
 | Release Homebrew Linux/macOS (preview)| `brew tap Hydro74000/muxiveo && brew install muxiveo` |
 
@@ -98,7 +98,7 @@ Le script `setup.py` installe automatiquement :
 |------------|----------|---------|
 | Linux Debian / Ubuntu | `python3 setup.py` | installe `ffmpeg`, `mediainfo` via `apt`, puis `dovi_tool` et `hdr10plus_tool` depuis GitHub |
 | Linux Fedora / RHEL | `python3 setup.py` | active RPM Fusion si nécessaire, installe `ffmpeg`, `mediainfo` via `dnf`, puis les outils GitHub |
-| macOS | `python3 setup.py` | installe `ffmpeg`, `mediainfo` via Homebrew, puis `dovi_tool` et `hdr10plus_tool` |
+| macOS | `python3 setup.py` | nécessite Homebrew ; installe `ffmpeg`, `mediainfo` via Homebrew, puis `dovi_tool` et `hdr10plus_tool` |
 | Windows | `py setup.py` | installe `ffmpeg` et `mediainfo` via `winget`, place `dovi_tool` et `hdr10plus_tool` dans `Muxiveo\tools`, puis renseigne `config.ini` avec les chemins détectés |
 
 Options utiles du script :
@@ -177,7 +177,7 @@ Le workflow unifié permet de :
 - **offload matériel complet** : décodage GPU activé automatiquement quand un encodeur matériel compatible est sélectionné (`cuda` pour NVENC, `qsv` pour QSV, `vaapi` pour VAAPI, `d3d11va` pour AMF Windows) — le CPU n'est plus sollicité pour le décodage en chemin pur hardware
 - configuration VAAPI optimisée : `rc_mode CQP/VBR` selon le mode qualité, `compression_level` exposé via preset, `async_depth 4` pour maximiser le pipeline GPU
 - precheck `force-8bit` pour les cibles **H.264** afin d'eviter certains chemins incompatibles
-- backend de remux nominal : writer Matroska natif, avec sélection `auto`, `native` ou `ffmpeg`
+- backend de remux configurable : `ffmpeg` par défaut, ou writer Matroska natif via `auto` / `native`
 
 Modes d'exécution :
 
@@ -641,7 +641,7 @@ Sous Windows, `setup.py` et le démarrage de l'application peuvent auto-détecte
 | `theme` | `dark` | thème visuel (`dark` ou `light`) |
 | `language` | auto-détecté | langue de l'interface (`fra` ou `eng`) |
 | `startup_panel` | `dashboard` | panneau ouvert au démarrage (`dashboard`, `container`, `encoding`, `dovi`, `settings`) |
-| `backend` (section `[remux]`) | `ffmpeg` | backend de remux (`ffmpeg`) |
+| `mux_backend` (section `[matroska]`) | `ffmpeg` | backend de muxage (`ffmpeg`, `auto` ou `native`) |
 | `tmdb_api_key` | vide | clé API TMDB v3 utilisée par la recherche IMDb/TMDB |
 | `tmdb_bearer_token` | vide | token Bearer TMDB v4 (utilisé si `tmdb_api_key` est vide, ou via `MUXIVEO_TMDB_BEARER_TOKEN`) |
 | `generate_nfo` | `true` | génère un fichier `.nfo` MediaInfo à côté du MKV final après workflow réussi |
@@ -688,8 +688,8 @@ output_dir = /mnt/nas/videos
 ffmpeg = /opt/ffmpeg/bin/ffmpeg
 dovi_tool = /usr/local/bin/dovi_tool
 
-[remux]
-backend = ffmpeg
+[matroska]
+mux_backend = ffmpeg
 
 [ui]
 theme = light
@@ -946,4 +946,4 @@ FFmpeg is licensed under LGPLv2.1+ or GPL depending on the build.
 This package includes a GPL-only FFmpeg build compiled without `--enable-nonfree`.
 The corresponding FFmpeg source code and build configuration are available at: [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg)
 
-*Muxiveo v3.1.0*
+*Muxiveo v3.1.2*
