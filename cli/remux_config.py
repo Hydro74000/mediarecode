@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,9 @@ from core.media_info_fetcher import (
     extract_year_from_filename,
 )
 from core.version import APP_CONFIG_DIR_NAME, APP_ENV_PREFIX
-from core.workflows.remux_models import RemuxConfig, SourceInput, TrackEntry, clone_track_entry
+from core.workflows.remux_models import (
+    RemuxConfig, SourceInput, TrackEntry, clone_track_entry, normalize_mux_backend,
+)
 from core.profiles.selectors import (
     SelectorResolutionError,
     apply_track_spec,
@@ -464,20 +467,25 @@ def build_remux_config(
         tmdb_wins=tmdb_wins,
     )
 
-    work_dir = Path(str(options.work_dir or job.get("work_dir") or config.work_dir)).expanduser()
+    work_dir = Path(str(options.work_dir or job.get("work_dir") or config.work_dir)).expanduser().resolve()
+    # Chemins résolus en absolu : les runners peuvent exécuter les commandes
+    # depuis un répertoire de travail différent du cwd de la CLI.
+    sources = [replace(source, path=source.path.expanduser().resolve()) for source in sources]
     return RemuxConfig(
         sources=sources,
-        output=output,
+        output=output.expanduser().resolve(),
         track_order=final_track_order,
         keep_chapters=keep_chapters,
         chapter_overrides=chapter_overrides,
         chapter_source_index=chapter_source_index,
-        extra_attachments=[Path(str(p)).expanduser() for p in job.get("extra_attachments", [])],
+        extra_attachments=[Path(str(p)).expanduser().resolve() for p in job.get("extra_attachments", [])],
         work_dir=work_dir,
         file_title=resolve_metadata_file_title(job, tmdb_title, tmdb_wins=tmdb_wins),
         tag_overrides=tag_overrides if isinstance(tag_overrides, dict) else None,
         tmdb_cover=tmdb_cover,
         allow_missing_output_dir=bool(job.get("_allow_missing_output_dir", False)),
+        # Job sans champ → réglage global [matroska] ; champ présent = choix explicite.
+        mux_backend=normalize_mux_backend(str(job.get("mux_backend", config.matroska_mux_backend))),
     )
 
 
@@ -488,6 +496,7 @@ def config_to_template(job: dict[str, Any], *, include_output: bool = False) -> 
         "chapters": job.get("chapters", {}),
         "tmdb": job.get("tmdb", False),
         "extra_attachments": job.get("extra_attachments", []),
+        "mux_backend": job.get("mux_backend", "ffmpeg"),
         "tag_overrides": job.get("tag_overrides", None),
     }
     if include_output and job.get("output"):

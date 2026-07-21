@@ -63,7 +63,7 @@ def test_cli_inspect_validate_preview_on_synthetic_media(tmp_path: Path) -> None
     preview = _run_cli(root, "preview", "--config", str(config))
     assert preview.returncode == 0, preview.stderr
     assert "ffmpeg" in preview.stdout
-    assert str(out) in preview.stdout
+    assert out.as_posix() in preview.stdout
 
     validate_json = _run_cli(root, "validate", "--config", str(config), "--json")
     assert validate_json.returncode == 0, validate_json.stderr
@@ -76,7 +76,28 @@ def test_cli_inspect_validate_preview_on_synthetic_media(tmp_path: Path) -> None
     preview_payload = json.loads(preview_json.stdout)
     assert preview_payload["valid"] is True
     assert preview_payload["command"][0] == "ffmpeg"
-    assert preview_payload["command_text"].startswith("ffmpeg")
+    # Défaut effectif sans configuration : FFmpeg (setting global [matroska]).
+    assert preview_payload["selected_backend"] == "ffmpeg"
+    assert preview_payload["plan_version"] == 1
+    assert preview_payload["execution_preview"]["action"] == "external_ffmpeg"
+
+    # Choix explicite du job : le natif reste prioritaire sur le setting.
+    config.write_text(
+        json.dumps({
+            "version": 1,
+            "sources": [{"path": str(src)}],
+            "output": str(out),
+            "mux_backend": "native",
+        }),
+        encoding="utf-8",
+    )
+    preview_native = _run_cli(root, "preview", "--config", str(config), "--json")
+    assert preview_native.returncode == 0, preview_native.stderr
+    native_payload = json.loads(preview_native.stdout)
+    assert native_payload["valid"] is True
+    assert native_payload["command_text"].startswith("# Backend: native Matroska")
+    assert native_payload["selected_backend"] == "native"
+    assert native_payload["execution_preview"]["action"] == "internal_matroska_write"
 
 
 def test_cli_remux_dry_run_refuses_invalid_json_before_inspection(tmp_path: Path) -> None:
@@ -184,6 +205,15 @@ def test_cli_profile_preview_on_synthetic_media(tmp_path: Path) -> None:
     assert payload["profile_report"]["applied_rules"] >= 1
     assert any(track["type"] == "audio" and track["title"] for track in payload["tracks"])
 
+    forced = _run_cli(
+        root, "preview", "--profile", str(profile), "-i", str(src), "-o", str(out),
+        "--mux-backend", "ffmpeg", "--json",
+    )
+    assert forced.returncode == 0, forced.stderr
+    forced_payload = json.loads(forced.stdout)
+    assert forced_payload["selected_backend"] == "ffmpeg"
+    assert forced_payload["mux_backend"] == "ffmpeg"
+
 
 def test_cli_profile_argument_falls_back_to_user_profile_dir_without_json_suffix(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
@@ -201,7 +231,11 @@ def test_cli_profile_argument_falls_back_to_user_profile_dir_without_json_suffix
         ),
         encoding="utf-8",
     )
-    env = {**os.environ, "XDG_CONFIG_HOME": str(xdg_home)}
+    env = {
+        **os.environ,
+        "XDG_CONFIG_HOME": str(xdg_home),
+        "MUXIVEO_CONFIG_HOME": str(xdg_home / "muxiveo"),
+    }
 
     result = _run_cli(root, "validate", "--profile", "SavedProfile", "--json", env=env)
 
@@ -337,7 +371,7 @@ def test_cli_batch_input_dir_supports_exact_job_template(tmp_path: Path) -> None
         "--dry-run",
     )
     assert result.returncode == 0, result.stderr
-    assert str(out_root / "episode.mkv") in result.stdout
+    assert (out_root / "episode.mkv").as_posix() in result.stdout
 
 
 def test_cli_preview_respects_multisource_explicit_track_order(tmp_path: Path) -> None:

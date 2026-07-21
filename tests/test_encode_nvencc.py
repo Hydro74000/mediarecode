@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -29,6 +28,7 @@ from core.workflows.encode.runtime.nvencc import (
     build_remux_cmd,
     detect_nvencc_available,
     is_nvencc_codec,
+    is_expected_nvencc_pipe_producer_exit,
     map_nvencc_video_transform_args,
     nvencc_binary_name,
     nvencc_intermediate_path,
@@ -47,6 +47,25 @@ class TestIsNvenccCodec:
 
     def test_case_insensitive(self):
         assert is_nvencc_codec("NVENCC_HEVC") is True
+
+
+class TestNvenccPipeProducerExit:
+    @pytest.mark.parametrize("returncode", [0, -13])
+    def test_accepts_normal_and_sigpipe_exits(self, returncode):
+        assert is_expected_nvencc_pipe_producer_exit(returncode, "") is True
+
+    def test_accepts_ffmpeg_broken_pipe_after_consumer_success(self):
+        assert is_expected_nvencc_pipe_producer_exit(
+            1,
+            "av_interleaved_write_frame(): Broken pipe",
+        ) is True
+
+    @pytest.mark.parametrize(
+        ("returncode", "stderr"),
+        [(1, "Invalid data found"), (2, "Broken pipe")],
+    )
+    def test_rejects_other_decode_failures(self, returncode, stderr):
+        assert is_expected_nvencc_pipe_producer_exit(returncode, stderr) is False
 
 
 class TestNvenccBinaryName:

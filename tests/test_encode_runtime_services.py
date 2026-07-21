@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -50,7 +49,9 @@ def test_estimate_inject_storage_requirements_counts_audio_and_attachments(tmp_p
         size_to_bitrate_kbps=lambda _config: pytest.fail("size mode should not be used"),
     )
 
-    assert work_required == (2 * 128 * 1024 * 1024) + (32 * 1024 * 1024)
+    # Pic lot 3 avec squelette de timing : au plus 2 copies vidéo simultanées
+    # + forfait squelette (payloads vides).
+    assert work_required == (2 * 128 * 1024 * 1024) + (64 * 1024 * 1024) + (32 * 1024 * 1024)
     assert output_required == (128 * 1024 * 1024) + (64 * 1024 * 1024) + 240_000 + 4_096
 
 
@@ -78,7 +79,6 @@ def test_ensure_inject_storage_available_raises_on_same_fs_shortfall(tmp_path):
 def test_attachment_preparation_service_extracts_only_attached_pics(tmp_path):
     src = tmp_path / "src.mkv"
     src.touch()
-    cover = tmp_path / "cover.png"
     font = tmp_path / "font.ttf"
     extracted: list[tuple[Path, int, Path]] = []
     cfg = _make_config(

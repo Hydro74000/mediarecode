@@ -23,8 +23,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QTabWidget,
+    QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -35,8 +34,8 @@ from core.i18n import apply_translations, set_current_language, translate_text
 from core.workflows.remux_models import TrackEntry
 from core.runner import TaskSignals
 from core.workflows.encode import (
-    AUDIO_CODECS, HARDWARE_VIDEO_CODECS, SOFTWARE_VIDEO_CODECS,
-    TONEMAP_ALGORITHMS, AudioTrackSettings, EncodeConfig,
+    HARDWARE_VIDEO_CODECS, SOFTWARE_VIDEO_CODECS,
+    TONEMAP_ALGORITHMS, EncodeConfig,
     EncodePreviewRequest,
     EncodePreset, EncodeWorkflow, HardwareEncoderDetector,
     ProfileManager, QualityMode, VideoCropSettings, VideoEncodeSettings, VideoFilterSettings,
@@ -140,6 +139,10 @@ class EncodePanel(QWidget):
         self._tag_overrides_provider: Callable[[], "dict | None"] = lambda: None
         # Callable fourni par MainWindow pour récupérer les chapter_overrides depuis RemuxPanel.
         self._chapters_provider: Callable[[], "list | None"] = lambda: None
+        # Callable fourni par MainWindow pour le backend de muxage final du job.
+        self._mux_backend_provider: Callable[[], str] = lambda: str(
+            self._config.matroska_mux_backend
+        )
         self._preview_signals: TaskSignals | None = None
         self._preview_random_scene = False
         self._preview_video_path: Path | None = None
@@ -1728,8 +1731,13 @@ class EncodePanel(QWidget):
             lmin = lmax = 0.0
         if primaries and lmax > 0:
             (gx, gy), (bx, by), (rx, ry), (wx, wy) = primaries
-            c = lambda f: int(round(f * 50000))
-            l_ = lambda f: int(round(f * 10000))
+
+            def c(value: float) -> int:
+                return int(round(value * 50000))
+
+            def l_(value: float) -> int:
+                return int(round(value * 10000))
+
             master_display = (
                 f"G({c(gx)},{c(gy)})"
                 f"B({c(bx)},{c(by)})"
@@ -1785,14 +1793,23 @@ class EncodePanel(QWidget):
         for sd in raw.get("side_data_list", []):
             if sd.get("side_data_type") == "Mastering display metadata":
                 try:
-                    rx = _rat(sd.get("red_x", 0));         ry = _rat(sd.get("red_y", 0))
-                    gx = _rat(sd.get("green_x", 0));        gy = _rat(sd.get("green_y", 0))
-                    bx = _rat(sd.get("blue_x", 0));         by = _rat(sd.get("blue_y", 0))
-                    wx = _rat(sd.get("white_point_x", 0));  wy = _rat(sd.get("white_point_y", 0))
+                    rx = _rat(sd.get("red_x", 0))
+                    ry = _rat(sd.get("red_y", 0))
+                    gx = _rat(sd.get("green_x", 0))
+                    gy = _rat(sd.get("green_y", 0))
+                    bx = _rat(sd.get("blue_x", 0))
+                    by = _rat(sd.get("blue_y", 0))
+                    wx = _rat(sd.get("white_point_x", 0))
+                    wy = _rat(sd.get("white_point_y", 0))
                     lmax = _rat(sd.get("max_luminance", 0))
                     lmin = _rat(sd.get("min_luminance", 0))
-                    c = lambda f: int(round(f * 50000))
-                    l_ = lambda f: int(round(f * 10000))
+
+                    def c(value: float) -> int:
+                        return int(round(value * 50000))
+
+                    def l_(value: float) -> int:
+                        return int(round(value * 10000))
+
                     master_display = (
                         f"G({c(gx)},{c(gy)})"
                         f"B({c(bx)},{c(by)})"
@@ -4007,6 +4024,15 @@ class EncodePanel(QWidget):
         """
         self._chapters_provider = provider
 
+    def set_mux_backend_provider(self, provider: Callable[[], str]) -> None:
+        """Lie la preview encode au choix courant du panneau Remux."""
+        self._mux_backend_provider = provider
+        self._rebuild_preview()
+
+    def refresh_command_preview(self) -> None:
+        """Reconstruit publiquement la preview après un changement partagé."""
+        self._rebuild_preview()
+
     def _current_config(self) -> EncodeConfig | None:
         if self._file_info is None:
             return None
@@ -4034,6 +4060,9 @@ class EncodePanel(QWidget):
             tmdb_cover=self._tmdb_cover_provider(),
             tag_overrides=self._tag_overrides_provider(),
             chapter_overrides=self._chapters_provider(),
+            mux_backend=str(
+                self._mux_backend_provider() or self._config.matroska_mux_backend
+            ),
         )
 
     def _on_add_audio_track(self) -> None:

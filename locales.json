@@ -3,6 +3,22 @@
     "fra": "Réglages",
     "eng": "Settings"
   },
+  "Remux Matroska": {
+    "fra": "Remux Matroska",
+    "eng": "Matroska remux"
+  },
+  "Backend de muxage": {
+    "fra": "Backend de muxage",
+    "eng": "Muxing backend"
+  },
+  "Natif Matroska": {
+    "fra": "Natif Matroska",
+    "eng": "Native Matroska"
+  },
+  "Auto privilégie le muxeur Matroska natif et journalise un repli FFmpeg lorsque nécessaire.": {
+    "fra": "Auto privilégie le muxeur Matroska natif et journalise un repli FFmpeg lorsque nécessaire.",
+    "eng": "Auto prefers the native Matroska muxer and logs an FFmpeg fallback when required."
+  },
   "Modifiez toutes les valeurs persistées dans config.ini. Les changements de langue sont appliqués aux textes maîtrisés par l'application ; un redémarrage reste conseillé pour repartir sur un état propre.": {
     "fra": "Modifiez toutes les valeurs persistées dans config.ini. Les changements de langue sont appliqués aux textes maîtrisés par l'application ; un redémarrage reste conseillé pour repartir sur un état propre.",
     "eng": "Edit every value stored in config.ini. Language changes are applied to UI text and internal messages controlled by the application; restarting is still recommended to start from a clean state."
@@ -3307,10 +3323,6 @@
     "fra": "EAC3=DDP\nAC3=Dolby Digital\nTRUEHD=Dolby TrueHD",
     "eng": "EAC3=DDP\nAC3=Dolby Digital\nTRUEHD=Dolby TrueHD"
   },
-  "Charger": {
-    "fra": "Charger",
-    "eng": "Load"
-  },
   "Supprimer profil": {
     "fra": "Supprimer profil",
     "eng": "Delete profile"
@@ -3770,5 +3782,13 @@
   "Playlist :": {
     "fra": "Playlist :",
     "eng": "Playlist:"
+  },
+  "Muxage Matroska": {
+    "fra": "Muxage Matroska",
+    "eng": "Matroska muxing"
+  },
+  "Assembleur final Matroska des workflows remux et encodage. FFmpeg par défaut ; Auto sélectionne le muxeur natif quand le plan le permet et journalise le repli ; Natif n'autorise aucun repli.": {
+    "fra": "Assembleur final Matroska des workflows remux et encodage. FFmpeg par défaut ; Auto sélectionne le muxeur natif quand le plan le permet et journalise le repli ; Natif n'autorise aucun repli.",
+    "eng": "Final Matroska assembler for the remux and encode workflows. FFmpeg by default; Auto selects the native muxer whenever the plan allows it and logs the fallback; Native never falls back."
   }
 }

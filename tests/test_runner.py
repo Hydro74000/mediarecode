@@ -34,6 +34,9 @@ Exécution :
 
 from __future__ import annotations
 
+# L'import du module testé suit volontairement l'initialisation Qt.
+# ruff: noqa: E402
+
 import sys
 import time
 from pathlib import Path
@@ -425,7 +428,7 @@ class TestToolRunnerParallel:
         # le thread vide se termine avant que _collect_signals connecte ses
         # slots (race condition). On vérifie uniquement l'absence d'exception.
         try:
-            sig = self.runner.run_parallel([], label="empty")
+            self.runner.run_parallel([], label="empty")
             time.sleep(0.2)
         except Exception as exc:
             pytest.fail(f"run_parallel([]) a levé une exception : {exc}")

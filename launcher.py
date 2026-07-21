@@ -15,6 +15,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -265,6 +266,28 @@ def _windows_show_missing_tools_popup(missing: tuple[str, ...]) -> None:
         pass
 
 
+def _macos_show_homebrew_required_popup() -> None:
+    """Explain the only missing first-install prerequisite on a macOS DMG."""
+    if sys.platform != "darwin":
+        return
+    script = (
+        'display alert "Muxiveo — Homebrew required" '
+        'message "Homebrew is required on first launch to install FFmpeg and MediaInfo. '
+        'Install it from https://brew.sh, then restart Muxiveo.\\n\\n'
+        'Homebrew est requis au premier lancement pour installer FFmpeg et MediaInfo. '
+        'Installez-le depuis https://brew.sh puis relancez Muxiveo." as critical'
+    )
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        pass
+
+
 def _windows_open_setup_console() -> tuple[tuple[object, object, object], bool] | None:
     """Open a visible console dedicated to first-launch setup logs."""
     if sys.platform != "win32":
@@ -420,6 +443,12 @@ def _run_first_time_setup(install_dir: Path) -> int:
                 _setup.check_tools_presence()
 
             elif _os == "Darwin":
+                if not shutil.which("brew"):
+                    _macos_show_homebrew_required_popup()
+                    raise RuntimeError(
+                        "Homebrew is required on macOS to install FFmpeg and MediaInfo. "
+                        "Install it from https://brew.sh, then restart Muxiveo."
+                    )
                 _setup.install_brew(dry_run, force=force)
                 _setup.install_github_tools(prefix, dry_run, force=force)
                 _setup.check_tools_presence()

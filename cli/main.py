@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     logger = Logger(fmt=args.log_format)
     try:
         config = AppConfig()
+        for warning in getattr(config, "load_warnings", []):
+            logger.emit("warning", warning)
         return int(args.func(args, config, logger))
     except ToolNotFoundError as exc:
         logger.emit("error", str(exc))

@@ -91,5 +91,6 @@ def serialize_remux_config(config: RemuxConfig) -> dict[str, Any]:
         "keep_chapters": config.keep_chapters,
         "chapter_source_index": config.chapter_source_index,
         "extra_attachments": [str(path) for path in config.extra_attachments],
+        "mux_backend": config.mux_backend,
         "file_title": config.file_title,
     }

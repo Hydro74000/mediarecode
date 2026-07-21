@@ -92,6 +92,8 @@ def load_job(overrides: JobOverrides) -> dict[str, Any]:
         job["output_template"] = overrides.output_template
     if overrides.output_all:
         job["output_all"] = True
+    if overrides.mux_backend:
+        job["mux_backend"] = overrides.mux_backend
     apply_metadata_overrides(
         job,
         auto_tmdb=overrides.auto_tmdb,

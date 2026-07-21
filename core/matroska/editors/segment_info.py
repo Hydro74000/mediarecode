@@ -1,5 +1,5 @@
 """
-core/workflows/matroska_header_editor.py
+core/matroska/editors/segment_info.py
 
 Matroska Segment Info editor (MuxingApp) with in-place binary patching strategy.
 
@@ -15,7 +15,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO
 
 
 _EBML_HEADER_ID = b"\x1a\x45\xdf\xa3"
@@ -242,6 +242,7 @@ class MatroskaSegmentInfoHeaderEditor:
                 raise ValueError("Élément level-1 introuvable après écriture/fusion.")
             self._add_to_meta_seek(fh, state, new_idx)
             self._merge_void_elements(fh, state)
+            self._resync_meta_seeks(fh, state)
 
             fh.flush()
             after_size = fh.seek(0, 2)
@@ -308,6 +309,7 @@ class MatroskaSegmentInfoHeaderEditor:
                 raise ValueError("Info introuvable après écriture/fusion.")
             self._add_to_meta_seek(fh, state, info_idx)
             self._merge_void_elements(fh, state)
+            self._resync_meta_seeks(fh, state)
 
             fh.flush()
             after_size = fh.seek(0, 2)
@@ -620,6 +622,74 @@ class MatroskaSegmentInfoHeaderEditor:
                 self._add_to_meta_seek(fh, state, i, _depth=_depth + 1)
                 return
         raise ValueError("Élément cible introuvable après déplacement level-1.")
+
+    def _resync_meta_seeks(self, fh: BinaryIO, state: _AnalyzerState) -> None:
+        """Réaligne toutes les SeekPosition sur les offsets réels des éléments.
+
+        Les étapes d'édition in-place peuvent déplacer un élément level-1
+        après l'écriture de son entrée Seek (ex. résorption d'un gap d'un
+        octet qui remonte l'élément suivant). Cette passe finale réécrit
+        chaque SeekPosition d'après ``state.data`` — à longueur d'encodage
+        constante (uint paddé en tête, valeur identique) pour un patch
+        strictement in-place. Les entrées sans cible connue sont laissées
+        telles quelles (cas déjà couvert par la suppression d'entrées).
+        """
+        offsets_by_id: dict[bytes, list[int]] = {}
+        for entry in state.data:
+            if entry.element_id in (_VOID_ID, _SEEKHEAD_ID):
+                continue
+            if self._element_span(entry) == 0:
+                continue
+            offsets_by_id.setdefault(entry.element_id, []).append(
+                entry.offset - state.segment.payload_offset
+            )
+        for values in offsets_by_id.values():
+            values.sort()
+        consumed: dict[bytes, int] = {}
+
+        for seek_head in state.data:
+            if seek_head.element_id != _SEEKHEAD_ID or seek_head.unknown_size:
+                continue
+            payload = self._read_exact(fh, seek_head.payload_offset, seek_head.size)
+            buf = bytearray(payload)
+            cursor = 0
+            changed = False
+            while cursor < len(payload):
+                child = self._read_ebml_element_from_bytes(payload, cursor)
+                if child.unknown_size:
+                    break
+                if child.element_id == _SEEK_ID:
+                    seek_payload = payload[child.payload_offset:child.end]
+                    target_id = self._extract_seek_id_from_seek_payload(seek_payload)
+                    candidates = offsets_by_id.get(target_id or b"", [])
+                    if target_id is not None and candidates:
+                        rank = consumed.get(target_id, 0)
+                        expected = candidates[min(rank, len(candidates) - 1)]
+                        consumed[target_id] = rank + 1
+                        inner = 0
+                        while inner < len(seek_payload):
+                            sub = self._read_ebml_element_from_bytes(seek_payload, inner)
+                            if sub.unknown_size:
+                                break
+                            if sub.element_id == _SEEKPOS_ID and sub.size > 0:
+                                current = int.from_bytes(
+                                    seek_payload[sub.payload_offset:sub.end], "big"
+                                )
+                                if current != expected:
+                                    if expected >= 1 << (8 * sub.size):
+                                        raise ValueError(
+                                            "Resynchronisation SeekPosition impossible : "
+                                            f"valeur {expected} hors capacité ({sub.size} octets)."
+                                        )
+                                    start = child.payload_offset + sub.payload_offset
+                                    buf[start:start + sub.size] = expected.to_bytes(sub.size, "big")
+                                    changed = True
+                            inner = sub.end
+                cursor = child.end
+
+            if changed:
+                new_payload = self._refresh_crc32_in_payload(bytes(buf))
+                self._write_at(fh, seek_head.payload_offset, new_payload)
 
     def _try_adding_to_existing_meta_seek(self, fh: BinaryIO, state: _AnalyzerState, seek_entry: bytes) -> bool:
         for idx, sh in enumerate(state.data):
@@ -1553,86 +1623,3 @@ class MatroskaSegmentInfoHeaderEditor:
             if e.element_id == element_id and e.offset == offset:
                 return i
         return -1
-
-
-class MatroskaMuxingAppPostAction:
-    """
-    Helper de post-action workflow pour harmoniser le patch MuxingApp.
-
-    Stocke ``app_prefix`` et ``log_cb`` à l'init pour que les call-sites
-    workflow n'aient plus à les répéter.
-    """
-
-    def __init__(
-        self,
-        *,
-        editor: MatroskaSegmentInfoHeaderEditor | None = None,
-        app_prefix: str | None = None,
-        log_cb: Callable[[str, str], None] | None = None,
-    ) -> None:
-        self._editor = editor or MatroskaSegmentInfoHeaderEditor(
-            options=MatroskaSegmentInfoHeaderEditorOptions(
-                edit_muxing_app=True,
-                edit_writing_app=False,
-                rebuild_on_overflow=True,
-                fallback_mode="skip",
-            )
-        )
-        self._app_prefix = app_prefix
-        self._log_cb = log_cb
-
-    @staticmethod
-    def default_prefix(version_label: str) -> str:
-        normalized_version = version_label.removeprefix("v")
-        return f"Muxiveo {normalized_version}"
-
-    def apply_if_mkv(
-        self,
-        output_path: Path,
-        *,
-        app_prefix: str | None = None,
-        log_cb: Callable[[str, str], None] | None = None,
-    ) -> MatroskaSegmentInfoPatchResult | None:
-        prefix = app_prefix or self._app_prefix
-        if prefix is None:
-            raise ValueError("app_prefix requis (paramètre ou valeur d'init)")
-        cb = log_cb or self._log_cb
-
-        if output_path.suffix.lower() != ".mkv":
-            return None
-        if not output_path.is_file():
-            return None
-
-        result = self._editor.apply_muxing_app_replace_with_header_rebuild(
-            output_path,
-            app_prefix=prefix,
-        )
-        if cb is not None:
-            if result.applied:
-                cb(
-                    "INFO",
-                    "Segment Info Matroska patché en post-action "
-                    f"(MuxingApp: '{result.muxing_app_before}' -> '{result.muxing_app_after}').",
-                )
-            elif result.skipped:
-                cb("WARN", f"Post-action MuxingApp ignorée: {result.reason}")
-            elif result.reason:
-                cb("INFO", f"Post-action MuxingApp: {result.reason}")
-        return result
-
-    def bind_on_success(
-        self,
-        signals,
-        output_path: Path,
-        *,
-        app_prefix: str | None = None,
-        log_cb: Callable[[str, str], None] | None = None,
-    ) -> None:
-        def _patch_after_success(*_args) -> None:
-            self.apply_if_mkv(
-                output_path,
-                app_prefix=app_prefix,
-                log_cb=log_cb,
-            )
-
-        signals.finished.connect(_patch_after_success)

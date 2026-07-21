@@ -19,6 +19,19 @@ from uuid import uuid4
 from core.inspector import AttachmentInfo, FileInfo, HDRType
 
 
+MUX_BACKENDS = frozenset({"auto", "native", "ffmpeg"})
+
+
+def normalize_mux_backend(value: str | None) -> str:
+    """Return a stable public backend name, rejecting unknown contracts."""
+    backend = str(value or "ffmpeg").strip().lower()
+    if backend not in MUX_BACKENDS:
+        raise ValueError(
+            "mux_backend invalide : attendu 'auto', 'native' ou 'ffmpeg'."
+        )
+    return backend
+
+
 # =============================================================================
 # Modèle de piste
 # =============================================================================
@@ -185,6 +198,8 @@ class SourceInput:
     #: de cibler -map_chapters sur la bonne source quand keep_chapters=True et
     #: que la première source n'en contient pas.
     has_chapters:            bool                   = False
+    #: Identité stable de la source d'origine, conservée lors des matérialisations temporaires.
+    origin_identity:         str                    = field(default="", repr=False)
 
 
 # =============================================================================
@@ -230,6 +245,10 @@ class RemuxConfig:
     #: Autorise une preview CLI à construire la commande même si le dossier de
     #: sortie n'existe pas encore. Ne doit pas être utilisé pour une exécution.
     allow_missing_output_dir: bool = False
+    #: Backend public du remux. Défaut ``ffmpeg`` (filet pour les constructions
+    #: directes) ; la distinction « champ absent » vs « choix explicite » est
+    #: portée par les loaders, qui résolvent le réglage global [matroska].
+    mux_backend: str = "ffmpeg"
 
 
 # =============================================================================

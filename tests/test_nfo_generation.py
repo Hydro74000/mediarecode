@@ -12,11 +12,9 @@ Couverture :
 
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -129,11 +127,12 @@ class TestAppConfigGenerateNfo:
         keys = [f["key"] for f in metadata_group["fields"]]
         assert "generate_nfo" in keys
 
-    def test_ini_field_groups_no_remux_section(self):
-        """La section 'remux' a été supprimée de INI_FIELD_GROUPS."""
+    def test_ini_field_groups_includes_mux_backend(self):
+        """La section matroska expose le backend de muxage persistant."""
         from core.config import INI_FIELD_GROUPS
-        sections = [g["section"] for g in INI_FIELD_GROUPS]
-        assert "remux" not in sections
+        matroska_group = next(g for g in INI_FIELD_GROUPS if g["section"] == "matroska")
+        assert [field["key"] for field in matroska_group["fields"]] == ["mux_backend"]
+        assert matroska_group["fields"][0]["attr"] == "matroska_mux_backend"
 
 
 # ===========================================================================
@@ -144,7 +143,6 @@ class TestSettingsPanelGenerateNfo:
 
     def test_checkbox_exists_and_defaults_checked(self, qt_app, tmp_path):
         """Le panneau expose une checkbox generate_nfo cochée par défaut."""
-        from core.config import AppConfig
         from ui.panels.settings_panel import SettingsPanel
 
         cfg, _ = _make_config(tmp_path)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from cli.commands import cmd_batch, cmd_inspect, cmd_preview, cmd_profile, cmd_remux, cmd_run, cmd_schema, cmd_validate
+from cli.commands import cmd_batch, cmd_inspect, cmd_preview, cmd_profile, cmd_remux, cmd_run, cmd_schema, cmd_tools, cmd_validate
 from core.version import APP_EXECUTABLE_NAME, APP_NAME
 
 
@@ -15,6 +15,10 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mediainfo", help="Chemin mediainfo override.")
     parser.add_argument("--work-dir", help="Répertoire de travail override.")
     parser.add_argument("--threads", type=int, help="Nombre de threads ffmpeg.")
+    parser.add_argument(
+        "--mux-backend", choices=("auto", "native", "ffmpeg"), default=None,
+        help="Backend MKV : auto (défaut), native ou ffmpeg. Prioritaire sur le job.",
+    )
     parser.add_argument(
         "--output-template",
         dest="output_template",
@@ -65,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     schema.add_argument("--version", dest="schema_version", choices=("1", "exact-job", "decision-profile", "all"), default="1")
     schema.add_argument("--log-format", choices=("text", "jsonl"), default="text")
     schema.set_defaults(func=cmd_schema)
+
+    tools = sub.add_parser("tools", help="Afficher les chemins d'outils résolus par Muxiveo.")
+    tools.add_argument("--log-format", choices=("text", "jsonl"), default="text")
+    tools.set_defaults(func=cmd_tools)
 
     for name, help_text, func in (
         ("validate", "Valider une config remux.", cmd_validate),

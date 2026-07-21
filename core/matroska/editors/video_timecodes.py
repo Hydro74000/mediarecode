@@ -17,12 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from core.workflows.matroska_dovi_block_addition import MatroskaDoviBlockAdditionEditor
-from core.workflows.matroska_header_editor import (
+from .dovi import MatroskaDoviBlockAdditionEditor
+from .segment_info import (
     MatroskaSegmentInfoHeaderEditor,
     MatroskaSegmentInfoHeaderEditorOptions,
 )
-from core.workflows.matroska_timestamp_reader import MatroskaTimestampReader
+from ..timestamps import MatroskaTimestampReader
 
 
 _CLUSTER_ID = b"\x1f\x43\xb6\x75"

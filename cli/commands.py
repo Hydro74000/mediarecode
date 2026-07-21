@@ -30,6 +30,13 @@ from cli.schema import (
 from cli.serializers import serialize_file_info, serialize_remux_config
 
 
+def cmd_tools(_args: argparse.Namespace, config: AppConfig, _logger: Logger) -> int:
+    """Expose the exact commands resolved from Muxiveo configuration."""
+    commands = config.tool_commands()
+    print(json.dumps({"version": 1, "tools": commands}, ensure_ascii=False, indent=2))
+    return EXIT_OK
+
+
 def _metadata_job_from_args(args: argparse.Namespace) -> dict:
     job: dict = {}
     output_template = str(getattr(args, "output_template", "") or "")
@@ -37,6 +44,9 @@ def _metadata_job_from_args(args: argparse.Namespace) -> dict:
         job["output_template"] = output_template
     if bool(getattr(args, "output_all", False)):
         job["output_all"] = True
+    mux_backend = getattr(args, "mux_backend", None)
+    if mux_backend:
+        job["mux_backend"] = mux_backend
     apply_metadata_overrides(
         job,
         auto_tmdb=bool(getattr(args, "auto_tmdb", False)),
@@ -152,6 +162,14 @@ def cmd_preview(args: argparse.Namespace, config: AppConfig, logger: Logger) -> 
             command = wf.build_command(remux_config)
             payload["command"] = command
             payload["command_text"] = wf.preview_command(remux_config)
+            execution = wf.execution_preview(remux_config)
+            payload.update({
+                "selected_backend": execution["selected_backend"],
+                "plan_version": execution["plan_version"],
+                "preparation_commands": execution["preparation_commands"],
+                "native_diagnostics": execution["native_diagnostics"],
+                "execution_preview": execution,
+            })
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=json_default))
         return EXIT_OK if not errors else EXIT_VALIDATION
     if errors:
@@ -241,6 +259,7 @@ def cmd_batch(args: argparse.Namespace, config: AppConfig, logger: Logger) -> in
         output_all=bool(getattr(args, "output_all", False)),
         no_cover=bool(getattr(args, "no_cover", False)),
         no_attach=bool(getattr(args, "no_attach", False)),
+        mux_backend=getattr(args, "mux_backend", None),
         config=config,
         options=common_options(args),
         logger=logger,

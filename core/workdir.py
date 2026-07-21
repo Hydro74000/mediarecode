@@ -149,6 +149,13 @@ def prepare_process_work_dir(
     return process_dir
 
 
+def normalized_tmdb_cover_filename(filename: str) -> str:
+    """Retourne le nom de fichier TMDB effectivement écrit sur disque."""
+    raw = (filename or "").strip()
+    name = Path(raw).name if raw else ""
+    return name if name not in {"", ".", ".."} else "cover.jpg"
+
+
 def download_tmdb_cover(url: str, filename: str, target_dir: Path) -> Path:
     """
     Télécharge une cover depuis l'URL TMDB et la place dans target_dir.
@@ -159,7 +166,7 @@ def download_tmdb_cover(url: str, filename: str, target_dir: Path) -> Path:
     from core.version import APP_USER_AGENT
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    dest = target_dir / (filename or "cover.jpg")
+    dest = target_dir / normalized_tmdb_cover_filename(filename)
     req = urllib.request.Request(
         url,
         headers={

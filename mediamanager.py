@@ -7,7 +7,7 @@ from collections import defaultdict
 # Chemin complet optionnel vers l'executable MediaInfo, nom du binaire inclus.
 # Exemple : "/usr/bin/mediainfo" ou r"C:\Program Files\MediaInfo\MediaInfo.exe"
 # Laisser vide pour conserver l'appel actuel via le PATH : "mediainfo".
-MEDIAINFO_EXECUTABLE_PATH = "/var/home/hydromel/dev/MediaInfo/MediaInfo_CLI_CPP/MediaInfo/Project/GNU/CLI/mediainfo"
+MEDIAINFO_EXECUTABLE_PATH = ""
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,

@@ -11,6 +11,7 @@ from typing import Callable
 from core.runner import TaskCancelledError, TaskSignals
 from core.workdir import (
     download_tmdb_cover,
+    normalized_tmdb_cover_filename,
     prepare_process_work_dir,
     relocate_tmdb_covers_to_process_dir,
     remove_path,
@@ -26,13 +27,16 @@ from core.workflows.common.sync_rewrite import (
     normalized_rewrite_codec,
     sync_rewrite_forced_offset,
 )
+from core.matroska.contract import without_expected_attachment
+from core.matroska.validation import validate_matroska_output
+from core.workflows.common.attachments import canonical_attachment_output_name
 from core.workflows.remux_attachments import extract_attached_pics as _extract_attached_pics_helper
 from core.workflows.remux_mapping import (
     MappedTrack,
     requires_file_sync_fallback_for_offsets as _requires_file_sync_fallback_for_offsets_helper,
-    resolve_mapped_tracks as _resolve_mapped_tracks_helper,
 )
 from core.workflows.remux_models import RemuxConfig, RemuxError
+from core.workflows.remux_plan import MuxExecutionPlan
 from core.workflows.remux_sync import (
     decide_strict_interleave_with_prescan as _decide_strict_interleave_with_prescan_helper,
     prepare_timeline_sync_inputs as _prepare_timeline_sync_inputs_helper,
@@ -50,7 +54,6 @@ class RemuxRuntimeRunnerCallbacks:
     ffmpeg_bin: str
     ffprobe_bin: str
     ffmpeg_thread_args: Callable[[], list[str]]
-    validate: Callable[[RemuxConfig], list[str]]
     build_command: Callable[..., list[str]]
     log_workflow_type: Callable[[str], None]
     log_step: Callable[[int, str], None]
@@ -89,14 +92,10 @@ class RemuxRuntimeRunner:
             return False
         return True
 
-    def run(self, config: RemuxConfig) -> TaskSignals:
+    def run(self, config: RemuxConfig, plan: MuxExecutionPlan) -> TaskSignals:
         cb = self._cb
         cb.log_workflow_type("REMUX")
-        cb.log_step(1, "Validation configuration")
-        errors = cb.validate(config)
-        if errors:
-            raise RemuxError("\n".join(errors))
-
+        cb.log_step(1, "Plan remux validé")
         cb.log("INFO", f"Remuxage (FFmpeg) → {config.output.name}")
         cb.log_step(2, "Préparation workspace et attachments")
         work_root = config.work_dir or Path(tempfile.gettempdir())
@@ -111,19 +110,7 @@ class RemuxRuntimeRunner:
             process_dir=process_work_dir,
         )
 
-        if config.tmdb_cover is not None:
-            tmdb_url, tmdb_filename = config.tmdb_cover
-            try:
-                cb.log("INFO", f"Téléchargement cover TMDB : {tmdb_filename}")
-                cover_path = download_tmdb_cover(
-                    tmdb_url,
-                    tmdb_filename,
-                    process_work_dir / "attachments",
-                )
-                relocated_attachments = [*relocated_attachments, cover_path]
-            except Exception as exc:
-                cb.log("WARN", f"Impossible de télécharger la cover TMDB : {exc}")
-
+        output_contract = plan.output_contract
         run_config = replace(config, extra_attachments=relocated_attachments)
         cwd = process_work_dir
 
@@ -132,19 +119,53 @@ class RemuxRuntimeRunner:
         executor = ThreadPoolExecutor(max_workers=1)
 
         def _task() -> None:
-            nonlocal run_config
+            nonlocal output_contract, run_config
             tmp_dir = process_work_dir
             chapter_meta_file: Path | None = None
             live_sync_session: LiveSyncSession | None = None
             sync_prepared: list[SyncPreparedInput] = []
             sync_cleanup_paths: list[Path] = []
+            candidate: Path | None = None
             try:
+                if signals._cancel_event.is_set():
+                    raise TaskCancelledError()
+                if config.tmdb_cover is not None:
+                    tmdb_url, raw_tmdb_filename = config.tmdb_cover
+                    tmdb_filename = normalized_tmdb_cover_filename(raw_tmdb_filename)
+                    try:
+                        cb.log("INFO", f"Téléchargement cover TMDB : {tmdb_filename}")
+                        cover_path = download_tmdb_cover(
+                            tmdb_url,
+                            tmdb_filename,
+                            process_work_dir / "attachments",
+                        )
+                        if signals._cancel_event.is_set():
+                            raise TaskCancelledError()
+                        run_config = replace(
+                            run_config,
+                            extra_attachments=[*run_config.extra_attachments, cover_path],
+                            tmdb_cover=None,
+                        )
+                    except TaskCancelledError:
+                        raise
+                    except Exception as exc:
+                        cb.log("WARN", f"Impossible de télécharger la cover TMDB : {exc}")
+                        run_config = replace(run_config, tmdb_cover=None)
+                        # Le workflow continue sans cover : le contrat de validation
+                        # ne doit plus l'exiger — sinon la sortie, pourtant correcte,
+                        # serait rejetée tardivement. Clé de retrait = nom canonique,
+                        # identique à celui attendu par le contrat.
+                        output_contract = without_expected_attachment(
+                            output_contract,
+                            canonical_attachment_output_name(Path(tmdb_filename)),
+                        )
+
                 extra_inputs: list[Path | str] = []
                 cb.log_step(3, "Analyse du mapping pistes + pré-scan de risque")
-                mapped_tracks: list[MappedTrack] = _resolve_mapped_tracks_helper(run_config)
+                mapped_tracks: list[MappedTrack] = list(plan.mapped_tracks)
                 strict_interleave = _decide_strict_interleave_with_prescan_helper(
                     run_config,
-                    resolve_mapped_tracks=_resolve_mapped_tracks_helper,
+                    resolve_mapped_tracks=lambda _config: list(plan.mapped_tracks),
                     log_cb=cb.log,
                 )
 
@@ -284,9 +305,18 @@ class RemuxRuntimeRunner:
                     strict_interleave_override=strict_interleave,
                     mapped_tracks_override=mapped_tracks,
                 )
+                # Écriture atomique : FFmpeg produit un candidat « .mkv.partial »
+                # (format Matroska explicite) ; la sortie finale n'est remplacée
+                # qu'après post-patchs et validation.
+                expected_output = {str(run_config.output), _cli_path(run_config.output)}
+                if not cmd or str(cmd[-1]) not in expected_output:
+                    raise RemuxError("Commande remux sans chemin de sortie attendu en dernière position.")
+                candidate = plan.candidate_output
+                candidate.unlink(missing_ok=True)
+                cmd = [*cmd[:-1], "-f", "matroska", str(candidate)]
                 cb.log("INFO", "$ " + " ".join(str(c) for c in cmd))
 
-                cb.log_step(8, "Exécution du remux ffmpeg")
+                cb.log_step(8, "Exécution du remux ffmpeg (candidat atomique)")
                 output = cb.run_cmd(
                     cmd,
                     cwd,
@@ -294,14 +324,40 @@ class RemuxRuntimeRunner:
                     lambda line: signals.progress.emit(line),
                     signals,
                 )
-                cb.log_step(9, "Post-action: Patch & Cleanup")
-                cb.apply_muxing_post_action(run_config.output)
-                cb.apply_language_post_action(run_config.output)
-                cb.write_nfo(run_config.output)
+                cb.log_step(9, "Post-actions sur le candidat (patchs conteneur)")
+                cb.apply_muxing_post_action(candidate)
+                cb.apply_language_post_action(candidate)
+                cb.log_step(10, "Validation du candidat puis commit atomique")
+                validation_errors = validate_matroska_output(candidate, output_contract)
+                if validation_errors:
+                    raise RemuxError(
+                        "Validation de la sortie remux échouée : " + " ; ".join(validation_errors)
+                    )
+                cb.run_cmd(
+                    [
+                        cb.ffprobe_bin, "-v", "error", "-show_entries",
+                        "format=format_name", "-of", "json", str(candidate),
+                    ],
+                    cwd,
+                    "ffprobe-validation",
+                    lambda line: signals.progress.emit(line),
+                    signals,
+                )
+                candidate.replace(run_config.output)
+                # Un échec NFO après commit ne transforme plus un média valide
+                # en workflow échoué.
+                try:
+                    cb.write_nfo(run_config.output)
+                except Exception as nfo_exc:
+                    cb.log("WARN", f"Génération NFO échouée après commit : {nfo_exc}")
                 signals.finished.emit(output)
             except TaskCancelledError:
+                if candidate is not None:
+                    candidate.unlink(missing_ok=True)
                 signals.cancelled.emit()
             except Exception as exc:
+                if candidate is not None:
+                    candidate.unlink(missing_ok=True)
                 signals.failed.emit(str(exc), exc)
             finally:
                 if live_sync_session is not None:

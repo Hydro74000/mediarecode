@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from core.profiles.decision import (
     apply_decision_profile,
     validate_decision_profile,
 )
-from core.workflows.remux_models import RemuxConfig, SourceInput, TrackEntry
+from core.workflows.remux_models import RemuxConfig, SourceInput, TrackEntry, normalize_mux_backend
 
 from cli.batch import discover_direct_batch_jobs, job_primary_input, log_batch_failures, write_batch_summary
 from cli.constants import EXIT_ARGS, EXIT_OK, EXIT_PARTIAL, EXIT_VALIDATION, EXIT_WORKFLOW
@@ -170,16 +171,20 @@ def build_profile_remux_config(
         metadata.get("tag_overrides", None),
         tmdb_wins=tmdb_wins,
     )
+    # Chemins résolus en absolu : les runners peuvent exécuter les commandes
+    # depuis un répertoire de travail différent du cwd de la CLI.
+    sources = [replace(source, path=source.path.expanduser().resolve()) for source in sources]
     remux_config = RemuxConfig(
         sources=sources,
-        output=output,
+        output=output.expanduser().resolve(),
         track_order=final_track_order,
         keep_chapters=True,
         file_title=resolve_metadata_file_title(metadata, tmdb_title, tmdb_wins=tmdb_wins),
         tag_overrides=tag_overrides if isinstance(tag_overrides, dict) else None,
         tmdb_cover=tmdb_cover,
-        work_dir=Path(str(options.work_dir or config.work_dir)).expanduser(),
+        work_dir=Path(str(options.work_dir or config.work_dir)).expanduser().resolve(),
         allow_missing_output_dir=preview,
+        mux_backend=normalize_mux_backend(str(metadata.get("mux_backend", config.matroska_mux_backend))),
     )
     return remux_config, result.report
 
@@ -243,6 +248,14 @@ def profile_preview(
     if not errors and include_command:
         payload["command"] = wf.build_command(remux_config)
         payload["command_text"] = wf.preview_command(remux_config)
+        execution = wf.execution_preview(remux_config)
+        payload.update({
+            "selected_backend": execution["selected_backend"],
+            "plan_version": execution["plan_version"],
+            "preparation_commands": execution["preparation_commands"],
+            "native_diagnostics": execution["native_diagnostics"],
+            "execution_preview": execution,
+        })
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=json_default))
     else:

@@ -54,7 +54,6 @@ def test_merge_dovi_panel_inits_workflow_with_ffmpeg_bins(tmp_path, qt_app, monk
     assert captured["dovi_tool_bin"] == "dovi"
     assert captured["hdr10plus_bin"] == "hdr10p"
     assert "mkvextract_bin" not in captured
-    assert "mkvmerge_bin" not in captured
     assert panel._config_section.dovi_profile == DoviProfile.P8_1
 
     combo = panel._config_section._profile_combo

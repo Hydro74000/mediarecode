@@ -208,11 +208,16 @@ class AudioTrack:
         if self.channel_layout:
             return self.channel_layout
         match self.channels:
-            case 8: return "7.1"
-            case 6: return "5.1"
-            case 2: return "Stereo"
-            case 1: return "Mono"
-            case _: return str(self.channels) if self.channels else "?"
+            case 8:
+                return "7.1"
+            case 6:
+                return "5.1"
+            case 2:
+                return "Stereo"
+            case 1:
+                return "Mono"
+            case _:
+                return str(self.channels) if self.channels else "?"
 
     @property
     def atmos_flag(self) -> bool:
@@ -556,16 +561,22 @@ class FileInspector:
         by_pid = title.stream_by_pid
         if not by_pid:
             return
-        for track in [*info.audio_tracks, *info.subtitle_tracks]:
+
+        def apply_language(track: AudioTrack | SubtitleTrack) -> None:
             if (track.language or "").strip():
-                continue
+                return
             pid = self._stream_pid_from_raw(track.raw)
             if pid is None:
-                continue
+                return
             stream = by_pid.get(pid)
             if stream is None or not stream.language:
-                continue
+                return
             track.language = stream.language
+
+        for audio_track in info.audio_tracks:
+            apply_language(audio_track)
+        for subtitle_track in info.subtitle_tracks:
+            apply_language(subtitle_track)
 
     def get_frame_count(self, path: Path) -> int | None:
         """

@@ -13,7 +13,7 @@ from core.workflows.common.sync_rewrite import (
     audio_bitrate_kbps_from_display_info,
     normalized_rewrite_codec,
 )
-from core.workflows.common.attachments import mime_for_path
+from core.workflows.common.attachments import canonical_attachment_output_name, mime_for_path
 from core.workflows.common.track_types import TimelineMappedTrack
 from core.workflows.common.metadata import STREAM_SPEC_BY_TRACK_TYPE as STREAM_SPEC_BY_TYPE
 from core.workflows.remux_attachments import attachment_names, build_attachment_mapping
@@ -177,7 +177,8 @@ def build_remux_command(
     for attachment_path in config.extra_attachments:
         cmd.extend(["-attach", cli_path(attachment_path)])
         cmd.extend([f"-metadata:s:t:{att_t_idx}", f"mimetype={mime_for_path(attachment_path)}"])
-        cmd.extend([f"-metadata:s:t:{att_t_idx}", f"filename={attachment_path.name}"])
+        # Nom canonique commun à tous les backends (covers : cover<ext>).
+        cmd.extend([f"-metadata:s:t:{att_t_idx}", f"filename={canonical_attachment_output_name(attachment_path)}"])
         att_t_idx += 1
 
     cmd.append(cli_path(config.output))

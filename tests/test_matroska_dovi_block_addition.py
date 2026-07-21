@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import struct
-from pathlib import Path
 
 import pytest
 
-from core.workflows.matroska_dovi_block_addition import (
+from core.matroska.editors.dovi import (
     DolbyVisionConfigRecord,
     MatroskaDoviBlockAdditionEditor,
 )

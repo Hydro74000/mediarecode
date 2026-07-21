@@ -8,9 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from core.workflows.matroska_timestamp_reader import (
+from core.matroska.timestamps import (
     MatroskaTimestampReader,
-    TimestampSequence,
 )
 
 
@@ -29,7 +28,7 @@ class TestMatroskaTimestampReader:
             ]
         })
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=_completed(packets_payload),
         ):
             seq = reader.read(tmp_path / "src.mkv")
@@ -48,7 +47,7 @@ class TestMatroskaTimestampReader:
             ]
         })
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=_completed(packets_payload),
         ):
             seq = reader.read(tmp_path / "src.mkv")
@@ -61,7 +60,7 @@ class TestMatroskaTimestampReader:
             "packets": [{"pts_time": "0.0"}, {"pts_time": "1.0"}, {"pts_time": "2.0"}]
         })
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=_completed(packets_payload),
         ):
             seq = reader.read(tmp_path / "src.mkv")
@@ -79,7 +78,7 @@ class TestMatroskaTimestampReader:
             ]
         })
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=_completed(packets_payload),
         ):
             seq = reader.read(tmp_path / "src.mkv")
@@ -95,7 +94,7 @@ class TestMatroskaTimestampReader:
             ]
         })
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=_completed(packets_payload),
         ):
             seq = reader.read(tmp_path / "src.mkv", sort_by_pts=False)
@@ -113,7 +112,7 @@ class TestMatroskaTimestampReader:
             ]
         })
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=_completed(packets_payload),
         ):
             seq = reader.read(tmp_path / "src.mkv")
@@ -122,7 +121,7 @@ class TestMatroskaTimestampReader:
     def test_raises_when_no_packets(self, tmp_path):
         reader = MatroskaTimestampReader()
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=_completed(json.dumps({"packets": []})),
         ):
             with pytest.raises(RuntimeError, match="Aucun packet"):
@@ -131,7 +130,7 @@ class TestMatroskaTimestampReader:
     def test_raises_when_ffprobe_missing(self, tmp_path):
         reader = MatroskaTimestampReader()
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             side_effect=FileNotFoundError("ffprobe"),
         ):
             with pytest.raises(RuntimeError, match="indisponible"):

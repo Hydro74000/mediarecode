@@ -30,6 +30,7 @@ from core.workflows.encode.models import QualityMode, VideoEncodeSettings  # noq
 from core.workflows.encode.runtime.nvencc import (  # noqa: E402
     build_nvencc_pipeline,
     detect_nvencc_available,
+    is_expected_nvencc_pipe_producer_exit,
     nvencc_intermediate_path,
 )
 
@@ -103,12 +104,30 @@ def _run_nvencc_pipeline(commands: list[list[str]]) -> tuple[int, str]:
     if p1.stdout is not None:
         p1.stdout.close()
 
-    p2_out, p2_err = p2.communicate()
-    p1_out, p1_err = p1.communicate()
-    if p1.returncode != 0 and p1.returncode != -13:  # -13 = SIGPIPE attendu
-        return p1.returncode, f"phase1 failed: {p1_err.decode(errors='replace')}"
+    try:
+        _p2_out, p2_err = p2.communicate()
+        p1_err = p1.stderr.read() if p1.stderr is not None else b""
+        p1.wait()
+    finally:
+        for proc in (p2, p1):
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        for stream in (p1.stderr, p2.stdout, p2.stderr):
+            if stream is not None:
+                stream.close()
+
+    # Vérifier le consommateur en premier : lorsqu'il échoue, FFmpeg reçoit
+    # ensuite SIGPIPE et son « Broken pipe » n'est qu'une conséquence qui
+    # masquerait sinon le vrai diagnostic NVEncC.
     if p2.returncode != 0:
-        return p2.returncode, f"phase2 failed: {p2_err.decode(errors='replace')}"
+        return p2.returncode, (
+            f"phase2 failed: {p2_err.decode(errors='replace')}\n"
+            f"phase1 stderr: {p1_err.decode(errors='replace')}"
+        )
+    p1_stderr = p1_err.decode(errors="replace")
+    if not is_expected_nvencc_pipe_producer_exit(p1.returncode, p1_stderr):
+        return p1.returncode, f"phase1 failed: {p1_err.decode(errors='replace')}"
 
     # Phase 3 : remux.
     p3 = subprocess.run(remux_cmd, capture_output=True)

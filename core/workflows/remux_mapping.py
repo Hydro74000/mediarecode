@@ -15,7 +15,7 @@ from core.workflows.common.metadata import (
     resolve_global_tags,
 )
 from core.workflows.common.timeline_sync import needs_strict_interleave as common_needs_strict_interleave
-from core.workflows.remux_models import RemuxConfig, RemuxError, SourceInput, TrackEntry
+from core.workflows.remux_models import RemuxConfig, RemuxError, TrackEntry
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,7 @@ def resolve_mapped_tracks(config: RemuxConfig) -> list[MappedTrack]:
         src_path, track = found
         if track.track_type not in STREAM_SPEC_BY_TYPE:
             raise RemuxError(
-                "Type de piste non supporté en remux FFmpeg : "
+                "Type de piste non supporté par le remux : "
                 f"{track.track_type} (file_index={file_index}, stream={mkv_tid})"
             )
 

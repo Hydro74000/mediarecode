@@ -1,12 +1,8 @@
 """
-core/workflows/encode/models.py — Data models, enums and constants for encoding.
+core/workflows/encode/models.py — Data models and enums for encoding.
 
 Public:
     QualityMode
-    SOFTWARE_VIDEO_CODECS, HARDWARE_VIDEO_CODECS, AUDIO_CODECS
-    X265_PRESETS, X264_PRESETS, SVTAV1_PRESETS, NVENC_PRESETS
-    TONEMAP_ALGORITHMS
-    presets_for_codec()
     VideoEncodeSettings, AudioTrackSettings, EncodeConfig, EncodePreset
     EncodeError
 """
@@ -19,21 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from core.workflows.encode.catalog import (
-    AMF_PRESETS,
-    AUDIO_CODECS,
-    HARDWARE_VIDEO_CODECS,
-    NVENC_PRESETS,
-    QSV_PRESETS,
-    SOFTWARE_VIDEO_CODECS,
-    SVTAV1_PRESETS,
-    TONEMAP_ALGORITHMS,
-    VAAPI_PRESETS,
-    X264_PRESETS,
-    X265_PRESETS,
-    presets_for_codec,
-)
-from core.workflows.common.track_types import TrackMetaEdit, TrackMetaPatch, TrackTimeOffset, TrackOffset
+from core.workflows.common.track_types import TrackMetaEdit, TrackTimeOffset
 
 
 class ChapterEntryLike(Protocol):
@@ -459,6 +441,11 @@ class EncodeConfig:
     #: Autorise une preview CLI à construire la commande même si le dossier de
     #: sortie n'existe pas encore. Ne doit pas être utilisé pour une exécution.
     allow_missing_output_dir: bool = False
+    #: Backend de muxage final Matroska (« ffmpeg » | « native » | « auto »).
+    #: Défaut ``ffmpeg`` (filet) ; la distinction « champ absent » vs « choix
+    #: explicite » est portée par les loaders (réglage global [matroska],
+    #: propagation du job conteneur via merge_remux_into_encode_config).
+    mux_backend: str = "ffmpeg"
 
     def __post_init__(self) -> None:
         if not self.video_tracks and self.video is not None:

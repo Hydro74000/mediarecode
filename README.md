@@ -4,7 +4,7 @@ FULL Vibecoded App for Proof of Concept - no human code, only human prompts and 
 
 Interface graphique pour préparer des fichiers vidéo, remuxer sans perte, réencoder avec `ffmpeg` (et `NVencC` en option pour NVidia), et fusionner des métadonnées Dolby Vision / HDR10+.
 
-Cette documentation correspond à **Muxiveo v3.1.0**.
+Cette documentation correspond à **Muxiveo v3.2.0**.
 
 ## Sommaire
 
@@ -29,7 +29,7 @@ Cette documentation correspond à **Muxiveo v3.1.0**.
   - [Outils configurables](#outils-configurables)
 - [Workflows](#workflows)
   - [Conteneur & Encodage — Routage global](#conteneur--encodage--routage-global)
-  - [Backend remux `ffmpeg` — Branches internes](#backend-remux-ffmpeg--branches-internes)
+  - [Backends remux Matroska — Branches internes](#backends-remux-matroska--branches-internes)
   - [Encode workflow — Branches internes](#encode-workflow--branches-internes)
   - [Fusion DoVi / HDR10+](#fusion-dovi--hdr10-1)
   - [Inspection d'un fichier (ffprobe + mediainfo)](#inspection-dun-fichier-ffprobe--mediainfo)
@@ -68,7 +68,7 @@ L'appimage AllInc inclue toutes les dépendances.
 | Cible | Binaire | 
 |-------|----------|
 | AppImage Linux | Muxiveo-x86_64_allinc-<version>.AppImage` + `dist/releases/Muxiveo-x86_64_allinc-<version>.AppImage.zsync` |
-| Package macOS natif | `Muxiveo-<version>.dmg` |
+| Package macOS natif | `Muxiveo-<version>.dmg` (Homebrew requis au premier lancement pour installer les outils système) |
 | Installateur Windows | `dist/releases/Muxiveo-Setup-<version>.exe` |
 | Release Homebrew Linux/macOS (preview)| `brew tap Hydro74000/muxiveo && brew install muxiveo` |
 
@@ -98,7 +98,7 @@ Le script `setup.py` installe automatiquement :
 |------------|----------|---------|
 | Linux Debian / Ubuntu | `python3 setup.py` | installe `ffmpeg`, `mediainfo` via `apt`, puis `dovi_tool` et `hdr10plus_tool` depuis GitHub |
 | Linux Fedora / RHEL | `python3 setup.py` | active RPM Fusion si nécessaire, installe `ffmpeg`, `mediainfo` via `dnf`, puis les outils GitHub |
-| macOS | `python3 setup.py` | installe `ffmpeg`, `mediainfo` via Homebrew, puis `dovi_tool` et `hdr10plus_tool` |
+| macOS | `python3 setup.py` | nécessite Homebrew ; installe `ffmpeg`, `mediainfo` via Homebrew, puis `dovi_tool` et `hdr10plus_tool` |
 | Windows | `py setup.py` | installe `ffmpeg` et `mediainfo` via `winget`, place `dovi_tool` et `hdr10plus_tool` dans `Muxiveo\tools`, puis renseigne `config.ini` avec les chemins détectés |
 
 Options utiles du script :
@@ -177,14 +177,16 @@ Le workflow unifié permet de :
 - **offload matériel complet** : décodage GPU activé automatiquement quand un encodeur matériel compatible est sélectionné (`cuda` pour NVENC, `qsv` pour QSV, `vaapi` pour VAAPI, `d3d11va` pour AMF Windows) — le CPU n'est plus sollicité pour le décodage en chemin pur hardware
 - configuration VAAPI optimisée : `rc_mode CQP/VBR` selon le mode qualité, `compression_level` exposé via preset, `async_depth 4` pour maximiser le pipeline GPU
 - precheck `force-8bit` pour les cibles **H.264** afin d'eviter certains chemins incompatibles
-- backend de remux nominal : `ffmpeg`
+- backend de remux configurable : `ffmpeg` par défaut, ou writer Matroska natif via `auto` / `native`
 
 Modes d'exécution :
 
 | Condition | Mode | Outils utilisés |
 |-----------|------|-----------------|
-| vidéo en `copy`, audio en `copy`, aucune transformation HDR | **Remuxage pur** | `ffmpeg` (langues BCP47 via tag `language`, purge `language-ietf`, chapitres, tags globaux, pièces jointes, champ `Muxing Application`) |
-| tout autre cas | **Encodage** | `ffmpeg` en passe de sortie unique (encodage/remux final + chapitres, tags, langue/titre de pistes, `Muxing Application`) |
+| plan compatible natif | **Remuxage Matroska natif** | lecteur/writer EBML interne ; FFmpeg intervient seulement pour canonicaliser ou préparer une source si nécessaire |
+| fonction non transposable en mode `auto` | **Repli compatible** | backend `ffmpeg`, avec motif explicite dans les logs |
+| backend `native` forcé et fonction non transposable | **Échec strict** | aucune sortie finale et suppression du fichier `.partial` |
+| encodage demandé | **Encodage** | FFmpeg ou l'encodeur choisi prépare les pistes ; le plan de conteneur reste distinct |
 
 Les fichiers **SRT** peuvent être ajoutés comme sources séparées de sous-titres. Ils sont détectés automatiquement et intégrés dans le remux final avec le format correct (`srt`).
 
@@ -200,11 +202,20 @@ Synchronisation audio automatisée en multi-source :
 
 Cette synchronisation audio est un outil utilisateur pour **calculer le bon décalage entre sources**. Elle complète la synchronisation timeline interne du backend `ffmpeg`, qui intervient plus tard pendant l'exécution pour sécuriser le muxage multi-source et les offsets déjà définis.
 
-Backend remux `ffmpeg` (par défaut) :
+Backend remux Matroska natif (par défaut via `auto`) :
+
+- écrit exclusivement des sorties `.mkv` multi-pistes avec ordre, timecodes et payloads conservés ;
+- conserve les propriétés imbriquées des pistes, le lacing, les BlockGroups, HDR10/HDR10+/Dolby Vision, chapitres, tags ciblés et pièces jointes lorsque le plan les sélectionne ;
+- produit des UIDs stables et écrit d'abord `sortie.mkv.partial`, validé par le lecteur interne et `ffprobe`, avant renommage atomique ;
+- ne dépend d'aucun muxeur Matroska externe ;
+- canonicalise les conteneurs non Matroska en MKV temporaire par copie de flux avec FFmpeg ;
+- en mode `auto`, replie sur FFmpeg lorsque le diagnostic natif annonce une fonction non transposable ; `native` interdit ce repli.
+
+Backend remux `ffmpeg` (forçable avec `mux_backend: "ffmpeg"`) :
 
 - sortie limitée à `MKV`
 - écrit la langue de piste en BCP47 sur `language` (ex. `fr-FR`) et purge le champ legacy `language-ietf` pour éviter les doublons incohérents
-- corrige au besoin les tags de langue Matroska en post-action, sans repasser par MKVToolNix
+- corrige au besoin les tags de langue Matroska en post-action, sans outil externe
 - permet la recopie ou l'édition des chapitres
 - permet d'écrire les tags globaux choisis
 - permet de recopier les pièces jointes source sélectionnées et d'ajouter des fichiers externes (cover incluse)
@@ -212,13 +223,19 @@ Backend remux `ffmpeg` (par défaut) :
 - télécharge la cover TMDB différée juste avant l'exécution (dans le dossier temporaire du process), puis nettoie ce dossier en fin de run
 - purge explicitement les balises techniques source `ENCODER` et `CREATION_TIME` avant écriture des métadonnées de sortie
 - n'écrit plus le tag libre `MUXING_APPLICATION` via `-metadata`
-- applique un patch binaire post-action (sans MKVToolNix) sur le header Matroska pour écrire **MuxingApp** (`0x4D80`) à la valeur unique `Muxiveo {version}` ; **WritingApp** (`0x5741`) reste intact
+- applique un patch binaire post-action sur le header Matroska pour écrire **MuxingApp** (`0x4D80`) à la valeur unique `Muxiveo {version}` ; **WritingApp** (`0x5741`) reste intact
 
-Limites connues du backend remux `ffmpeg` :
+Limites diagnostiquées :
 
-- pas de support des structures XML avancées de tags Matroska (cibles hiérarchiques fines)
-- pas d'édition du flag Matroska `track-enabled` (non exposé par FFmpeg)
-- la réécriture post-action reconstruit l'EBML du header si la valeur MuxingApp est plus longue que le champ existant ; en cas d'échec, le patch est ignoré avec warning
+- une piste chiffrée, une structure EBML illisible ou un sous-titre nécessitant OCR est refusé en `native` ;
+- une réécriture de synchronisation avancée encore matérialisée par FFmpeg déclenche le repli en `auto` ;
+- le backend FFmpeg historique ne garantit pas les structures avancées de tags ciblés ni `track-enabled` ;
+- l'équivalence annoncée avec les muxeurs de référence est sémantique, jamais octet à octet.
+
+Le script autonome `scripts/concat_video.py` est l'unique exception : `--mkvmerge`
+force MKVToolNix et, sans option, la sélection est Muxiveo puis `mkvmerge` puis
+FFmpeg. Cette compatibilité standalone n'ajoute aucune dépendance MKVToolNix au
+runtime ou au packaging de Muxiveo. Voir [le contrat détaillé](docs/remux-native.md).
 
 Les options HDR disponibles côté encodage sont :
 
@@ -561,7 +578,7 @@ Règles importantes :
 - l'écart de frame count doit être **<= 4 images**
 - le remux final conserve l'audio et les sous-titres de Film 1
 
-Le workflow UI Fusion DoVi/HDR10+ est désormais **FFmpeg-only** pour l'extraction HEVC et le remux final (plus de dépendance MKVToolNix dans ce panneau).
+Le workflow UI Fusion DoVi/HDR10+ est désormais **FFmpeg-only** pour l'extraction HEVC et le remux final.
 
 Profils Dolby Vision proposés :
 
@@ -624,7 +641,7 @@ Sous Windows, `setup.py` et le démarrage de l'application peuvent auto-détecte
 | `theme` | `dark` | thème visuel (`dark` ou `light`) |
 | `language` | auto-détecté | langue de l'interface (`fra` ou `eng`) |
 | `startup_panel` | `dashboard` | panneau ouvert au démarrage (`dashboard`, `container`, `encoding`, `dovi`, `settings`) |
-| `backend` (section `[remux]`) | `ffmpeg` | backend de remux (`ffmpeg`) |
+| `mux_backend` (section `[matroska]`) | `ffmpeg` | backend de muxage (`ffmpeg`, `auto` ou `native`) |
 | `tmdb_api_key` | vide | clé API TMDB v3 utilisée par la recherche IMDb/TMDB |
 | `tmdb_bearer_token` | vide | token Bearer TMDB v4 (utilisé si `tmdb_api_key` est vide, ou via `MUXIVEO_TMDB_BEARER_TOKEN`) |
 | `generate_nfo` | `true` | génère un fichier `.nfo` MediaInfo à côté du MKV final après workflow réussi |
@@ -671,8 +688,8 @@ output_dir = /mnt/nas/videos
 ffmpeg = /opt/ffmpeg/bin/ffmpeg
 dovi_tool = /usr/local/bin/dovi_tool
 
-[remux]
-backend = ffmpeg
+[matroska]
+mux_backend = ffmpeg
 
 [ui]
 theme = light
@@ -705,7 +722,7 @@ flowchart TD
     E1 --> Z
 ```
 
-### Backend remux `ffmpeg` — Branches internes
+### Backends remux Matroska — Branches internes
 
 ```mermaid
 flowchart TD
@@ -929,4 +946,4 @@ FFmpeg is licensed under LGPLv2.1+ or GPL depending on the build.
 This package includes a GPL-only FFmpeg build compiled without `--enable-nonfree`.
 The corresponding FFmpeg source code and build configuration are available at: [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg)
 
-*Muxiveo v3.1.0*
+*Muxiveo v3.2.0*

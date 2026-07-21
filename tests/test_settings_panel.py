@@ -4,7 +4,6 @@ tests/test_settings_panel.py — Régressions ciblées pour le panneau des régl
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 

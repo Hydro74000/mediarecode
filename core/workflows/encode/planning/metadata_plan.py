@@ -8,6 +8,7 @@ from core.workflows.encode.models import ChapterEntryLike, EncodeConfig
 
 from .plan_models import (
     ContainerMetadataPlan,
+    EncodePlan,
     MaterializedContainerMetadataPlan,
     PreparedContainerMetadataInputs,
 )
@@ -189,8 +190,9 @@ def append_container_metadata_args(
     include_copy_video_stream_passthrough: bool,
     is_video_passthrough: Callable[[EncodeConfig], bool],
     resolve_global_tags: Callable[[EncodeConfig], dict[str, str]],
-    build_track_meta_args: Callable[[EncodeConfig], list[str]],
+    build_track_meta_args: Callable[[EncodeConfig, EncodePlan | None], list[str]],
     container_metadata_plan: ContainerMetadataPlan | None = None,
+    encode_plan: EncodePlan | None = None,
 ) -> None:
     metadata_plan = container_metadata_plan or build_container_metadata_plan(
         config,
@@ -230,4 +232,4 @@ def append_container_metadata_args(
     cmd.extend(["-metadata", "encoder=", "-metadata", "creation_time="])
     for key, value in global_tags.items():
         cmd.extend(["-metadata", f"{key}={value}"])
-    cmd.extend(build_track_meta_args(config))
+    cmd.extend(build_track_meta_args(config, encode_plan))

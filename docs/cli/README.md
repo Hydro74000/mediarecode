@@ -25,6 +25,7 @@ Depuis les sources, `python3 main.py --cli ...` lance aussi le mode CLI sans ini
 | `inspect` | inspecte une source et sort du JSON |
 | `inspect --config-template` | génère un template JSON de départ |
 | `schema` | affiche le schéma JSON public du contrat CLI |
+| `tools` | affiche en JSON les chemins d'outils effectivement résolus par Muxiveo |
 | `validate` | valide un job/template sans exécuter ffmpeg |
 | `preview` | affiche la commande ffmpeg prévue |
 | `remux` | exécute un remux headless |
@@ -41,6 +42,7 @@ Muxiveo-cli inspect source.mkv
 Muxiveo-cli inspect source.mkv --config-template --output sortie.mkv
 Muxiveo-cli schema --output Muxiveo-cli.schema.json
 Muxiveo-cli schema --version decision-profile
+Muxiveo-cli tools
 Muxiveo-cli preview --config docs/cli/middle.json
 Muxiveo-cli preview --config docs/cli/middle.json --json
 Muxiveo-cli validate --config docs/cli/middle.json --json
@@ -80,6 +82,28 @@ Job minimal :
   "output": "sortie.mkv"
 }
 ```
+
+La sortie remux est exclusivement `.mkv`. Le champ additif `mux_backend` est
+facultatif et son absence conserve tous les jobs v1 existants :
+
+```json
+{
+  "version": 1,
+  "kind": "exact-job",
+  "sources": [{"path": "source.mkv"}],
+  "output": "sortie.mkv",
+  "mux_backend": "auto"
+}
+```
+
+- `auto` inspecte le plan complet, choisit le writer natif lorsqu'il peut tenir
+  le contrat et journalise tout repli FFmpeg avec sa raison exacte ;
+- `native` est strict et ne replie jamais ;
+- `ffmpeg` conserve le chemin historique.
+
+`--mux-backend auto|native|ffmpeg` surcharge le job pour `validate`, `preview`,
+`run`, `remux`, `batch` et les variantes basées sur un profil. La préférence
+persistée `[matroska] mux_backend = auto` ne remplace pas un choix explicite du job.
 
 ### `sources`
 
@@ -576,10 +600,22 @@ Exemple `preview --json` :
   "output": "sortie.mkv",
   "sources": [{"index": 0, "path": "source.mkv"}],
   "track_order": [{"source": 0, "id": 0}],
+  "selected_backend": "native",
+  "plan_version": 1,
+  "preparation_commands": [],
+  "native_diagnostics": [],
+  "execution_preview": {"backend": "native", "action": "internal_matroska_write"},
   "command": ["ffmpeg", "-hide_banner", "..."],
   "command_text": "ffmpeg \\\n    -hide_banner \\\n    ..."
 }
 ```
+
+`command` et la commande FFmpeg de référence restent présents pour la
+compatibilité des consommateurs v1. `selected_backend`, `plan_version`,
+`execution_preview`, `preparation_commands` et `native_diagnostics` décrivent
+l'exécution réelle. La preview texte commence par le backend choisi. En JSONL,
+l'événement `mux_backend` expose séparément le backend demandé/sélectionné, le
+repli, sa raison et les diagnostics.
 
 ## Verbosité
 

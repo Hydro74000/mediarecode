@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -48,10 +48,43 @@ class TestNvenccGithubToolEntry:
         assert pattern.get("alt_fmt") == "rpm"
         assert pattern.get("alt_suffix", "").endswith(".rpm")
 
-    def test_windows_x86_64_uses_7z(self, setup_mod):
+    def test_windows_x86_64_uses_native_powershell_compatible_zip(self, setup_mod):
         pattern = setup_mod.GITHUB_TOOLS["nvencc"]["asset_patterns"][("Windows", "x86_64")]
-        assert pattern["fmt"] == "7z"
-        assert pattern["suffix"].endswith(".7z")
+        assert pattern["fmt"] == "zip"
+        assert pattern["suffix"] == ".zip"
+        assert pattern["name_prefix"] == "Aviutl_NVEnc_"
+
+    def test_find_asset_honors_prefix_and_suffix(self, setup_mod):
+        release = {
+            "assets": [
+                {"name": "other-tool.zip", "browser_download_url": "https://example.invalid/other"},
+                {"name": "Aviutl_NVEnc_9.25.zip", "browser_download_url": "https://example.invalid/nvencc"},
+            ]
+        }
+
+        assert setup_mod._find_asset(
+            release, ".zip", name_prefix="Aviutl_NVEnc_"
+        ) == "https://example.invalid/nvencc"
+
+    def test_windows_zip_install_copies_nvencc_runtime_files(self, setup_mod, tmp_path):
+        archive = tmp_path / "nvencc.zip"
+        archive.write_bytes(b"placeholder")
+        destination = tmp_path / "tools"
+
+        def fake_powershell_run(_cmd, *, env, **_kwargs):
+            source = Path(env["MR_EXTRACT"]) / "exe_files" / "NVEncC" / "x64"
+            source.mkdir(parents=True)
+            (source / "NVEncC64.exe").write_bytes(b"exe")
+            (source / "avcodec.dll").write_bytes(b"dll")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(setup_mod, "_windows_powershell", return_value="powershell"), \
+             patch.object(setup_mod.subprocess, "run", side_effect=fake_powershell_run):
+            installed = setup_mod._install_windows_nvencc_zip(archive, destination)
+
+        assert installed == destination / "NVEncC64.exe"
+        assert installed.read_bytes() == b"exe"
+        assert (destination / "avcodec.dll").read_bytes() == b"dll"
 
 
 # ---------------------------------------------------------------------------

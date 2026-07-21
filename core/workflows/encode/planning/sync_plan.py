@@ -4,11 +4,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-from core.workflows.common.timeline_sync import needs_strict_interleave
 from core.workflows.encode.models import EncodeConfig
 from core.workflows.remux_models import RemuxConfig, SourceInput, TrackEntry
 
-from .offsets import track_offset_ms
+from .offsets import track_offset_ms as default_track_offset_ms
 from .plan_models import SyncAnalysisPlan, SyncMappedTrackPlan
 
 
@@ -154,7 +153,7 @@ def requires_file_sync_fallback_for_offsets(
         source_path = source_by_index.get(mapped_track.source_file_index)
         if source_path is None:
             continue
-        resolver = track_offset_ms or globals()["track_offset_ms"]
+        resolver = track_offset_ms or default_track_offset_ms
         offset_ms = resolver(
             offset_lookup,
             track_type=track_type,

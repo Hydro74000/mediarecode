@@ -28,11 +28,11 @@ from unittest.mock import patch
 
 import pytest
 
-from core.workflows.matroska_dovi_block_addition import (
+from core.matroska.editors.dovi import (
     DolbyVisionConfigRecord,
     MatroskaDoviBlockAdditionEditor,
 )
-from core.workflows.matroska_native_muxer import MatroskaNativeMuxer
+from core.matroska.native_muxer import MatroskaNativeMuxer
 
 
 pytestmark = pytest.mark.skipif(
@@ -127,7 +127,7 @@ class TestDoviBlockAdditionSurvivesFfmpegCopy:
             bl_signal_compat_id=1,
         )
         with patch(
-            "core.workflows.matroska_timestamp_reader.subprocess.run",
+            "core.matroska.timestamps.subprocess.run",
             return_value=subprocess.CompletedProcess(
                 args=[], returncode=0,
                 stdout=_make_packets_json([i * 0.041666 for i in range(5)]),

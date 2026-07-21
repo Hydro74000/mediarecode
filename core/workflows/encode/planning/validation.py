@@ -87,6 +87,11 @@ def validate_encode_config(
                 "requiert un pipeline vidéo unique FFmpeg/copy."
             )
 
+    # Le muxage final (transaction FFmpeg comme assembleur natif) écrit
+    # toujours du Matroska : une extension .mp4/.mov produirait un fichier
+    # au contenu incohérent avec son nom.
+    if config.output.suffix.lower() != ".mkv":
+        errors.append("La sortie d'encodage doit être un fichier .mkv.")
     output_dir = config.output.parent
     if not output_dir.exists():
         if not bool(getattr(config, "allow_missing_output_dir", False)):

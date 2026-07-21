@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.workflows.ebml_writer import (
+from core.matroska.ebml import (
     encode_sint,
     encode_uint,
     encode_unknown_size_marker,

@@ -123,7 +123,6 @@ from __future__ import annotations
 
 import colorsys
 import json
-import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -133,7 +132,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication, QDialog, QPushButton
+from PySide6.QtWidgets import QDialog, QPushButton
 
 from core.config import AppConfig
 from core.i18n import current_language, set_current_language, translate_text
@@ -141,14 +140,13 @@ from core.inspector import (
     AttachmentInfo, AudioTrack, ChapterEntry, ChapterInfo, FileInfo, HDRType, SubtitleTrack, VideoTrack,
     build_chapter_xml,
 )
-from core.matroska_attachment_extractor import extract_matroska_attachment_bytes
+from core.matroska.reader import MatroskaReader
 from core.media_info_fetcher import MediaDetails
 from core.profiles.decision import remux_config_to_decision_profile
-from core.runner import TaskSignals
 from core.workflows.remux import RemuxWorkflow
 from core.workflows.remux_mapping import resolved_global_tags
 from core.workflows.remux_models import (
-    RemuxConfig, RemuxError, SourceInput, TrackEntry, clone_track_entry, tracks_from_file_info,
+    RemuxConfig, SourceInput, TrackEntry, clone_track_entry, tracks_from_file_info,
 )
 from ui.panels.remux_panel import (
     RemuxPanel, SourceFile, _FILE_BAR_H, _FILE_PH_H, _FILE_ROW_H,
@@ -586,7 +584,7 @@ class TestValidate:
             track_order=[(0, 0)],
         )
         with patch(
-            "core.workflows.remux.tempfile.NamedTemporaryFile",
+            "core.workflows.remux_mapping.tempfile.NamedTemporaryFile",
             side_effect=OSError("blocked"),
         ):
             errors = self.wf.validate(cfg)
@@ -700,7 +698,7 @@ class TestTrackTable:
 
     def test_remove_tracks_by_file_id_leaves_other_ids(self, table):
         _fill_table(table, 2, file_id="A")
-        b_tracks = _fill_table(table, 1, file_id="B")
+        _fill_table(table, 1, file_id="B")
         table.remove_tracks_by_file_id("A")
         remaining = table.current_tracks()
         assert all(t.file_id == "B" for t in remaining)
@@ -751,7 +749,7 @@ class TestTrackTable:
 
     def test_set_all_enabled_checks_all(self, table):
         """set_all_enabled(True) → toutes les cases cochées."""
-        tracks = _fill_table(table, 3)
+        _fill_table(table, 3)
         # Décoche quelques cases d'abord
         table.item(0, _TrackTable.COL_CHECK).setCheckState(Qt.CheckState.Unchecked)
         table.item(2, _TrackTable.COL_CHECK).setCheckState(Qt.CheckState.Unchecked)
@@ -1002,8 +1000,10 @@ class TestPickFileColor:
             r = int(c[1:3], 16) / 255
             g = int(c[3:5], 16) / 255
             b = int(c[5:7], 16) / 255
-            _, l, _ = colorsys.rgb_to_hls(r, g, b)
-            assert l > 0.1, f"index {i}: couleur {c} trop sombre (l={l:.2f})"
+            _, lightness, _ = colorsys.rgb_to_hls(r, g, b)
+            assert lightness > 0.1, (
+                f"index {i}: couleur {c} trop sombre (l={lightness:.2f})"
+            )
 
     def test_not_near_white(self):
         """Luminosité < 0.9 pour tous les indices 0–19."""
@@ -1012,8 +1012,10 @@ class TestPickFileColor:
             r = int(c[1:3], 16) / 255
             g = int(c[3:5], 16) / 255
             b = int(c[5:7], 16) / 255
-            _, l, _ = colorsys.rgb_to_hls(r, g, b)
-            assert l < 0.9, f"index {i}: couleur {c} trop claire (l={l:.2f})"
+            _, lightness, _ = colorsys.rgb_to_hls(r, g, b)
+            assert lightness < 0.9, (
+                f"index {i}: couleur {c} trop claire (l={lightness:.2f})"
+            )
 
     def test_golden_angle_spread(self):
         """Les 8 premières couleurs couvrent le cercle chromatique (plage > 200°)."""
@@ -2701,7 +2703,7 @@ class TestAttachmentPreviewFormatting:
 
 class TestMatroskaAttachmentExtractor:
 
-    def test_extract_matroska_attachment_bytes_returns_expected_payload(self, tmp_path):
+    def test_attachment_data_returns_expected_payload(self, tmp_path):
         src = tmp_path / "sample.mkv"
         _make_mkv_with_attachments(
             src,
@@ -2711,7 +2713,7 @@ class TestMatroskaAttachmentExtractor:
             ],
         )
 
-        payload = extract_matroska_attachment_bytes(src, 1)
+        payload = MatroskaReader(src).attachment_data(1)
 
         assert payload == b"<root><demo>ok</demo></root>"
 
@@ -3074,3 +3076,26 @@ class TestRemuxWorkflowPostMetadata:
                     time.sleep(0.01)
 
         assert patch_hook.called
+
+
+def test_remux_panel_backend_selector_is_initialized_but_job_local(qt_app):
+    config = AppConfig()
+    config.matroska_mux_backend = "native"
+    panel = RemuxPanel(config)
+
+    assert panel._mux_backend_combo.currentData() == "native"
+    panel._mux_backend_combo.setCurrentIndex(panel._mux_backend_combo.findData("ffmpeg"))
+
+    assert panel._mux_backend_combo.currentData() == "ffmpeg"
+    assert config.matroska_mux_backend == "native"
+
+
+def test_remux_panel_refreshes_backend_after_settings_save(qt_app):
+    config = AppConfig()
+    config.matroska_mux_backend = "native"
+    panel = RemuxPanel(config)
+
+    config.matroska_mux_backend = "ffmpeg"
+    panel.refresh_runtime_settings()
+
+    assert panel._mux_backend_combo.currentData() == "ffmpeg"

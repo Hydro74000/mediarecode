@@ -17,6 +17,11 @@ from core.workflows.encode.models import EncodeConfig, EncodeError, QualityMode,
 from core.workflows.encode.planning.plan_models import EncodePlan
 from core.workflows.encode.planning.track_assembly import build_track_input_paths, resolve_track_assembly
 from core.workflows.hevc_static_hdr_metadata import inject_static_hdr_sei_file
+from core.matroska.editors.dovi import DolbyVisionConfigRecord
+from core.matroska.hevc.access_units import HevcStreamCancelled
+from core.matroska.hevc.payload_rewriter import MatroskaHevcPayloadRewriter
+from core.matroska.hevc.timing_skeleton import write_timing_skeleton
+from core.matroska.writer import MatroskaWriteCancelled
 from core.workflows.encode.runtime_helpers import (
     VideoTrackPreparationOrchestrator,
     VideoTrackPrepSpec,
@@ -63,15 +68,17 @@ class MultiVideoPipelineRunnerCallbacks:
     append_container_metadata_args: Callable[..., None]
     ffmpeg_progress_args: Callable[[], list[str]]
     run_cmd: Callable[[list[str], Path | None, str, Callable[[str], None], TaskSignals], str]
+    finalize_ffmpeg: Callable[..., str]
     log_step: Callable[[int, str], None]
     log_info: Callable[[str], None]
     ui_encode_progress_message: Callable[..., str]
-    build_video_only_two_pass_for_track: Callable[..., list[list[str]]]
     cleanup_two_pass_logs_for_prefix: Callable[[Path], None]
-    build_video_only_cmd_for_track: Callable[..., list[str]]
-    wrap_injected_hevc_for_reconstruction: Callable[..., list[str]]
+    build_video_only_mkv_commands: Callable[..., list[list[str]]]
+    build_dovi_record_from_rpu: Callable[..., DolbyVisionConfigRecord | None]
     build_multi_video_track_encode_commands: Callable[..., list[list[str]]]
     two_pass_log_prefix: Callable[[Path, str], Path]
+    #: Assemblage final Matroska natif (lot 2). None → reconstruction FFmpeg.
+    native_assemble: Callable[..., None] | None = None
 
 
 class MultiVideoPipelineRunner:
@@ -105,6 +112,7 @@ class MultiVideoPipelineRunner:
         if video.copy_dv or video.copy_hdr10plus or needs_static_hdr_bitstream_patch(video):
             rpu_bin = work_dir / f"video_{index}.rpu.bin"
             hdr10p_json = work_dir / f"video_{index}.hdr10plus.json"
+            enc_video_mkv = work_dir / f"video_{index}.enc.mkv"
             current_hevc = work_dir / f"video_{index}.enc.hevc"
             # dovi_tool / hdr10plus_tool n'acceptent que MKV ou HEVC annexB :
             # pré-extraction obligatoire pour MP4/MOV/TS/... (BSF hevc_mp4toannexb).
@@ -137,37 +145,64 @@ class MultiVideoPipelineRunner:
                 ], f"hdr10plus-extract-{index}")
                 local_cleanup.append(hdr10p_json)
 
-            if video.quality_mode == QualityMode.SIZE:
-                passlog_prefix = cb.two_pass_log_prefix(work_dir, f"video_{index}")
-                try:
-                    for pass_index, cmd in enumerate(
-                        cb.build_video_only_two_pass_for_track(
-                            config,
-                            video,
-                            source,
-                            current_hevc,
-                            offset_ms=offset_ms,
-                            passlog_prefix=passlog_prefix,
-                            thread_count=thread_count,
-                        ),
-                        start=1,
-                    ):
-                        run_cmd(cmd, f"ffmpeg-video-{index}-pass{pass_index}")
-                finally:
-                    cb.cleanup_two_pass_logs_for_prefix(passlog_prefix)
-            else:
-                run_cmd(
-                    cb.build_video_only_cmd_for_track(
+            record_for_rewriter = None
+            if video.copy_dv and rpu_bin.exists():
+                record_for_rewriter = cb.build_dovi_record_from_rpu(
+                    rpu_bin=rpu_bin,
+                    dovi_tool_bin=cb.bins["dovi_tool"],
+                )
+                if cb.native_assemble is not None and record_for_rewriter is None:
+                    raise EncodeError(
+                        f"Piste vidéo {index}: Dolby Vision natif requis mais le "
+                        "DolbyVisionConfigRecord n'a pas pu être construit."
+                    )
+
+            # Encode vidéo-seule vers un MKV mono-piste horodaté (lot 3) :
+            # les timestamps de la source ne sont plus réassociés au bitstream.
+            passlog_prefix = (
+                cb.two_pass_log_prefix(work_dir, f"video_{index}")
+                if video.quality_mode == QualityMode.SIZE
+                else None
+            )
+            try:
+                for pass_index, cmd in enumerate(
+                    cb.build_video_only_mkv_commands(
                         config,
                         video,
                         source,
-                        current_hevc,
+                        enc_video_mkv,
                         offset_ms=offset_ms,
+                        passlog_prefix=passlog_prefix,
                         thread_count=thread_count,
                     ),
-                    f"ffmpeg-video-{index}",
+                    start=1,
+                ):
+                    run_cmd(cmd, f"ffmpeg-video-{index}-pass{pass_index}" if passlog_prefix else f"ffmpeg-video-{index}")
+            finally:
+                if passlog_prefix is not None:
+                    cb.cleanup_two_pass_logs_for_prefix(passlog_prefix)
+            local_cleanup.append(enc_video_mkv)
+            # Squelette de timing : mêmes TrackEntry/timestamps que le MKV
+            # encodé, payloads vides. Le MKV encodé complet est libéré dès
+            # l'extraction annexB — pic disque 2× vidéo au lieu de 3×.
+            timing_mkv = work_dir / f"video_{index}.timing.mkv"
+            local_cleanup.append(timing_mkv)
+            try:
+                write_timing_skeleton(
+                    enc_video_mkv, timing_mkv,
+                    cancel_cb=signals._cancel_event.is_set,
                 )
+            except MatroskaWriteCancelled as exc:
+                raise TaskCancelledError() from exc
+            run_cmd([
+                cb.ffmpeg_bin, "-nostdin", "-y",
+                "-i", str(enc_video_mkv),
+                "-map", "0:v:0", "-c", "copy",
+                "-bsf:v", "hevc_mp4toannexb",
+                "-f", "hevc", str(current_hevc),
+            ], f"annexb-from-encoded-{index}")
             local_cleanup.append(current_hevc)
+            remove_path(enc_video_mkv)
 
             if video.copy_hdr10plus and hdr10p_json.exists():
                 hdr10_out = work_dir / f"video_{index}.hdr10plus.hevc"
@@ -178,6 +213,7 @@ class MultiVideoPipelineRunner:
                     "-o", str(hdr10_out),
                 ], f"hdr10plus-inject-{index}")
                 local_cleanup.append(hdr10_out)
+                remove_path(current_hevc)
                 current_hevc = hdr10_out
             if video.copy_dv and rpu_bin.exists():
                 dovi_out = work_dir / f"video_{index}.dovi.hevc"
@@ -190,6 +226,7 @@ class MultiVideoPipelineRunner:
                     "-o", str(dovi_out),
                 ], f"dovi-inject-{index}")
                 local_cleanup.append(dovi_out)
+                remove_path(current_hevc)
                 current_hevc = dovi_out
 
             if should_reinject_static_hdr_metadata(video):
@@ -222,15 +259,29 @@ class MultiVideoPipelineRunner:
                 else:
                     static_hdr_out.unlink(missing_ok=True)
 
+            # Réécriture des payloads dans le squelette de timing : timestamps
+            # de l'encodeur conservés, signalisation DoVi portée par le
+            # TrackEntry. Aucun repli après le démarrage : un échec est fatal.
             wrapped = work_dir / f"video_{index}.wrapped.mkv"
-            run_cmd(
-                cb.wrap_injected_hevc_for_reconstruction(
-                    source=source,
-                    hevc_input=current_hevc,
-                    mkv_output=wrapped,
-                ),
-                f"ffmpeg-wrap-video-{index}",
+            try:
+                rewrite_result = MatroskaHevcPayloadRewriter().rewrite(
+                    encoded_mkv=timing_mkv,
+                    injected_hevc=current_hevc,
+                    output=wrapped,
+                    dovi_record=record_for_rewriter,
+                    cancel_cb=signals._cancel_event.is_set,
+                )
+            except (HevcStreamCancelled, MatroskaWriteCancelled) as exc:
+                raise TaskCancelledError() from exc
+            cb.log_info(
+                f"Piste video {index}: payloads réécrits "
+                f"({rewrite_result.frames_rewritten} frame(s), timestamps encodeur)."
             )
+            # Le squelette et le bitstream injecté ne sont plus consultés
+            # après le retour du rewriter. Les libérer ici borne le pic disque
+            # quand plusieurs pistes HDR/DoVi sont préparées en parallèle.
+            remove_path(timing_mkv)
+            remove_path(current_hevc)
             local_cleanup.append(wrapped)
             return PreparedVideoInput(
                 input_args=[],
@@ -442,6 +493,19 @@ class MultiVideoPipelineRunner:
                     if prepared_item is not None
                 ]
 
+                if cb.native_assemble is not None:
+                    cb.log_step(5, "Assemblage final Matroska natif multi-pistes")
+                    cb.native_assemble(
+                        config,
+                        prepared_inputs=prepared_inputs_ready,
+                        track_specs=track_specs,
+                        signals=signals,
+                        plan=encode_plan,
+                        work_dir=work_dir,
+                    )
+                    signals.finished.emit(str(config.output))
+                    return
+
                 cb.log_step(5, "Reconstruction finale multi-pistes vidéo")
                 all_sources = list(encode_plan.all_sources)
                 source_idx = cb.source_input_index_map(all_sources, len(prepared_inputs_ready))
@@ -536,7 +600,14 @@ class MultiVideoPipelineRunner:
                     plan=encode_plan,
                 )
                 final_cmd.append(str(config.output))
-                output = _run(final_cmd, label="ffmpeg-multi-video")
+                output = cb.finalize_ffmpeg(
+                    config,
+                    final_cmd,
+                    work_dir,
+                    "ffmpeg-multi-video",
+                    signals,
+                    plan=encode_plan,
+                )
                 signals.finished.emit(output)
             except TaskCancelledError:
                 signals.cancelled.emit()

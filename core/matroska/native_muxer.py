@@ -1,12 +1,12 @@
 """
-core/workflows/matroska_native_muxer.py
+core/matroska/native_muxer.py
 
 Muxer Matroska natif Python pour streams HEVC mono-track.
 
 Cas d'usage : encapsuler un flux HEVC annexB ré-encodé (ayant subi
 l'injection RPU DoVi / HDR10+ par dovi_tool / hdr10plus_tool) dans un MKV
 en réutilisant les timestamps de la source d'origine. Permet de
-préserver les sources VFR sans dépendre de mkvmerge.
+préserver les sources VFR sans outil externe.
 
 Pourquoi un muxer natif et pas ffmpeg ?
 ========================================
@@ -15,7 +15,7 @@ ffmpeg ``-f hevc -c copy → mkv`` :
   - écrit les PTS via le BSF ``setts=pts=N/(fps*TB)`` qui suppose un
     framerate constant — détruit l'alignement audio en VFR ;
   - n'écrit PAS le ``BlockAdditionMapping`` Dolby Vision au niveau
-    conteneur (déjà documenté dans matroska_dovi_block_addition.py).
+    conteneur (déjà documenté dans ``editors/dovi.py``).
 
 Le muxer natif :
   1. Parse le HEVC en access units (1 AU = 1 frame) via
@@ -45,23 +45,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
-from core.workflows.ebml_writer import (
+from core.version import WRITING_APPLICATION_TAG
+
+from .ebml import (
     ascii_element,
     binary_element,
     element,
-    encode_uint,
-    encode_unknown_size_marker,
-    encode_vint_size,
     encode_vint_size_minimal,
     float_element,
     string_element,
     uint_element,
     void_element,
 )
-from core.workflows.matroska_dovi_block_addition import DolbyVisionConfigRecord
-from core.workflows.matroska_element_ids import (
+from .editors.dovi import DolbyVisionConfigRecord
+from .ids import (
     BLOCK_ADDITION_MAPPING_ID,
     BLOCK_ADD_ID_EXTRA_DATA_ID,
     BLOCK_ADD_ID_NAME_ID,
@@ -72,7 +70,9 @@ from core.workflows.matroska_element_ids import (
     CODEC_PRIVATE_ID,
     CUES_ID,
     CUE_CLUSTER_POSITION_ID,
+    CUE_DURATION_ID,
     CUE_POINT_ID,
+    CUE_RELATIVE_POSITION_ID,
     CUE_TIME_ID,
     CUE_TRACK_ID,
     CUE_TRACK_POSITIONS_ID,
@@ -98,10 +98,8 @@ from core.workflows.matroska_element_ids import (
     SEEK_ID,
     SEEK_ID_FIELD_ID,
     SEEK_POSITION_ID,
-    SEGMENT_ID,
     SIMPLE_BLOCK_FLAG_KEYFRAME,
     SIMPLE_BLOCK_ID,
-    TIMESTAMP_ID,
     TIMESTAMP_SCALE_ID,
     TRACKS_ID,
     TRACK_ENTRY_ID,
@@ -110,14 +108,13 @@ from core.workflows.matroska_element_ids import (
     TRACK_TYPE_VIDEO,
     TRACK_UID_ID,
     VIDEO_ID,
-    VOID_ID,
     WRITING_APP_ID,
 )
-from core.workflows.matroska_hevc_au_splitter import (
+from .hevc.access_units import (
     HevcAccessUnit,
     split_into_access_units,
 )
-from core.workflows.matroska_timestamp_reader import (
+from .timestamps import (
     MatroskaTimestampReader,
     TimestampSequence,
 )
@@ -129,20 +126,10 @@ _FOURCC_DVCC = 0x64766343  # "dvcC"
 
 # --- Réglages muxer ---------------------------------------------------------
 
-#: Taille cible (frames) d'un Cluster. mkvmerge utilise ~1 s ; à 24 fps,
+#: Taille cible (frames) d'un Cluster. L'usage courant est ~1 s ; à 24 fps,
 #: 24 frames/cluster donne une granularité de seek correcte sans bloquer
 #: la lecture (Cluster trop gros → pic mémoire chez le démuxeur).
 _DEFAULT_FRAMES_PER_CLUSTER = 24
-
-#: Espace réservé pour le SeekHead initial (assez pour ~5 entrées de 30
-#: octets chacune + Void de queue). Permet de finaliser le SeekHead à la
-#: fin sans réécrire tout le fichier.
-_SEEK_HEAD_RESERVED_BYTES = 256
-
-#: Espace réservé pour le champ Duration de Info (qui ne peut pas être
-#: rempli avant d'avoir muxé la dernière frame).
-_INFO_RESERVED_EXTRA_BYTES = 64
-
 
 # --- HEVC config record (hvcC) extraction ----------------------------------
 
@@ -170,37 +157,173 @@ def _extract_hvcc_components(au: HevcAccessUnit) -> _HvccComponents:
     return _HvccComponents(vps=vps, sps=sps, pps=pps)
 
 
+class _BitReader:
+    """Lecture bit à bit big-endian d'un RBSP (exp-golomb inclus)."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._position = 0
+
+    def u(self, count: int) -> int:
+        value = 0
+        for _ in range(count):
+            byte = self._data[self._position >> 3]
+            value = (value << 1) | ((byte >> (7 - (self._position & 7))) & 1)
+            self._position += 1
+        return value
+
+    def ue(self) -> int:
+        zeros = 0
+        while self.u(1) == 0:
+            zeros += 1
+            if zeros > 32:
+                raise ValueError("Exp-Golomb invalide (préfixe trop long).")
+        return (1 << zeros) - 1 + (self.u(zeros) if zeros else 0)
+
+
+def _rbsp_from_nal(nal: bytes) -> bytes:
+    """Supprime les octets d'emulation prevention (00 00 03) d'un NAL."""
+    out = bytearray()
+    zeros = 0
+    for byte in nal:
+        if zeros >= 2 and byte == 3:
+            zeros = 0
+            continue
+        out.append(byte)
+        zeros = zeros + 1 if byte == 0 else 0
+    return bytes(out)
+
+
+@dataclass(frozen=True)
+class _SpsSummary:
+    """Champs du SPS HEVC nécessaires au header hvcC."""
+
+    profile_space: int
+    tier_flag: int
+    profile_idc: int
+    compatibility_flags: int      # 32 bits
+    constraint_flags: int         # 48 bits
+    level_idc: int
+    chroma_format_idc: int
+    bit_depth_luma_minus8: int
+    bit_depth_chroma_minus8: int
+    max_sub_layers_minus1: int
+    temporal_id_nesting: int
+
+
+def _parse_sps_summary(sps_nal: bytes) -> _SpsSummary | None:
+    """Extrait profile_tier_level, chroma et bit depths du SPS (ITU-T H.265 §7.3.2.2)."""
+    try:
+        rbsp = _rbsp_from_nal(sps_nal)
+        reader = _BitReader(rbsp[2:])  # saute le header NAL (2 octets)
+        reader.u(4)  # sps_video_parameter_set_id
+        max_sub_layers_minus1 = reader.u(3)
+        temporal_id_nesting = reader.u(1)
+        # profile_tier_level(1, max_sub_layers_minus1) — partie générale : 12 octets.
+        profile_space = reader.u(2)
+        tier_flag = reader.u(1)
+        profile_idc = reader.u(5)
+        compatibility_flags = reader.u(32)
+        constraint_flags = reader.u(48)
+        level_idc = reader.u(8)
+        return _finish_sps_parse(
+            reader, max_sub_layers_minus1, temporal_id_nesting,
+            profile_space, tier_flag, profile_idc,
+            compatibility_flags, constraint_flags, level_idc,
+        )
+    except (IndexError, ValueError):
+        return None
+
+
+def _finish_sps_parse(
+    reader: _BitReader,
+    max_sub_layers_minus1: int,
+    temporal_id_nesting: int,
+    profile_space: int,
+    tier_flag: int,
+    profile_idc: int,
+    compatibility_flags: int,
+    constraint_flags: int,
+    level_idc: int,
+) -> _SpsSummary:
+    if max_sub_layers_minus1:
+        presence = [(reader.u(1), reader.u(1)) for _ in range(max_sub_layers_minus1)]
+        for _ in range(8 - max_sub_layers_minus1):
+            reader.u(2)  # reserved_zero_2bits
+        for profile_present, level_present in presence:
+            if profile_present:
+                reader.u(88)
+            if level_present:
+                reader.u(8)
+    reader.ue()  # sps_seq_parameter_set_id
+    chroma_format_idc = reader.ue()
+    if chroma_format_idc == 3:
+        reader.u(1)  # separate_colour_plane_flag
+    reader.ue()  # pic_width_in_luma_samples
+    reader.ue()  # pic_height_in_luma_samples
+    if reader.u(1):  # conformance_window_flag
+        reader.ue(); reader.ue(); reader.ue(); reader.ue()
+    bit_depth_luma_minus8 = reader.ue()
+    bit_depth_chroma_minus8 = reader.ue()
+    return _SpsSummary(
+        profile_space=profile_space,
+        tier_flag=tier_flag,
+        profile_idc=profile_idc,
+        compatibility_flags=compatibility_flags,
+        constraint_flags=constraint_flags,
+        level_idc=level_idc,
+        chroma_format_idc=chroma_format_idc,
+        bit_depth_luma_minus8=bit_depth_luma_minus8,
+        bit_depth_chroma_minus8=bit_depth_chroma_minus8,
+        max_sub_layers_minus1=max_sub_layers_minus1,
+        temporal_id_nesting=temporal_id_nesting,
+    )
+
+
 def _build_hvcc(components: _HvccComponents, sps_bytes: bytes | None = None) -> bytes:
     """
-    Construit un CodecPrivate ``hvcC`` ISO/IEC 14496-15 minimal.
+    Construit un CodecPrivate ``hvcC`` ISO/IEC 14496-15 depuis le bitstream.
 
-    Pour un muxage Matroska (qui fournit le bitstream en annexB via
-    SimpleBlock), de nombreux champs hvcC peuvent rester à 0/défaut tant
-    que les NAL arrays VPS/SPS/PPS sont corrects. C'est ce que mkvmerge
-    fait pour les pistes HEVC en mode "raw HEVC → MKV".
+    Le profile_tier_level (profil, tier, niveau, flags de compatibilité et
+    de contrainte), le chroma_format_idc et les bit depths sont extraits du
+    SPS ; si le SPS est illisible, un repli neutre est utilisé (les NAL
+    arrays VPS/SPS/PPS restent la source de vérité pour les décodeurs).
     """
-    _ = sps_bytes  # extension future : extraire les vrais champs depuis le SPS
+    sps_source = sps_bytes or (components.sps[0] if components.sps else None)
+    summary = _parse_sps_summary(sps_source) if sps_source else None
 
-    # Header minimaliste hvcC (23 octets) + arrays NAL.
     out = bytearray()
     out.append(1)             # configurationVersion
-    # general_profile_space(2)|tier_flag(1)|profile_idc(5)
-    out.append(0x21)          # profile_space=0, tier_flag=0, profile_idc=1 (Main)
-    out.extend(b"\x00\x00\x00\x00")     # general_profile_compatibility_flags
-    out.extend(b"\x00\x00\x00\x00\x00\x00")  # general_constraint_indicator_flags
-    out.append(0x5A)          # general_level_idc (level 9.0 = laisse lecteurs libres)
+    if summary is not None:
+        out.append((summary.profile_space << 6) | (summary.tier_flag << 5) | summary.profile_idc)
+        out.extend(summary.compatibility_flags.to_bytes(4, "big"))
+        out.extend(summary.constraint_flags.to_bytes(6, "big"))
+        out.append(summary.level_idc)
+    else:
+        # Repli : profil Main / niveau 3.0, champs de compatibilité neutres.
+        out.append(0x21)
+        out.extend(b"\x00\x00\x00\x00")
+        out.extend(b"\x00\x00\x00\x00\x00\x00")
+        out.append(0x5A)
     # min_spatial_segmentation_idc (12 bits, padded)
     out.extend(b"\xF0\x00")
-    out.append(0xFC)          # parallelismType (fields padded)
-    out.append(0xFC)          # chromaFormat (4:2:0 par défaut, padded)
-    out.append(0xF8)          # bitDepthLumaMinus8
-    out.append(0xF8)          # bitDepthChromaMinus8
-    out.extend(b"\x00\x00")   # avgFrameRate
+    out.append(0xFC)          # parallelismType (padded)
+    if summary is not None:
+        out.append(0xFC | (summary.chroma_format_idc & 0x03))
+        out.append(0xF8 | (summary.bit_depth_luma_minus8 & 0x07))
+        out.append(0xF8 | (summary.bit_depth_chroma_minus8 & 0x07))
+    else:
+        out.append(0xFC)      # chromaFormat inconnu
+        out.append(0xF8)      # bitDepthLumaMinus8 inconnu
+        out.append(0xF8)      # bitDepthChromaMinus8 inconnu
+    out.extend(b"\x00\x00")   # avgFrameRate (non signalé)
     # constantFrameRate(2)|numTemporalLayers(3)|temporalIdNested(1)|lengthSizeMinusOne(2)
-    # lengthSizeMinusOne = 3 → tailles NAL sur 4 octets dans CodecPrivate (ISO BMFF).
-    # Mais en Matroska on émet du annexB dans les SimpleBlocks, donc cette valeur
-    # n'est pas critique. mkvmerge met 3.
-    out.append(0x03)
+    # lengthSizeMinusOne = 3 → tailles NAL sur 4 octets (convention usuelle).
+    if summary is not None:
+        num_temporal_layers = min(summary.max_sub_layers_minus1 + 1, 7)
+        out.append((num_temporal_layers << 3) | (summary.temporal_id_nesting << 2) | 0x03)
+    else:
+        out.append(0x03)
     # numOfArrays
     arrays: list[tuple[int, list[bytes]]] = []
     if components.vps:
@@ -259,6 +382,20 @@ def _build_simple_block(
         + payload
     )
     return element(SIMPLE_BLOCK_ID, block_payload)
+
+
+def _length_prefixed_payload(access_unit: HevcAccessUnit, length_size: int) -> bytes:
+    """Reframe un AU annexB vers le framing hvcC (NAL préfixées longueur).
+
+    Aucune NAL n'est supprimée : parameter sets, AUD, SEI et RPU DoVi restent
+    dans le payload, dans l'ordre du flux (parité muxeurs de référence).
+    ``length_size`` vient du champ lengthSizeMinusOne du CodecPrivate hvcC.
+    """
+    parts: list[bytes] = []
+    for nal in access_unit.nal_units:
+        parts.append(len(nal.payload).to_bytes(length_size, "big"))
+        parts.append(nal.payload)
+    return b"".join(parts)
 
 
 # --- DoVi BlockAdditionMapping (réutilise le record commun) ----------------
@@ -356,7 +493,7 @@ def _build_seek_head(entries: list[tuple[bytes, int]], *, total_size: int) -> by
     if len(body) > total_size:
         raise ValueError(
             f"SeekHead ({len(body)} octets) dépasse la taille réservée "
-            f"({total_size}) — augmenter _SEEK_HEAD_RESERVED_BYTES."
+            f"({total_size}) — augmenter la réserve du writer."
         )
     pad = total_size - len(body)
     if pad == 0:
@@ -377,30 +514,45 @@ def _build_seek_head(entries: list[tuple[bytes, int]], *, total_size: int) -> by
 @dataclass
 class _ClusterRecord:
     relative_offset: int      # offset du Cluster vs début du Segment
-    timestamp_ms: int         # Timestamp absolu du Cluster (ms)
-    cue_points: list[tuple[int, int]]  # (frame_pts_ms, relative_block_offset)
+    timestamp_ms: int         # Timestamp absolu du Cluster (ticks)
+    #: Entrées d'index : (time_ticks, track_number, relative_position,
+    #: duration_ticks | None). ``relative_position`` est relatif au premier
+    #: octet du payload du Cluster (RFC 9559, CueRelativePosition).
+    cue_points: list[tuple[int, int, int, int | None]]
 
 
-def _build_cues(clusters: list[_ClusterRecord], track_number: int) -> bytes:
+def _build_cues(clusters: list[_ClusterRecord]) -> bytes:
     """
-    Construit l'élément Cues à partir des records de clusters.
-
-    Pour limiter la taille, on n'écrit qu'un CuePoint par keyframe (les
-    clusters ont un cue_points liste pour les keyframes ; en pratique,
-    1 CuePoint = 1 Cluster est suffisant pour le seek MKV courant).
+    Construit l'élément Cues : CuePoints triés par CueTime croissant, un
+    CueTrackPositions par piste indexée à ce temps (vidéo : keyframes de
+    toutes les pistes ; sous-titres : chaque entrée, avec CueDuration quand
+    elle est connue ; audio-only : un point de la piste primaire par Cluster).
     """
-    points: list[bytes] = []
+    entries: list[tuple[int, int, int, int, int | None]] = []
     for cluster in clusters:
-        for frame_ms, _rel in cluster.cue_points:
-            cue_track_pos = element(CUE_TRACK_POSITIONS_ID, b"".join([
+        for time_ticks, track_number, relative_position, duration_ticks in cluster.cue_points:
+            entries.append((
+                time_ticks, track_number, cluster.relative_offset,
+                relative_position, duration_ticks,
+            ))
+    entries.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    points: list[bytes] = []
+    index = 0
+    while index < len(entries):
+        time_ticks = entries[index][0]
+        positions = b""
+        while index < len(entries) and entries[index][0] == time_ticks:
+            _time, track_number, cluster_offset, relative_position, duration_ticks = entries[index]
+            body = b"".join([
                 uint_element(CUE_TRACK_ID, track_number),
-                uint_element(CUE_CLUSTER_POSITION_ID, cluster.relative_offset),
-            ]))
-            point = element(CUE_POINT_ID, b"".join([
-                uint_element(CUE_TIME_ID, frame_ms),
-                cue_track_pos,
-            ]))
-            points.append(point)
+                uint_element(CUE_CLUSTER_POSITION_ID, cluster_offset),
+                uint_element(CUE_RELATIVE_POSITION_ID, relative_position),
+            ])
+            if duration_ticks:
+                body += uint_element(CUE_DURATION_ID, duration_ticks)
+            positions += element(CUE_TRACK_POSITIONS_ID, body)
+            index += 1
+        points.append(element(CUE_POINT_ID, uint_element(CUE_TIME_ID, time_ticks) + positions))
     return element(CUES_ID, b"".join(points))
 
 
@@ -463,7 +615,7 @@ class MatroskaNativeMuxer:
         *,
         ffprobe_bin: str = "ffprobe",
         muxing_app: str = "Muxiveo native muxer",
-        writing_app: str = "Muxiveo",
+        writing_app: str = WRITING_APPLICATION_TAG,
         frames_per_cluster: int = _DEFAULT_FRAMES_PER_CLUSTER,
     ) -> None:
         self._timestamp_reader = MatroskaTimestampReader(ffprobe_bin=ffprobe_bin)
@@ -562,7 +714,14 @@ class MatroskaNativeMuxer:
         track_uid: int,
         language: str,
     ) -> MatroskaNativeMuxResult:
-        track_entry = _build_video_track_entry(
+        # Compatibility façade: build the historical HEVC TrackEntry, then
+        # delegate the document to the generic deterministic writer.
+        from io import BytesIO
+        from .mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack
+        from .reader import MatroskaBlock, MatroskaReader, MatroskaTrack, read_element
+        from .writer import MatroskaWriter
+
+        track_entry_raw = _build_video_track_entry(
             track_number=track_number,
             track_uid=track_uid,
             codec_private=codec_private,
@@ -571,153 +730,59 @@ class MatroskaNativeMuxer:
             dovi_record=dovi_record,
             language=language,
         )
-        tracks = _build_tracks(track_entry)
-        info = _build_info(
-            duration_ms=float(pts_seq.total_duration_ms),
-            muxing_app=self._muxing_app,
-            writing_app=self._writing_app,
+        stream = BytesIO(track_entry_raw)
+        entry_element = read_element(stream, limit=len(track_entry_raw))
+        if entry_element is None or entry_element.size is None:
+            raise RuntimeError("TrackEntry HEVC natif invalide")
+        raw_entry = track_entry_raw[entry_element.payload_offset:entry_element.end]
+        source_track = MatroskaTrack(
+            number=track_number, uid=track_uid, track_type=TRACK_TYPE_VIDEO,
+            codec_id="V_MPEGH/ISO/HEVC", codec_private=codec_private,
+            language_bcp47="", language=language, name="", raw_entry=raw_entry,
         )
-
-        # On écrit le Segment avec une taille "unknown" (8 octets de FF) :
-        # de nombreux démuxeurs (ffmpeg, mpv, vlc) le supportent et c'est
-        # plus simple qu'une réécriture de la taille à la fin.
-        ebml_header = _build_ebml_header()
-        segment_id_with_unknown_size = SEGMENT_ID + encode_unknown_size_marker(length=8)
-
-        with output.open("wb") as fh:
-            fh.write(ebml_header)
-            segment_start = fh.tell()
-            fh.write(segment_id_with_unknown_size)
-            payload_start = fh.tell()  # début du payload Segment
-
-            # Réserve l'emplacement du SeekHead (rempli en fin).
-            seek_head_offset_in_segment = fh.tell() - payload_start
-            fh.write(b"\x00" * _SEEK_HEAD_RESERVED_BYTES)
-
-            # Info — sa taille est connue à l'avance.
-            info_offset_in_segment = fh.tell() - payload_start
-            fh.write(info)
-
-            # Tracks
-            tracks_offset_in_segment = fh.tell() - payload_start
-            fh.write(tracks)
-
-            # Clusters + collecte des Cues
-            clusters: list[_ClusterRecord] = []
-            self._write_clusters(
-                fh=fh,
-                payload_start=payload_start,
-                access_units=access_units,
-                pts_seq=pts_seq,
-                track_number=track_number,
-                clusters=clusters,
+        mux_track = MatroskaMuxTrack(
+            source=output, source_track=source_track,
+            output_number=track_number, output_uid=track_uid,
+            language=language, flag_default=True,
+        )
+        # Blocks : payload reframé annexB → length-prefixed selon le hvcC,
+        # toutes NAL conservées. SimpleBlocks avec le vrai bit keyframe (AU
+        # IRAP) — aucune durée par bloc, sinon le writer bascule en
+        # BlockGroup sans ReferenceBlock et chaque frame serait vue
+        # keyframe ; la durée totale vit dans Info.Duration via le plan.
+        # Générateur (ordre producteur = ordre PTS source) : une seule copie
+        # reframée en vol à la fois.
+        length_size = (codec_private[21] & 0x03) + 1
+        packets = (
+            MatroskaMuxPacket(
+                track_number,
+                MatroskaBlock(
+                    track_number=track_number,
+                    timestamp_ms=pts,
+                    flags=SIMPLE_BLOCK_FLAG_KEYFRAME if access_unit.is_keyframe else 0,
+                    payload=_length_prefixed_payload(access_unit, length_size),
+                    timestamp_ns=pts * 1_000_000,
+                ),
+                source_sequence=sequence,
             )
-
-            # Cues
-            cues_offset_in_segment = fh.tell() - payload_start
-            cues = _build_cues(clusters, track_number=track_number)
-            fh.write(cues)
-
-            # Réécrit le SeekHead avec les vrais offsets relatifs.
-            seek_entries: list[tuple[bytes, int]] = [
-                (INFO_ID, info_offset_in_segment),
-                (TRACKS_ID, tracks_offset_in_segment),
-                (CUES_ID, cues_offset_in_segment),
-            ]
-            seek_head_bytes = _build_seek_head(seek_entries, total_size=_SEEK_HEAD_RESERVED_BYTES)
-            fh.seek(payload_start + seek_head_offset_in_segment)
-            fh.write(seek_head_bytes)
-
-            fh.flush()
-
-        _ = segment_start  # peut servir au debug
+            for sequence, (access_unit, pts) in enumerate(zip(access_units, pts_seq.pts_ms))
+        )
+        MatroskaWriter().write(MatroskaMuxPlan(
+            output=output, tracks=(mux_track,), packets=packets,
+            duration_ms=pts_seq.total_duration_ms,
+            duration_ns=pts_seq.total_duration_ms * 1_000_000,
+            muxing_app=self._muxing_app, writing_app=self._writing_app,
+        ))
+        cluster_count = sum(
+            item.element_id == CLUSTER_ID for item in MatroskaReader(output).top_level()
+        )
         return MatroskaNativeMuxResult(
             output_path=output,
             track_number=track_number,
             frames_written=len(access_units),
-            cluster_count=len(clusters),
+            cluster_count=cluster_count,
             duration_ms=pts_seq.total_duration_ms,
         )
-
-    def _write_clusters(
-        self,
-        *,
-        fh: BinaryIO,
-        payload_start: int,
-        access_units: list[HevcAccessUnit],
-        pts_seq: TimestampSequence,
-        track_number: int,
-        clusters: list[_ClusterRecord],
-    ) -> None:
-        idx = 0
-        n = len(access_units)
-        while idx < n:
-            cluster_start_in_segment = fh.tell() - payload_start
-            cluster_pts_ms = pts_seq.pts_ms[idx]
-
-            # Taille de cluster : on prend frames_per_cluster mais on coupe
-            # si l'offset relatif du SimpleBlock dépasse int16 (32 s).
-            cluster_aus: list[tuple[int, int, HevcAccessUnit]] = []
-            cue_points: list[tuple[int, int]] = []
-            block_offsets: list[int] = []
-            written_payload = bytearray()
-
-            for j in range(self._frames_per_cluster):
-                if idx + j >= n:
-                    break
-                au = access_units[idx + j]
-                pts = pts_seq.pts_ms[idx + j]
-                offset = pts - cluster_pts_ms
-                if not -32768 <= offset <= 32767:
-                    # Trop loin du timestamp de cluster → on referme le
-                    # cluster ici pour respecter int16.
-                    break
-                block = _build_simple_block(
-                    track_number=track_number,
-                    timestamp_offset=offset,
-                    payload=au.payload,
-                    is_keyframe=au.is_keyframe,
-                )
-                # Position du SimpleBlock relative au début du Cluster
-                # *avant* d'écrire le payload Cluster (utile pour Cues).
-                rel_offset = len(written_payload)
-                block_offsets.append(rel_offset)
-                written_payload.extend(block)
-                cluster_aus.append((idx + j, pts, au))
-
-            if not cluster_aus:
-                # Sécurité : ne jamais boucler infiniment.
-                raise RuntimeError(
-                    f"AU {idx} ne tient dans aucun cluster (offset > int16)."
-                )
-
-            # Cluster.Timestamp + SimpleBlocks
-            cluster_payload = (
-                uint_element(TIMESTAMP_ID, cluster_pts_ms)
-                + bytes(written_payload)
-            )
-            cluster_bytes = element(CLUSTER_ID, cluster_payload)
-            fh.write(cluster_bytes)
-
-            # On émet 1 cue point par cluster (sur le 1er keyframe trouvé,
-            # ou à défaut le 1er AU du cluster).
-            keyframe_in_cluster = next(
-                ((global_idx, pts) for (global_idx, pts, au) in cluster_aus if au.is_keyframe),
-                None,
-            )
-            if keyframe_in_cluster is None:
-                keyframe_in_cluster = (cluster_aus[0][0], cluster_aus[0][1])
-            cue_points.append((keyframe_in_cluster[1], 0))
-
-            clusters.append(
-                _ClusterRecord(
-                    relative_offset=cluster_start_in_segment,
-                    timestamp_ms=cluster_pts_ms,
-                    cue_points=cue_points,
-                )
-            )
-            idx += len(cluster_aus)
-
 
 __all__ = [
     "MatroskaNativeMuxResult",

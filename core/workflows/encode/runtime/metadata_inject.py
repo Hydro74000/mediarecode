@@ -30,11 +30,14 @@ from core.workflows.encode.runtime.hevc_sei_normalizer import (
     strip_pic_timing_from_annexb_file,
 )
 from core.workflows.encode.runtime.static_hdr_estimator import StaticHdrEstimate
-from core.workflows.matroska_dovi_block_addition import (
+from core.matroska.editors.dovi import (
     DolbyVisionConfigRecord,
     MatroskaDoviBlockAdditionEditor,
 )
-from core.workflows.matroska_native_muxer import MatroskaNativeMuxer
+from core.matroska.hevc.access_units import HevcStreamCancelled
+from core.matroska.hevc.payload_rewriter import MatroskaHevcPayloadRewriter
+from core.matroska.hevc.timing_skeleton import write_timing_skeleton
+from core.matroska.writer import MatroskaWriteCancelled
 from core.workflows.remux_timeline_sync import LiveSyncSession
 
 import dataclasses
@@ -87,11 +90,9 @@ class MetadataInjectRunnerCallbacks:
     check_cancelled: Callable[[TaskSignals | None], None]
     video_source_path: Callable[[EncodeConfig], Path]
     video_stream_index: Callable[[EncodeConfig], int]
-    build_video_only_two_pass: Callable[[EncodeConfig, Path], list[list[str]]]
-    build_video_only_cmd: Callable[[EncodeConfig, Path], list[str]]
-    wrap_injected_hevc_for_reconstruction: Callable[..., list[str]]
-    source_is_vfr: Callable[[Path], bool]
-    source_video_dimensions: Callable[[Path], tuple[int, int]]
+    build_video_track_encode_commands: Callable[..., list[list[str]]]
+    two_pass_log_prefix: Callable[[Path, str], Path]
+    cleanup_two_pass_logs_for_prefix: Callable[[Path], None]
     build_encode_plan: Callable[[EncodeConfig], EncodePlan]
     source_input_index_map: Callable[[list[Path]], dict[Path, int]]
     prepare_multisource_sync: Callable[..., tuple[dict[tuple[Path, int, str], tuple[int, int]], list[Path | str], LiveSyncSession | None, bool]]
@@ -108,11 +109,12 @@ class MetadataInjectRunnerCallbacks:
     append_strict_interleave_mux_flags: Callable[[list[str]], None]
     append_container_metadata_args: Callable[..., None]
     run_cmd: Callable[[list[str], TaskSignals, Path | None, Callable[[str], None] | None], str]
-    bind_matroska_segment_muxing_patch: Callable[[TaskSignals, Path], None]
-    bind_nfo_write: Callable[[TaskSignals, Path], None]
+    finalize_ffmpeg: Callable[..., str]
     estimate_static_hdr: Callable[..., object]
     report_static_hdr_estimate: Callable[[str, object], None]
     report_static_hdr_failure: Callable[[str, str], None]
+    #: Assemblage final Matroska natif (lot 3). None → reconstruction FFmpeg.
+    native_assemble: Callable[..., None] | None = None
 
 
 class MetadataInjectRunner:
@@ -132,7 +134,8 @@ class MetadataInjectRunner:
         signals = prep_signals or TaskSignals()
         executor = None if prep_signals is not None else ThreadPoolExecutor(max_workers=1)
 
-        def _task() -> None:
+        # La transaction complète dépasse la limite d'analyse de flux de Pyright.
+        def _task() -> None:  # pyright: ignore[reportGeneralTypeIssues]
             work = config.work_dir or Path(tempfile.gettempdir())
             work.mkdir(parents=True, exist_ok=True)
             tmp_dir = tempfile.mkdtemp(
@@ -390,19 +393,83 @@ class MetadataInjectRunner:
                 if needs_annexb and (video.copy_dv or video.copy_hdr10plus):
                     _free(meta_input)
 
-                cb.log_step(6, "Encodage vidéo seule (HEVC brut)")
-                enc_hevc = _alloc("enc.hevc", src_size_est)
+                native_dovi_record = None
+                if cb.native_assemble is not None and video.copy_dv:
+                    if not rpu_bin.is_file():
+                        raise EncodeError(
+                            "Dolby Vision natif requis mais aucun RPU n'a été extrait."
+                        )
+                    native_dovi_record = _build_dovi_record_from_rpu(
+                        rpu_bin=rpu_bin,
+                        dovi_tool_bin=cb.bins["dovi_tool"],
+                        forced_compat_id=_resolve_dovi_compat_id(
+                            p7_router_decision=p7_router_decision,
+                            user_dovi_profile=str(video.dovi_profile or "0"),
+                        ),
+                    )
+                    if native_dovi_record is None:
+                        raise EncodeError(
+                            "Dolby Vision natif requis mais le DolbyVisionConfigRecord "
+                            "n'a pas pu être construit."
+                        )
+
+                cb.log_step(6, "Encodage vidéo vers MKV mono-piste horodaté")
+                enc_video_mkv = _alloc("enc_video.mkv", src_size_est)
                 signals.progress.emit("Encodage vidéo…")
-                if video.quality_mode == QualityMode.SIZE:
-                    v_cmds = cb.build_video_only_two_pass(effective_config, enc_hevc)
-                    cb.log_info("Passe 1/2 (analyse)…")
-                    _run(v_cmds[0])
-                    _check()
-                    cb.log_info("Passe 2/2 (encodage)…")
-                    _run(v_cmds[1])
-                else:
-                    _run(cb.build_video_only_cmd(effective_config, enc_hevc))
+                passlog_prefix = (
+                    cb.two_pass_log_prefix(tmp, "inject_video")
+                    if video.quality_mode == QualityMode.SIZE
+                    else None
+                )
+                encode_cmds = cb.build_video_track_encode_commands(
+                    effective_config,
+                    video,
+                    cb.video_source_path(effective_config),
+                    enc_video_mkv,
+                    passlog_prefix=passlog_prefix,
+                )
+                try:
+                    for pass_index, encode_cmd in enumerate(encode_cmds, start=1):
+                        if len(encode_cmds) > 1:
+                            cb.log_info(
+                                f"Passe {pass_index}/{len(encode_cmds)} "
+                                f"({'analyse' if pass_index == 1 else 'encodage'})…"
+                            )
+                        _run(encode_cmd)
+                        _check()
+                finally:
+                    if passlog_prefix is not None:
+                        cb.cleanup_two_pass_logs_for_prefix(passlog_prefix)
+                # Squelette de timing : mêmes TrackEntry/timestamps que le MKV
+                # encodé, payloads vides (quelques Mo). Il portera seul la
+                # vérité temporelle jusqu'à la réécriture des payloads.
+                timing_mkv = _alloc("enc_timing.mkv", 64 * 1024 * 1024)
+                signals.progress.emit("Écriture du squelette de timing…")
+                try:
+                    skeleton_result = write_timing_skeleton(
+                        enc_video_mkv, timing_mkv,
+                        cancel_cb=signals._cancel_event.is_set,
+                    )
+                except MatroskaWriteCancelled as exc:
+                    raise TaskCancelledError() from exc
+                signals.progress.emit(
+                    f"Squelette de timing écrit : {skeleton_result.blocks_written} bloc(s)."
+                )
+                # Extraction annexB depuis l'artefact encodé : les timestamps
+                # de la source d'origine ne sont plus jamais réassociés au
+                # bitstream. Le MKV encodé complet est libéré aussitôt — le
+                # squelette suffit à la réécriture (pic disque 2× vidéo).
+                enc_hevc = _alloc("enc.hevc", src_size_est)
+                signals.progress.emit("Extraction annexB depuis l'artefact encodé…")
+                _run([
+                    cb.ffmpeg_bin, "-nostdin", "-y",
+                    "-i", str(enc_video_mkv),
+                    "-map", "0:v:0", "-c", "copy",
+                    "-bsf:v", "hevc_mp4toannexb",
+                    "-f", "hevc", str(enc_hevc),
+                ])
                 _check()
+                _free(enc_video_mkv)
                 current_hevc = enc_hevc
 
                 request_mode = str(
@@ -623,66 +690,55 @@ class MetadataInjectRunner:
                         signals.progress.emit("Aucun SEI pic_timing detecte dans le flux HEVC injecte.")
                     _check()
 
-                cb.log_step(8, "Encapsulation timeline vidéo injectée")
+                cb.log_step(8, "Réécriture des payloads dans le squelette de timing")
                 wrapped_video = _alloc("enc_wrapped.mkv", current_hevc.stat().st_size)
-                signals.progress.emit("Encapsulation vidéo injectée…")
-                source_is_vfr = bool(cb.source_is_vfr(cb.video_source_path(config)))
-                if source_is_vfr:
-                    # Source VFR : ffmpeg en wrap CFR détruirait les
-                    # timestamps. On utilise le muxer Matroska natif qui
-                    # réutilise les PTS source frame-à-frame.
-                    cb.log_info(
-                        "Source VFR détectée → muxer Matroska natif Python."
+                # Aucun repli après le démarrage : la sélection du backend a
+                # eu lieu au préflight ; un échec ici est fatal (pas de
+                # fallback FFmpeg silencieux).
+                record_for_muxer = native_dovi_record
+                if record_for_muxer is None and video.copy_dv and rpu_bin.exists():
+                    record_for_muxer = _build_dovi_record_from_rpu(
+                        rpu_bin=rpu_bin,
+                        dovi_tool_bin=cb.bins["dovi_tool"],
+                        forced_compat_id=_resolve_dovi_compat_id(
+                            p7_router_decision=p7_router_decision,
+                            user_dovi_profile=str(video.dovi_profile or "0"),
+                        ),
                     )
-                    pixel_width, pixel_height = cb.source_video_dimensions(
-                        cb.video_source_path(config),
+                signals.progress.emit(
+                    "Réécriture des payloads vidéo (timestamps de l'encodeur conservés)…"
+                )
+                try:
+                    rewrite_result = MatroskaHevcPayloadRewriter().rewrite(
+                        encoded_mkv=timing_mkv,
+                        injected_hevc=current_hevc,
+                        output=wrapped_video,
+                        dovi_record=record_for_muxer,
+                        cancel_cb=signals._cancel_event.is_set,
                     )
-                    record_for_muxer = None
-                    if video.copy_dv and rpu_bin.exists():
-                        record_for_muxer = _build_dovi_record_from_rpu(
-                            rpu_bin=rpu_bin,
-                            dovi_tool_bin=cb.bins["dovi_tool"],
-                        )
-                    try:
-                        mux_result = MatroskaNativeMuxer(
-                            ffprobe_bin=cb.bins.get("ffprobe", "ffprobe"),
-                        ).mux(
-                            hevc_input=current_hevc,
-                            source_for_timestamps=cb.video_source_path(config),
-                            output=wrapped_video,
-                            pixel_width=pixel_width,
-                            pixel_height=pixel_height,
-                            dovi_record=record_for_muxer,
-                        )
-                        signals.progress.emit(
-                            f"Muxage natif : {mux_result.frames_written} frames "
-                            f"sur {mux_result.cluster_count} clusters, "
-                            f"durée {mux_result.duration_ms} ms."
-                        )
-                    except Exception as exc:
-                        # Fallback ffmpeg si le muxer natif échoue (ne devrait
-                        # pas arriver mais on garde le pipeline résilient).
-                        signals.progress.emit(
-                            f"[WARN] Muxer natif échoué ({exc}), fallback ffmpeg."
-                        )
-                        _run(
-                            cb.wrap_injected_hevc_for_reconstruction(
-                                source=config.source,
-                                hevc_input=current_hevc,
-                                mkv_output=wrapped_video,
-                            )
-                        )
-                else:
-                    _run(
-                        cb.wrap_injected_hevc_for_reconstruction(
-                            source=config.source,
-                            hevc_input=current_hevc,
-                            mkv_output=wrapped_video,
-                        )
-                    )
+                except (HevcStreamCancelled, MatroskaWriteCancelled) as exc:
+                    raise TaskCancelledError() from exc
+                signals.progress.emit(
+                    f"Payloads réécrits : {rewrite_result.frames_rewritten} frame(s) — "
+                    "CodecPrivate et signalisation Dolby Vision portés par le TrackEntry."
+                )
                 _free(current_hevc)
+                _free(timing_mkv)
                 current_video_input = wrapped_video
                 _check()
+
+                if cb.native_assemble is not None:
+                    cb.log_step(9, "Assemblage final Matroska natif")
+                    cb.native_assemble(
+                        config,
+                        intermediate=current_video_input,
+                        video_offset_ms=0,
+                        signals=signals,
+                        plan=plan or cb.build_encode_plan(config),
+                        work_dir=tmp,
+                    )
+                    signals.finished.emit(str(config.output))
+                    return
 
                 cb.log_step(9, "Reconstruction finale du conteneur MKV")
                 signals.progress.emit("Reconstitution finale…")
@@ -793,28 +849,29 @@ class MetadataInjectRunner:
                     plan=encode_plan,
                 )
                 recon_cmd.append(str(config.output))
-                _run(recon_cmd)
 
-                # Post-mux : injection du BlockAdditionMapping DOVI au niveau
-                # conteneur. ffmpeg ne l'écrit pas quand il copie un HEVC brut
-                # (-f hevc → mkv via -c copy). Sans cette signalisation, les
-                # players (mpv gpu-next, Plex, certains TV) ne déclenchent
-                # pas le mode DV même si les NALs RPU sont dans le bytestream.
+                dovi_post_actions: tuple[Callable[[Path], object], ...] = ()
                 if video.copy_dv and rpu_bin.exists():
                     cb.log_info("Injection signal Dolby Vision au niveau Matroska…")
                     forced_compat_id = _resolve_dovi_compat_id(
                         p7_router_decision=p7_router_decision,
                         user_dovi_profile=str(video.dovi_profile or "0"),
                     )
-                    record = _build_dovi_record_from_rpu(
-                        rpu_bin=rpu_bin,
-                        dovi_tool_bin=cb.bins["dovi_tool"],
-                        forced_compat_id=forced_compat_id,
-                    )
-                    if record is not None:
+                    def _patch_dovi(candidate: Path) -> object:
+                        record = _build_dovi_record_from_rpu(
+                            rpu_bin=rpu_bin,
+                            dovi_tool_bin=cb.bins["dovi_tool"],
+                            forced_compat_id=forced_compat_id,
+                        )
+                        if record is None:
+                            signals.progress.emit(
+                                "[WARN] Impossible d'extraire le profil DOVI du RPU "
+                                "pour le signal Matroska."
+                            )
+                            return None
                         try:
                             patch_result = MatroskaDoviBlockAdditionEditor().patch(
-                                config.output, record=record,
+                                candidate, record=record,
                             )
                             if patch_result.applied:
                                 signals.progress.emit(
@@ -832,13 +889,25 @@ class MetadataInjectRunner:
                             signals.progress.emit(
                                 f"[WARN] Patch BlockAdditionMapping DOVI échoué : {patch_exc}"
                             )
-                    else:
-                        signals.progress.emit(
-                            "[WARN] Impossible d'extraire le profil DOVI du RPU "
-                            "pour le signal Matroska."
-                        )
+                            return None
+                        return patch_result
 
-                signals.finished.emit(f"Encodage terminé → {config.output.name}")
+                    dovi_post_actions = (_patch_dovi,)
+
+                output = cb.finalize_ffmpeg(
+                    config,
+                    recon_cmd,
+                    tmp,
+                    "ffmpeg-reconstruct",
+                    signals,
+                    plan=encode_plan,
+                    extra_post_actions=dovi_post_actions,
+                    # Politique historique FFmpeg : le patch DoVi reste non
+                    # bloquant ; seul le backend natif rend le mapping strict.
+                    require_dovi_video_indexes=set(),
+                )
+
+                signals.finished.emit(output)
 
             except TaskCancelledError:
                 signals.cancelled.emit()
@@ -862,8 +931,6 @@ class MetadataInjectRunner:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
         if prep_signals is None:
-            cb.bind_matroska_segment_muxing_patch(signals, config.output)
-            cb.bind_nfo_write(signals, config.output)
             assert executor is not None
             executor.submit(_task)
             executor.shutdown(wait=False)

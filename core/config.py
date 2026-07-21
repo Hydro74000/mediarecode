@@ -70,6 +70,9 @@ def _resolve_ini_path() -> Path:
     Sur Linux/macOS, on utilise toujours le chemin XDG — y compris en mode
     développement — car setup.py y écrit les chemins absolus des outils détectés.
     """
+    explicit_config_home = os.environ.get("MUXIVEO_CONFIG_HOME")
+    if explicit_config_home:
+        return Path(explicit_config_home).expanduser() / "config.ini"
     if sys.platform != "win32":
         xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         return xdg / APP_CONFIG_DIR_NAME / "config.ini"
@@ -808,6 +811,13 @@ INI_FIELD_GROUPS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "section": "matroska",
+        "title": "Muxage Matroska",
+        "fields": (
+            {"key": "mux_backend", "attr": "matroska_mux_backend", "kind": "choice", "label": "Backend de muxage", "description": "Assembleur final Matroska des workflows remux et encodage. FFmpeg par défaut ; Auto sélectionne le muxeur natif quand le plan le permet et journalise le repli ; Natif n'autorise aucun repli.", "options": (("ffmpeg", "FFmpeg"), ("native", "Natif Matroska"), ("auto", "Auto"))},
+        ),
+    },
+    {
         "section": "sync",
         "title": "Synchronisation",
         "fields": (
@@ -1093,6 +1103,32 @@ class AppConfig:
             "sync/advanced_audio_rewrite_enabled",
             False,
         )
+        # [matroska] mux_backend — réglage global unique pilotant le muxage
+        # final des workflows remux ET encode. Priorité : choix explicite du
+        # job/panel/CLI > ce réglage > ffmpeg. Migration : l'ancien
+        # [remux] mux_backend n'est honoré que s'il est explicitement présent
+        # (config.ini ou QSettings) ; absent ou invalide → ffmpeg (avec
+        # avertissement pour une valeur invalide).
+        self.load_warnings: list[str] = []
+        raw_mux_backend = self._resolve_text("matroska", "mux_backend", "matroska/mux_backend", "").lower()
+        if not raw_mux_backend:
+            legacy_ini = self._ini_lookup("remux", "mux_backend")
+            if legacy_ini is not _MISSING and str(legacy_ini) != "":
+                raw_mux_backend = str(legacy_ini).lower()
+            else:
+                legacy_settings = self._settings.value("remux/mux_backend", None)
+                if legacy_settings not in (None, ""):
+                    raw_mux_backend = str(legacy_settings).lower()
+        if raw_mux_backend in {"auto", "native", "ffmpeg"}:
+            self.matroska_mux_backend = raw_mux_backend
+        else:
+            if raw_mux_backend:
+                self.load_warnings.append(
+                    f"[matroska] mux_backend invalide ({raw_mux_backend!r}) : retour au défaut 'ffmpeg'."
+                )
+            self.matroska_mux_backend = "ffmpeg"
+        # Alias interne de compatibilité (à supprimer une fois les usages migrés).
+        self.remux_mux_backend = self.matroska_mux_backend
 
         self.language = _normalize_language_code(
             self._resolve_text("ui", "language", "ui/language", _default_language_code())
@@ -1194,6 +1230,7 @@ class AppConfig:
             "sync/advanced_audio_rewrite_enabled",
             "true" if self.sync_advanced_audio_rewrite_enabled else "false",
         )
+        s.setValue("matroska/mux_backend", self.matroska_mux_backend)
 
         s.setValue("ui/language", self.language)
         s.setValue("ui/log_max_lines", self.log_max_lines)
@@ -1374,6 +1411,7 @@ class AppConfig:
                 "rewrite_enabled": self.sync_rewrite_enabled,
                 "advanced_audio_rewrite_enabled": self.sync_advanced_audio_rewrite_enabled,
             },
+            "matroska": {"mux_backend": self.matroska_mux_backend},
             "ui": {
                 "language": self.language,
                 "log_max_lines": self.log_max_lines,

@@ -11,14 +11,12 @@ from core.workflows.remux_timeline_sync import LiveSyncSession
 
 @dataclass(frozen=True)
 class SignalBindingServiceCallbacks:
-    muxing_bind_on_success: Callable[[TaskSignals, Path], None]
-    language_bind_on_success: Callable[[TaskSignals, Path], None]
     write_nfo: Callable[[Path], None]
     remove_path: Callable[[Path], None] = remove_path
 
 
 class SignalBindingService:
-    """Centralise les bindings de cleanup et post-actions runtime."""
+    """Centralise les bindings de nettoyage et de génération NFO."""
 
     def __init__(self, callbacks: SignalBindingServiceCallbacks) -> None:
         self._callbacks = callbacks
@@ -69,10 +67,6 @@ class SignalBindingService:
         signals.failed.connect(cleanup)
         signals.cancelled.connect(cleanup)
 
-    def bind_matroska_segment_muxing_patch(self, signals: TaskSignals, output: Path) -> None:
-        self._callbacks.muxing_bind_on_success(signals, output)
-        self._callbacks.language_bind_on_success(signals, output)
-
     def bind_nfo_write(self, signals: TaskSignals, output: Path) -> None:
         def _write(*_args) -> None:
             self._callbacks.write_nfo(output)
@@ -86,12 +80,9 @@ class SignalBindingService:
         output: Path,
         cleanup_paths: list[Path] | None = None,
         include_temp_cleanup: bool = True,
-        include_segment_patch: bool = True,
         include_nfo: bool = True,
     ) -> None:
         if include_temp_cleanup and cleanup_paths is not None:
             self.bind_temp_cleanup(signals, cleanup_paths)
-        if include_segment_patch:
-            self.bind_matroska_segment_muxing_patch(signals, output)
         if include_nfo:
             self.bind_nfo_write(signals, output)

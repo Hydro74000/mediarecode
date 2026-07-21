@@ -1,10 +1,10 @@
 """
-core/workflows/matroska_timestamp_reader.py
+core/matroska/timestamps.py
 
 Lecteur de timestamps de présentation (PTS) d'une piste vidéo source via
 ffprobe. Utilisé par le muxer Matroska natif (``MatroskaNativeMuxer``)
-pour réinjecter les PTS source sur un HEVC ré-encodé sans dépendre de
-mkvmerge.
+pour réinjecter les PTS source sur un HEVC ré-encodé sans dépendre
+d'un outil externe.
 
 Pour les sources VFR, c'est la seule manière d'obtenir un MKV avec des
 PTS fidèles à l'original ; pour les sources CFR, le muxer natif s'en

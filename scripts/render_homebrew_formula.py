@@ -5,6 +5,9 @@ Render the Homebrew formula used to publish Muxiveo for Linux and macOS.
 
 from __future__ import annotations
 
+# Import applicatif placé après l'ajout explicite de la racine du dépôt.
+# ruff: noqa: E402
+
 import argparse
 import base64
 import struct

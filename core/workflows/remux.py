@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, cast
 import subprocess
-import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 from core.runner import TaskSignals, ToolRunner
 from core.version import APP_VERSION_LABEL
-from core.workflows.matroska_header_editor import MatroskaMuxingAppPostAction
-from core.workflows.matroska_language_editor import MatroskaLanguagePostAction
+from core.workflows.common.matroska_finalize import MatroskaMuxingAppPostAction
+from core.workflows.common.matroska_finalize import MatroskaLanguagePostAction
 from core.workflows.common.chapters import (
     probe_media_duration_seconds,
     write_ffmetadata_chapters,
@@ -39,9 +38,14 @@ from core.workflows.remux_mapping import (
 from core.workflows.remux_models import (
     RemuxConfig,
     RemuxError,
-    SourceInput,
-    TrackEntry,
-    tracks_from_file_info,
+)
+from core.workflows.remux_backend import (
+    FfmpegRemuxBackend, NativeMatroskaBackend,
+)
+from core.workflows.remux_plan import (
+    MuxExecutionPlan,
+    mux_backend_report_from_plan,
+    plan_remux as _plan_remux,
 )
 from core.workflows.remux_sync import (
     bind_temp_cleanup as _bind_temp_cleanup_helper,
@@ -77,6 +81,7 @@ class RemuxWorkflow(QObject):
     """
 
     log_message = Signal(str, str)
+    backend_event = Signal(object)
 
     def __init__(
         self,
@@ -159,11 +164,40 @@ class RemuxWorkflow(QObject):
     # Validation
     # ------------------------------------------------------------------
 
-    def validate(self, config: RemuxConfig) -> list[str]:
+    @staticmethod
+    def _absolute_paths_config(config: RemuxConfig) -> RemuxConfig:
+        """Config aux chemins résolus en absolu.
+
+        Filet de sécurité pour tous les producteurs (UI, profils, appels
+        directs) : les runners exécutent FFmpeg depuis le workspace temporaire
+        et les post-actions résolvent le candidat depuis le cwd du processus —
+        un chemin relatif y serait créé puis cherché à deux endroits différents.
+        """
+        from dataclasses import replace
+
+        def _abs(path: Path) -> Path:
+            return Path(path).expanduser().resolve()
+
+        return replace(
+            config,
+            sources=[replace(source, path=_abs(source.path)) for source in config.sources],
+            output=_abs(config.output),
+            work_dir=_abs(config.work_dir) if config.work_dir else config.work_dir,
+            extra_attachments=[_abs(Path(item)) for item in config.extra_attachments],
+        )
+
+    def compile_plan(self, config: RemuxConfig) -> MuxExecutionPlan:
+        """Compile le plan d'exécution unique consommé par validation/preview/run."""
+        config = self._absolute_paths_config(config)
+        return _plan_remux(config, ffmpeg_bin=self._ffmpeg, ffprobe_bin=self._ffprobe)
+
+    def validate(self, config: RemuxConfig, *, plan: MuxExecutionPlan | None = None) -> list[str]:
         return _validate_remux_config(
             config,
             track_order_parts=self._track_order_parts,
             dir_writable=self._is_dir_writable,
+            plan=plan if plan is not None else self.compile_plan(config),
+            tool_paths={"ffmpeg": self._ffmpeg, "ffprobe": self._ffprobe},
         )
 
     @staticmethod
@@ -202,7 +236,40 @@ class RemuxWorkflow(QObject):
         )
 
     def preview_command(self, config: RemuxConfig) -> str:
-        return _preview_remux_command_helper(config, build_command=self.build_command)
+        reference = _preview_remux_command_helper(config, build_command=self.build_command)
+        report = self.backend_report(config)
+        if report["selected_backend"] == "ffmpeg":
+            return reference
+        preparations = cast(
+            list[list[object]],
+            report.get("preparation_commands") or [],
+        )
+        prep_text = "\n".join(" ".join(map(str, command)) for command in preparations)
+        sections = [
+            f"# Backend: native Matroska (plan v{report['plan_version']})",
+            prep_text,
+            f"# Écriture interne Matroska -> {config.output}",
+            "# Référence FFmpeg compatible v1:",
+            reference,
+        ]
+        return "\n".join(section for section in sections if section)
+
+    def backend_report(self, config: RemuxConfig) -> dict[str, object]:
+        return mux_backend_report_from_plan(self.compile_plan(config))
+
+    def execution_preview(self, config: RemuxConfig) -> dict[str, object]:
+        report = self.backend_report(config)
+        if report["selected_backend"] == "ffmpeg":
+            return {
+                **report,
+                "action": "external_ffmpeg",
+                "command": self.build_command(config),
+            }
+        return {
+            **report,
+            "action": "internal_matroska_write",
+            "output": str(config.output),
+        }
 
     # ------------------------------------------------------------------
     # Exécution
@@ -215,12 +282,46 @@ class RemuxWorkflow(QObject):
         self.log_message.emit("INFO", f"STEP {step_index} - {step_name}")
 
     def run(self, config: RemuxConfig) -> TaskSignals:
+        # Chemins absolus AVANT tout : le plan, la validation et le backend
+        # doivent consommer exactement les mêmes chemins que l'exécution.
+        config = self._absolute_paths_config(config)
+        # Plan compilé une seule fois : validation, rapport et exécution
+        # consomment le même objet. Toute erreur lève avant thread, fichier
+        # partiel ou téléchargement.
+        plan = self.compile_plan(config)
+        report = mux_backend_report_from_plan(plan)
+        self.backend_event.emit(report)
+        self.log_message.emit(
+            "INFO",
+            f"MUX_BACKEND requested={plan.requested_backend} selected={plan.selected_backend} plan_version=1",
+        )
+        errors = self.validate(config, plan=plan)
+        if errors:
+            raise RemuxError("\n".join(errors))
+        if plan.fallback:
+            self.log_message.emit(
+                "WARN",
+                "Backend natif non applicable ; repli FFmpeg : " + "; ".join(plan.native_diagnostics),
+            )
+        native_backend = NativeMatroskaBackend(
+            log=self.log_message.emit, log_step=self._log_step,
+            ffmpeg_bin=self._ffmpeg, ffprobe_bin=self._ffprobe,
+            finalize=self._write_nfo, plan=plan,
+        )
+        ffmpeg_backend = FfmpegRemuxBackend(
+            execute_callback=lambda item: self._run_ffmpeg(item, plan),
+            preview_callback=lambda item: _preview_remux_command_helper(item, build_command=self.build_command),
+            command_callback=self.build_command,
+        )
+        backend = native_backend if plan.selected_backend == "native" else ffmpeg_backend
+        return backend.execute(config)
+
+    def _run_ffmpeg(self, config: RemuxConfig, plan: MuxExecutionPlan) -> TaskSignals:
         return RemuxRuntimeRunner(
             RemuxRuntimeRunnerCallbacks(
                 ffmpeg_bin=self._ffmpeg,
                 ffprobe_bin=self._ffprobe,
                 ffmpeg_thread_args=self._ffmpeg_thread_args,
-                validate=self.validate,
                 build_command=self.build_command,
                 log_workflow_type=self._log_workflow_type,
                 log_step=self._log_step,
@@ -240,7 +341,7 @@ class RemuxWorkflow(QObject):
                 sync_advanced_audio_rewrite_enabled=lambda: self._sync_advanced_audio_rewrite_enabled,
                 sync_rewrite_audio_bitrates=lambda: dict(self._sync_rewrite_audio_bitrates),
             )
-        ).run(config)
+        ).run(config, plan)
 
     def _write_nfo(self, output_path: Path) -> None:
         if self._generate_nfo:
