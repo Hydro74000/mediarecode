@@ -43,6 +43,7 @@ from core.workflows.encode.remux_bridge import merge_remux_into_encode_config
 from core.workflows.encode.runtime.native_mux import (
     NativeVideoArtifactRef,
     assemble_encode_output_native,
+    prepare_native_encode_inputs,
 )
 from core.runner import TaskCancelledError, TaskSignals
 from core.workflows.common.matroska_finalize import MatroskaOutputTransaction
@@ -67,6 +68,7 @@ from core.matroska.writer import build_attachments_element
 from core.workflows.common.attachments import mime_for_path
 from core.workflows.encode.output_contract import build_encode_output_contract
 from core.workflows.remux_models import RemuxConfig, SourceInput, TrackEntry, normalize_mux_backend
+from core.workflows.remux_plan import plan_remux
 
 
 @pytest.fixture(autouse=True)
@@ -440,6 +442,12 @@ class TestEncodeMuxSelector:
         assert not decision.uses_fallback  # choix de coût, pas un repli sur blocage
         assert "monopasse" in decision.reason
 
+    def test_requested_native_uses_native_for_direct_pipeline(self, tmp_path: Path) -> None:
+        config = _encode_config(tmp_path, mux_backend="native")
+        decision = select_encode_mux_backend(config, pipeline=PIPELINE_FFMPEG_DIRECT)
+        assert decision.selected == "native"
+        assert not decision.diagnostics
+
     def test_dynamic_hdr_blocks_native_nvencc_but_not_multi_video(self, tmp_path: Path) -> None:
         video = _video_settings()
         video.copy_dv = True
@@ -451,7 +459,7 @@ class TestEncodeMuxSelector:
         multi = select_encode_mux_backend(config, pipeline=PIPELINE_MULTI_VIDEO)
         assert multi.selected == "native"
 
-    def test_blockers_cover_offsets_non_mkv_flags_attachments_tags(self, tmp_path: Path) -> None:
+    def test_native_encode_supports_offsets_flags_tags_and_materialized_inputs(self, tmp_path: Path) -> None:
         mp4 = tmp_path / "in.mp4"
         mp4.touch()
         config = _encode_config(
@@ -466,13 +474,13 @@ class TestEncodeMuxSelector:
         blockers = encode_native_mux_blockers(config, pipeline=PIPELINE_NVENCC_DIRECT)
         text = " | ".join(blockers)
         assert "sorties .mkv" in text
-        assert "décalages temporels" in text
-        assert "non Matroska" in text
-        assert "flags de piste" in text
-        assert "attachments par stream" in text
-        assert "tags sources" in text
+        assert "décalages temporels" not in text
+        assert "non Matroska" not in text
+        assert "flags de piste" not in text
+        assert "attachments par stream" not in text
+        assert "tags sources" not in text
 
-    def test_strict_native_reports_diagnostics_without_fallback(self, tmp_path: Path) -> None:
+    def test_strict_native_accepts_track_offsets_without_fallback(self, tmp_path: Path) -> None:
         source = tmp_path / "src.mkv"
         config = _encode_config(
             tmp_path, mux_backend="native",
@@ -480,12 +488,73 @@ class TestEncodeMuxSelector:
         )
         decision = select_encode_mux_backend(config, pipeline=PIPELINE_NVENCC_DIRECT)
         assert decision.selected == "native"
-        assert decision.diagnostics
+        assert not decision.diagnostics
         assert not decision.uses_fallback
 
 
 # =============================================================================
-# 2.4 — Assemblage final natif encode (contrat partagé)
+# 2.4 — Préflight remux : cache de reader et chemin FFmpeg
+# =============================================================================
+
+class TestRemuxPreviewPlanningCost:
+
+    @staticmethod
+    def _config(tmp_path: Path, *, backend: str) -> RemuxConfig:
+        source = _write_mkv(
+            tmp_path / "source.mkv",
+            [_entry_bytes(1, 1, "V_MPEG4/ISO/AVC")],
+            clusters=_simple_cluster(1),
+        )
+        track = TrackEntry(
+            mkv_tid=0,
+            track_type="video",
+            codec="H264",
+            display_info="",
+            language="und",
+            title="",
+            file_id="source-0",
+        )
+        return RemuxConfig(
+            sources=[SourceInput(path=source, file_index=0, tracks=[track])],
+            output=tmp_path / "out.mkv",
+            track_order=[(0, 0, track.entry_id)],
+            keep_chapters=False,
+            mux_backend=backend,
+        )
+
+    def test_native_plan_scans_track_headers_once_per_source(self, tmp_path: Path, monkeypatch) -> None:
+        """Le préflight et le contrat partagent le reader d'une compilation."""
+        calls = 0
+        original = MatroskaReader.top_level
+
+        def _counted_top_level(reader):
+            nonlocal calls
+            calls += 1
+            yield from original(reader)
+
+        monkeypatch.setattr(MatroskaReader, "top_level", _counted_top_level)
+
+        plan = plan_remux(self._config(tmp_path, backend="native"))
+
+        assert plan.selected_backend == "native"
+        assert calls == 1
+
+    def test_forced_ffmpeg_skips_native_capability_preflight(self, tmp_path: Path, monkeypatch) -> None:
+        def _unexpected_preflight(*_args, **_kwargs):
+            raise AssertionError("le préflight de capacité natif ne doit pas être exécuté")
+
+        monkeypatch.setattr(
+            "core.workflows.remux_plan.native_capability_reasons",
+            _unexpected_preflight,
+        )
+
+        plan = plan_remux(self._config(tmp_path, backend="ffmpeg"))
+
+        assert plan.selected_backend == "ffmpeg"
+
+
+# =============================================================================
+# 2.5 — Assemblage final natif encode (contrat partagé)
 # =============================================================================
 
 class TestNativeEncodeAssembly:
@@ -580,6 +649,108 @@ class TestNativeEncodeAssembly:
         assert muxing_app.startswith("Muxiveo")
         # Second validateur ffprobe passé par le run_cmd injecté.
         assert any(cmd[0] == "ffprobe" for cmd in recorded)
+
+    def test_native_assembly_writes_all_track_flags(self, tmp_path: Path) -> None:
+        source, artifact = self._sources(tmp_path)
+        config = _encode_config(
+            tmp_path,
+            source=source,
+            audio_tracks=[AudioTrackSettings(stream_index=0, codec="copy")],
+            copy_subtitles=False,
+            keep_chapters=False,
+            track_meta_edits=[TrackMetaPatch(
+                track_order=2,
+                flag_default=False,
+                flag_forced=True,
+                flag_hearing_impaired=True,
+                flag_visual_impaired=True,
+                flag_original=True,
+                flag_commentary=True,
+            )],
+            work_dir=tmp_path,
+        )
+        output = assemble_encode_output_native(
+            config,
+            video_artifacts=[NativeVideoArtifactRef(artifact)],
+            work_dir=tmp_path,
+            signals=None,
+            run_cmd=self._fake_run_cmd([]),
+            log=lambda _level, _message: None,
+        )
+        audio = MatroskaReader(output).tracks()[1]
+        assert not audio.flag_default
+        assert audio.flag_forced
+        assert audio.flag_hearing_impaired
+        assert audio.flag_visual_impaired
+        assert audio.flag_original
+        assert audio.flag_commentary
+
+    def test_native_assembly_materializes_non_matroska_copied_audio(self, tmp_path: Path) -> None:
+        foreign = tmp_path / "audio.mp4"
+        foreign.write_bytes(b"mp4")
+        artifact = _write_mkv(
+            tmp_path / "video_artifact.mkv",
+            [_entry_bytes(1, 1, "V_MPEGH/ISO/HEVC")],
+            clusters=_simple_cluster(1),
+        )
+        config = _encode_config(
+            tmp_path,
+            source=foreign,
+            audio_tracks=[AudioTrackSettings(stream_index=0, codec="copy", source_path=foreign)],
+            copy_subtitles=False,
+            keep_chapters=False,
+            work_dir=tmp_path,
+        )
+        recorded: list[list[str]] = []
+
+        def _run(cmd: list[str], label: str) -> str:
+            recorded.append(cmd)
+            if label.startswith("ffmpeg-native-canonical-track"):
+                _write_mkv(Path(cmd[-1]), [_entry_bytes(1, 2, "A_AAC")], clusters=_simple_cluster(1))
+            return "ok"
+
+        output = assemble_encode_output_native(
+            config,
+            video_artifacts=[NativeVideoArtifactRef(artifact)],
+            work_dir=tmp_path,
+            signals=None,
+            run_cmd=_run,
+            log=lambda _level, _message: None,
+        )
+        assert [track.track_type for track in MatroskaReader(output).tracks()] == [1, 2]
+        canonical = next(cmd for cmd in recorded if "native_track_0.mkv" in str(cmd[-1]))
+        assert "-c" in canonical and "copy" in canonical
+        assert not (tmp_path / "native_track_0.mkv").exists()
+
+    def test_native_input_preparation_cleans_partial_artifacts_on_failure(self, tmp_path: Path) -> None:
+        first = tmp_path / "first.mp4"
+        second = tmp_path / "second.mp4"
+        first.write_bytes(b"mp4")
+        second.write_bytes(b"mp4")
+        config = _encode_config(
+            tmp_path,
+            source=first,
+            tag_sources=[first, second],
+            tag_overrides=None,
+        )
+
+        def _run(command: list[str], _label: str) -> str:
+            target = Path(command[-1])
+            if "native_container_0" in target.name:
+                target.write_bytes(b"partial")
+                return "ok"
+            target.write_bytes(b"partial")
+            raise RuntimeError("ffmpeg failed")
+
+        with pytest.raises(RuntimeError, match="ffmpeg failed"):
+            prepare_native_encode_inputs(
+                config,
+                work_dir=tmp_path,
+                ffmpeg_bin="ffmpeg",
+                run_cmd=_run,
+            )
+
+        assert not list(tmp_path.glob("native_container_*.mkv"))
 
     def test_keep_chapters_on_chapterless_source_succeeds(self, tmp_path: Path) -> None:
         """keep_chapters=True sur une source SANS chapitres : le contrat ne
@@ -770,7 +941,7 @@ class TestExecutionPreviewAndValidate:
 
         assert validate_matroska_output(output, contract) == []
 
-    def test_validate_reports_strict_native_blockers_before_encode(self, tmp_path: Path) -> None:
+    def test_validate_accepts_strict_native_track_offsets(self, tmp_path: Path) -> None:
         wf = self._workflow()
         source = tmp_path / "src.mkv"
         source.write_bytes(b"src")
@@ -779,8 +950,7 @@ class TestExecutionPreviewAndValidate:
             track_time_offsets=[TrackOffset("audio", source, 1, offset_ms=80)],
         )
         errors = wf.validate(config)
-        assert any("Backend natif indisponible" in error for error in errors)
-        assert any("décalages temporels" in error for error in errors)
+        assert not any("Backend natif indisponible" in error for error in errors)
 
 
 # =============================================================================
@@ -917,8 +1087,8 @@ class TestExternalAuditFixes:
         reasons = encode_native_mux_blockers(config, pipeline=PIPELINE_FFMPEG_DIRECT)
         assert not any("audio.mp4" in reason for reason in reasons)
 
-    def test_copied_audio_from_non_mkv_still_blocks_native(self, tmp_path: Path) -> None:
-        """Audio copié tel quel depuis un conteneur non-MKV : blocage conservé."""
+    def test_copied_audio_from_non_mkv_is_materialized_for_native(self, tmp_path: Path) -> None:
+        """Audio copié depuis un conteneur non-MKV : artefact MKV préparé."""
         foreign = tmp_path / "audio.mp4"
         foreign.write_bytes(b"mp4")
         config = _encode_config(
@@ -928,10 +1098,10 @@ class TestExternalAuditFixes:
             keep_chapters=False,
         )
         reasons = encode_native_mux_blockers(config, pipeline=PIPELINE_FFMPEG_DIRECT)
-        assert any("audio.mp4" in reason for reason in reasons)
+        assert not any("audio.mp4" in reason for reason in reasons)
 
-    def test_implicit_subtitle_copy_guards_all_layout_sources(self, tmp_path: Path) -> None:
-        """copy_subtitles implicite : une source secondaire non-MKV bloque le natif."""
+    def test_implicit_subtitle_copy_uses_preparation_for_layout_sources(self, tmp_path: Path) -> None:
+        """Les sources secondaires non-MKV sont préparées avant le mux natif."""
         foreign = tmp_path / "second.mp4"
         foreign.write_bytes(b"mp4")
         config = _encode_config(
@@ -941,4 +1111,4 @@ class TestExternalAuditFixes:
             keep_chapters=False,
         )
         reasons = encode_native_mux_blockers(config, pipeline=PIPELINE_FFMPEG_DIRECT)
-        assert any("second.mp4" in reason for reason in reasons)
+        assert not any("second.mp4" in reason for reason in reasons)

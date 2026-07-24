@@ -234,12 +234,21 @@ class MatroskaReader:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
+        # Mémoïsation niveau instance : segment et tracks sont reparcourus
+        # plusieurs fois par compilation de plan (capacités natives + contrat de
+        # sortie). Un reader étant lié à un seul thread et jetable, le cache est
+        # sûr et sans risque de péremption (un fichier modifié => nouveau reader).
+        self._segment_cache: EbmlElement | None = None
+        self._tracks_cache: tuple["MatroskaTrack", ...] | None = None
 
     def segment(self) -> EbmlElement:
+        if self._segment_cache is not None:
+            return self._segment_cache
         with self.path.open("rb") as fh:
             size = self.path.stat().st_size
             while element := read_element(fh, limit=size):
                 if element.element_id == self.SEGMENT_ID:
+                    self._segment_cache = element
                     return element
                 if element.end is None:
                     break
@@ -449,8 +458,11 @@ class MatroskaReader:
 
     def tracks(self) -> list["MatroskaTrack"]:
         """Return core TrackEntry metadata while retaining its raw EBML body."""
+        if self._tracks_cache is not None:
+            return list(self._tracks_cache)
         tracks_element = next((item for item in self.top_level() if item.element_id == self.TRACKS_ID), None)
         if tracks_element is None:
+            self._tracks_cache = ()
             return []
         out: list[MatroskaTrack] = []
         size = self.path.stat().st_size
@@ -578,6 +590,7 @@ class MatroskaReader:
                     flag_original=bool(uint(self.FLAG_ORIGINAL_ID, 0)),
                     flag_commentary=bool(uint(self.FLAG_COMMENTARY_ID, 0)),
                 ))
+        self._tracks_cache = tuple(out)
         return out
 
     def content_encodings_by_track(self) -> list[tuple[bool, bool]]:

@@ -201,7 +201,29 @@ def _metadata_carrier_stream(source: SourceInput) -> int | None:
 # Préflight natif (scopé aux pistes sélectionnées)
 # =============================================================================
 
-def native_capability_reasons(config: RemuxConfig) -> tuple[str, ...]:
+def _shared_reader(
+    readers: dict[Path, MatroskaReader] | None, path: Path
+) -> MatroskaReader:
+    """Réutilise un ``MatroskaReader`` mémoïsé pour ``path`` sur une compilation.
+
+    Le cache interne du reader (segment/tracks) n'aide qu'entre appels d'une même
+    instance ; partager l'instance évite de reparcourir une source lue à la fois
+    par le préflight natif et le contrat de sortie.
+    """
+    if readers is None:
+        return MatroskaReader(path)
+    reader = readers.get(path)
+    if reader is None:
+        reader = MatroskaReader(path)
+        readers[path] = reader
+    return reader
+
+
+def native_capability_reasons(
+    config: RemuxConfig,
+    *,
+    readers: dict[Path, MatroskaReader] | None = None,
+) -> tuple[str, ...]:
     """Blocages du backend natif, limités au périmètre réellement demandé.
 
     Centraliser ce contrôle garantit que les incréments du writer ne font que
@@ -256,7 +278,7 @@ def native_capability_reasons(config: RemuxConfig) -> tuple[str, ...]:
         if not source.path.is_file():
             continue
         try:
-            reader = MatroskaReader(source.path)
+            reader = _shared_reader(readers, source.path)
             reader.segment()
             native_tracks = reader.tracks()
             if selected_tracks and not native_tracks:
@@ -274,11 +296,18 @@ def native_capability_reasons(config: RemuxConfig) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reasons))
 
 
-def select_mux_backend(config: RemuxConfig) -> MuxBackendDecision:
+def select_mux_backend(
+    config: RemuxConfig,
+    *,
+    readers: dict[Path, MatroskaReader] | None = None,
+) -> MuxBackendDecision:
     requested = normalize_mux_backend(config.mux_backend)
-    reasons = native_capability_reasons(config)
     if requested == "ffmpeg":
+        # Backend FFmpeg forcé : inutile d'exécuter le préflight de capacité
+        # native. Le contrat peut néanmoins lire les pistes vidéo Matroska
+        # afin de vérifier la préservation d'éventuels BlockAdditionMapping.
         return MuxBackendDecision(requested=requested, selected="ffmpeg")
+    reasons = native_capability_reasons(config, readers=readers)
     if not reasons:
         return MuxBackendDecision(requested=requested, selected="native")
     if requested == "native":
@@ -676,6 +705,8 @@ def _output_contract(
     mapped_tracks: list[TrackEntry],
     selected_backend: str,
     preparation_actions: tuple[RemuxPreparationAction, ...],
+    *,
+    readers: dict[Path, MatroskaReader] | None = None,
 ) -> MatroskaOutputContract:
     expects_chapters = bool(config.chapter_overrides) or (
         config.chapter_overrides is None
@@ -775,7 +806,7 @@ def _output_contract(
         ):
             continue
         try:
-            native_tracks = MatroskaReader(selected_source.path).tracks()
+            native_tracks = _shared_reader(readers, selected_source.path).tracks()
             if 0 <= ref.stream_index < len(native_tracks) and native_tracks[ref.stream_index].block_addition_mappings:
                 block_mapping_by_output.add(output_index)
         except (OSError, ValueError):
@@ -825,7 +856,10 @@ def plan_remux(
 ) -> MuxExecutionPlan:
     """Compile le plan d'exécution unique (backend, préparations, contrat)."""
     _ = ffprobe_bin  # symétrie d'API : le second validateur est toujours ffprobe
-    decision = select_mux_backend(config)
+    # Instances Matroska mémoïsées partagées sur toute la compilation : évite de
+    # reparcourir une même source dans le préflight natif puis le contrat.
+    readers: dict[Path, MatroskaReader] = {}
+    decision = select_mux_backend(config, readers=readers)
 
     mapping_errors: list[str] = []
     mapped_refs: list[SelectedTrackRef] = []
@@ -886,6 +920,7 @@ def plan_remux(
         mapped_track_entries,
         decision.selected,
         tuple(preparation_actions),
+        readers=readers,
     )
     seen_attachment_names: set[str] = set()
     duplicate_attachment_names: list[str] = []

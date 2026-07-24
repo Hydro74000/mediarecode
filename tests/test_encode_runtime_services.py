@@ -76,7 +76,7 @@ def test_ensure_inject_storage_available_raises_on_same_fs_shortfall(tmp_path):
     assert any("Estimation espace injection" in message for message in logs)
 
 
-def test_attachment_preparation_service_extracts_only_attached_pics(tmp_path):
+def test_attachment_preparation_service_materializes_all_selected_attachments(tmp_path):
     src = tmp_path / "src.mkv"
     src.touch()
     font = tmp_path / "font.ttf"
@@ -92,6 +92,10 @@ def test_attachment_preparation_service_extracts_only_attached_pics(tmp_path):
         extracted.append((source, stream_idx, dest))
         dest.write_bytes(b"img")
 
+    def _extract_attachment_data(source: Path, stream_idx: int, dest: Path, _signals: Any) -> None:
+        extracted.append((source, stream_idx, dest))
+        dest.write_bytes(b"font")
+
     service = AttachmentPreparationService(
         AttachmentPreparationServiceCallbacks(
             check_cancelled=lambda _signals: None,
@@ -101,16 +105,21 @@ def test_attachment_preparation_service_extracts_only_attached_pics(tmp_path):
                 else {"is_attached_pic": False, "filename": "font.ttf", "mimetype": "font/ttf"}
             ),
             attachment_filename=lambda meta, _stream_idx: str(meta["filename"]),
-            unique_attachment_path=lambda tmp_dir, filename: tmp_dir / filename,
-            extract_attached_pic=_extract_attached_pic,
+                unique_attachment_path=lambda tmp_dir, filename: tmp_dir / filename,
+                extract_attached_pic=_extract_attached_pic,
+                extract_attachment_data=_extract_attachment_data,
         )
     )
 
     prepared, cleanup_dir = service.prepare(cfg, work_dir=tmp_path)
 
     assert cleanup_dir is not None
-    assert prepared.attachment_streams == [(src, 6)]
+    assert prepared.attachment_streams == []
     assert prepared.extra_attachments[0].name == "cover.png"
-    assert prepared.extra_attachments[1] == font
-    assert extracted == [(src, 5, Path(cleanup_dir) / "cover.png")]
+    assert prepared.extra_attachments[1].name == "font.ttf"
+    assert prepared.extra_attachments[2] == font
+    assert extracted == [
+        (src, 5, Path(cleanup_dir) / "cover.png"),
+        (src, 6, Path(cleanup_dir) / "font.ttf"),
+    ]
     assert (Path(cleanup_dir) / "cover.png").exists()
