@@ -123,6 +123,7 @@ from __future__ import annotations
 
 import colorsys
 import json
+from threading import Event
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -2542,6 +2543,23 @@ class TestRemuxPanelVideoTrackSignals:
         assert [entry.entry_id for _info, entry, _color in emitted[-1]] == [video_a.entry_id]
         panel.close()
 
+    def test_video_checkbox_change_does_not_rebuild_audio_projection(self, qt_app, tmp_path):
+        video = _track(0, "video", file_id="fid", codec="HEVC")
+        panel = self._panel_with_video_tracks(qt_app, tmp_path, [video])
+        video_emitted: list = []
+        audio_emitted: list = []
+        panel.video_tracks_changed.connect(video_emitted.append)
+        panel.audio_tracks_changed.connect(audio_emitted.append)
+
+        row = self._row_for_entry(panel, video)
+        row_item = panel._track_table.item(row, _TrackTable.COL_CHECK)
+        assert row_item is not None
+        row_item.setCheckState(Qt.CheckState.Unchecked)
+
+        assert video_emitted == [[]]
+        assert audio_emitted == []
+        panel.close()
+
     def test_reemitted_video_tracks_are_detached_objects(self, qt_app, tmp_path):
         video = _track(0, "video", file_id="fid", codec="HEVC")
         panel = self._panel_with_video_tracks(qt_app, tmp_path, [video])
@@ -3099,3 +3117,46 @@ def test_remux_panel_refreshes_backend_after_settings_save(qt_app):
     panel.refresh_runtime_settings()
 
     assert panel._mux_backend_combo.currentData() == "ffmpeg"
+
+
+def test_remux_panel_debounces_preview_and_compiles_it_off_the_ui_thread(qt_app):
+    """Une rafale tableau ne doit ni compiler deux fois ni figer Qt."""
+    panel = RemuxPanel(AppConfig())
+    started = Event()
+    release = Event()
+    sentinel_config = object()
+
+    def _slow_preview(_config):
+        started.set()
+        assert release.wait(timeout=1)
+        return "preview à jour"
+
+    try:
+        with patch.object(panel, "_current_config", return_value=sentinel_config), \
+             patch.object(panel._workflow, "preview_command", side_effect=_slow_preview) as preview:
+            panel._rebuild_preview()
+            panel._rebuild_preview()
+
+            # Avant l'expiration du debounce, aucun préflight n'est déclenché.
+            assert preview.call_count == 0
+            deadline = time.monotonic() + 1.0
+            while not started.is_set() and time.monotonic() < deadline:
+                qt_app.processEvents()
+                time.sleep(0.01)
+            assert started.is_set()
+            assert preview.call_count == 1
+
+            # Le worker reste bloqué, mais la boucle Qt continue de traiter les
+            # événements ; le texte n'est appliqué qu'une fois le calcul fini.
+            qt_app.processEvents()
+            assert panel._cmd_preview.toPlainText() != "preview à jour"
+            release.set()
+            deadline = time.monotonic() + 1.0
+            while panel._cmd_preview.toPlainText() != "preview à jour" and time.monotonic() < deadline:
+                qt_app.processEvents()
+                time.sleep(0.01)
+
+        assert panel._cmd_preview.toPlainText() == "preview à jour"
+    finally:
+        release.set()
+        panel.close()

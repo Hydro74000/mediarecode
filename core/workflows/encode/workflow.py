@@ -92,6 +92,7 @@ from core.workflows.encode.runtime import (
     estimate_duration_seconds as _estimate_duration_seconds_runtime,
     estimate_inject_storage_requirements as _estimate_inject_storage_requirements_runtime,
     estimate_inject_video_bytes as _estimate_inject_video_bytes_runtime,
+    extract_attachment_data as _extract_attachment_data_runtime,
     extract_attached_pic as _extract_attached_pic_runtime,
     format_bytes as _format_bytes_runtime,
     probe_attachment_stream as _probe_attachment_stream_runtime,
@@ -2640,12 +2641,97 @@ class EncodeWorkflow(QObject):
             )
             return signals
 
+        if native_mux:
+            return self._run_ffmpeg_direct_native_output(
+                config,
+                cleanup_paths,
+                prep_signals=prep_signals,
+                plan=plan,
+            )
+
         return self._run_ffmpeg_direct_output(
             config,
             cleanup_paths,
             prep_signals=prep_signals,
             plan=plan,
         )
+
+    def _run_ffmpeg_direct_native_output(
+        self,
+        config: EncodeConfig,
+        cleanup_paths: list[Path],
+        *,
+        prep_signals: TaskSignals | None = None,
+        plan: _EncodePlan | None = None,
+    ) -> TaskSignals:
+        """Encode the video-only artifact, then let the native writer mux it.
+
+        The historical direct FFmpeg path encoded and muxed in one command.
+        Forced native mode instead writes a disposable mono-video MKV; audio,
+        subtitles, tags and attachments are added only by
+        ``assemble_encode_output_native``.
+        """
+        signals = prep_signals or TaskSignals()
+        encode_plan = plan or self._build_encode_plan(config)
+        work_dir = Path(config.work_dir or config.source.parent)
+        video = self._primary_video_settings(config)
+        source = self._video_source_path(config)
+        video_offset_ms = _track_offset_ms_plan(
+            dict(encode_plan.offset_lookup),
+            track_type="video",
+            source_path=source,
+            stream_index=self._video_stream_index(config),
+        )
+        intermediate = work_dir / f"{config.output.stem}.native-video.mkv"
+        cleanup_paths.append(intermediate)
+        commands = self._build_video_only_mkv_commands(
+            config, video, source, intermediate, offset_ms=video_offset_ms,
+        )
+
+        def _task() -> None:
+            try:
+                self._check_cancelled(signals)
+                self._log_step(5, "Encodage de l'artefact vidéo Matroska natif")
+                for index, command in enumerate(commands, start=1):
+                    self._runner._run_cmd(
+                        command,
+                        cwd=work_dir,
+                        label=f"ffmpeg-native-video-pass{index}",
+                        progress_cb=signals.progress.emit,
+                        signals=signals,
+                    )
+                self._check_cancelled(signals)
+                self._log_step(6, "Assemblage final Matroska natif")
+                _assemble_encode_output_native(
+                    config,
+                    video_artifacts=[_NativeVideoArtifactRef(intermediate)],
+                    resolved_subtitles=self._plan_resolved_subtitles(encode_plan),
+                    track_metadata=encode_plan.track_metadata,
+                    work_dir=work_dir,
+                    signals=signals,
+                    run_cmd=lambda cmd, label: self._runner._run_cmd(
+                        cmd, signals=signals, cwd=work_dir,
+                        label=label, progress_cb=signals.progress.emit,
+                    ),
+                    log=self.log_message.emit,
+                    ffmpeg_bin=self._ffmpeg,
+                    ffprobe_bin=self._ffprobe_bin_from_ffmpeg(self._ffmpeg),
+                )
+                signals.finished.emit(str(config.output))
+            except TaskCancelledError:
+                signals.cancelled.emit()
+            except Exception as exc:
+                signals.failed.emit(str(exc), exc)
+            finally:
+                remove_path(intermediate)
+
+        if prep_signals is not None:
+            _task()
+            return signals
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(_task)
+        executor.shutdown(wait=False)
+        return signals
 
     def _run_ffmpeg_direct_output(
         self,
@@ -2974,6 +3060,12 @@ class EncodeWorkflow(QObject):
                     dest,
                     signals=task_signals,
                 ),
+                extract_attachment_data=lambda source, stream_idx, dest, task_signals: self._extract_attachment_data(
+                    source,
+                    stream_idx,
+                    dest,
+                    signals=task_signals,
+                ),
             )
         ).prepare(
             config,
@@ -3054,6 +3146,30 @@ class EncodeWorkflow(QObject):
         signals: TaskSignals | None = None,
     ) -> None:
         _extract_attached_pic_runtime(
+            source,
+            stream_idx,
+            dest,
+            ffmpeg_bin=self._ffmpeg,
+            ffmpeg_thread_args=self._ffmpeg_thread_args,
+            check_cancelled=self._check_cancelled,
+            log_info=lambda message: self.log_message.emit("INFO", message),
+            run_cmd=lambda cmd, label, task_signals: self._runner._run_cmd(
+                cmd,
+                label=label,
+                signals=task_signals,
+            ),
+            signals=signals,
+        )
+
+    def _extract_attachment_data(
+        self,
+        source: Path,
+        stream_idx: int,
+        dest: Path,
+        *,
+        signals: TaskSignals | None = None,
+    ) -> None:
+        _extract_attachment_data_runtime(
             source,
             stream_idx,
             dest,

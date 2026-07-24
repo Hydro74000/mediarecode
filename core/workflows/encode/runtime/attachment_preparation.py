@@ -142,6 +142,44 @@ def extract_attached_pic(
         )
 
 
+def extract_attachment_data(
+    source: Path,
+    stream_idx: int,
+    dest: Path,
+    *,
+    ffmpeg_bin: str,
+    ffmpeg_thread_args: Callable[[], list[str]],
+    check_cancelled: Callable[[TaskSignals | None], None],
+    log_info: Callable[[str], None],
+    run_cmd: Callable[[list[str], str, TaskSignals | None], object],
+    signals: TaskSignals | None = None,
+) -> None:
+    """Extract a Matroska attachment stream as its original byte payload."""
+    check_cancelled(signals)
+    cmd = [ffmpeg_bin, "-hide_banner", "-y"]
+    append_ffmpeg_input_args(cmd, source)
+    cmd.extend([
+        "-map", f"0:{stream_idx}", *ffmpeg_thread_args(),
+        "-c", "copy", "-f", "data", str(dest),
+    ])
+    log_info("$ " + " ".join(cmd))
+    try:
+        run_cmd(cmd, "extract-attachment", signals)
+    except TaskCancelledError:
+        dest.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise EncodeError(
+            f"Extraction attachment échouée pour le stream {stream_idx} de {source.name}: {str(exc).strip()}"
+        ) from exc
+    check_cancelled(signals)
+    if not dest.is_file():
+        raise EncodeError(
+            f"Extraction attachment échouée pour le stream {stream_idx} de {source.name}: fichier absent"
+        )
+
+
 @dataclass(frozen=True)
 class AttachmentPreparationServiceCallbacks:
     check_cancelled: Callable[[TaskSignals | None], None]
@@ -149,6 +187,7 @@ class AttachmentPreparationServiceCallbacks:
     attachment_filename: Callable[[dict[str, object], int], str]
     unique_attachment_path: Callable[[Path, str], Path]
     extract_attached_pic: Callable[[Path, int, Path, TaskSignals | None], None]
+    extract_attachment_data: Callable[[Path, int, Path, TaskSignals | None], None] | None = None
 
 
 class AttachmentPreparationService:
@@ -179,14 +218,22 @@ class AttachmentPreparationService:
                 src_path, stream_idx = selection[:2]
                 meta = cb.describe_attachment_stream(src_path, stream_idx)
                 cb.check_cancelled(signals)
-                if not meta["is_attached_pic"]:
-                    direct_streams.append(selection)
-                    continue
+                # Le muxeur interne reçoit des fichiers d'attachement, pas
+                # des streams FFmpeg. En mode natif on matérialise donc aussi
+                # les fonts et pièces jointes ordinaires.
+                # Toujours matérialiser : le même résultat sert au muxeur
+                # interne comme au chemin FFmpeg et évite qu'un choix ``auto``
+                # soit arrêté avant la sélection réelle du backend.
 
                 created_any = True
                 filename = cb.attachment_filename(meta, stream_idx)
                 dest = cb.unique_attachment_path(tmp_dir, filename)
-                cb.extract_attached_pic(src_path, stream_idx, dest, signals)
+                if meta["is_attached_pic"]:
+                    cb.extract_attached_pic(src_path, stream_idx, dest, signals)
+                else:
+                    if cb.extract_attachment_data is None:
+                        raise EncodeError("Extraction d'attachment natif non configurée")
+                    cb.extract_attachment_data(src_path, stream_idx, dest, signals)
                 cb.check_cancelled(signals)
                 extracted_files.append(dest)
 

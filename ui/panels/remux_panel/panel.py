@@ -5,10 +5,10 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QDropEvent, QFont
 from PySide6.QtWidgets import (
     QComboBox,
@@ -145,6 +145,7 @@ class RemuxPanel(QWidget):
     _inspection_error = Signal(str, str)
     _audio_sync_done = Signal(str, str, int, float)
     _audio_sync_error = Signal(str, str)
+    _preview_compiled = Signal(int, str)
 
     video_tracks_changed = Signal(object)
     audio_tracks_changed = Signal(object)
@@ -164,6 +165,9 @@ class RemuxPanel(QWidget):
         self._writing_application = writing_application
         self._workflow: RemuxWorkflow = self._make_workflow()
         self._executor = ThreadPoolExecutor(max_workers=2)
+        # Le préflight du backend natif peut lire les sources ; il ne doit pas
+        # partager le pool d'inspection ni bloquer la boucle Qt.
+        self._preview_executor = ThreadPoolExecutor(max_workers=1)
 
         self._source_files: list[SourceFile] = []
         self._source_names: dict[str, str] = {}
@@ -180,6 +184,22 @@ class RemuxPanel(QWidget):
         self._output_edit: QLineEdit
         self._mux_backend_combo: QComboBox
         self._cmd_preview: QPlainTextEdit
+        self._preview_generation = 0
+        self._preview_dirty = False
+        self._closing = False
+        self._preview_future: Future[None] | None = None
+
+        # Debounce du preview : les cases à cocher émettent itemChanged par
+        # cellule et le drag-reorder plusieurs order_changed ; sans coalescence,
+        # chaque événement relancerait une compilation de plan et des I/O.
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(180)
+        self._preview_timer.timeout.connect(self._apply_rebuild_preview)
+        self._preview_compiled.connect(
+            self._apply_compiled_preview,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self._workflow.log_message.connect(
             self.log_message, Qt.ConnectionType.QueuedConnection
@@ -654,22 +674,93 @@ class RemuxPanel(QWidget):
         tmdb.on_tmdb_details_selected(self, details)
 
     def _rebuild_preview(self) -> None:
+        if self._closing:
+            return
+        # Coalesce les rafales d'événements (cases, reorder) en une seule
+        # recompilation via le timer single-shot. Invalider immédiatement le
+        # résultat en vol évite d'afficher une commande devenue obsolète.
+        self._preview_generation += 1
+        self._preview_dirty = True
+        if self._preview_future is not None:
+            self._preview_future.cancel()
+        self._preview_timer.start()
+
+    def _apply_rebuild_preview(self) -> None:
+        if self._closing:
+            return
+        generation = self._preview_generation
         config = self._current_config()
         if config is None:
+            self._preview_dirty = False
             self._cmd_preview.setPlainText("")
             return
+
+        # ``preview_command`` ne modifie pas le workflow : il ne fait que
+        # compiler le plan et lire éventuellement les conteneurs sources.
+        # Le déplacer du thread Qt garantit que les interactions du tableau
+        # restent réactives, y compris avec un stockage réseau lent.
+        # Les TrackEntry du tableau sont mutables ; le worker reçoit donc un
+        # instantané indépendant de l'UI, pas les mêmes objets partagés.
+        snapshot = copy.deepcopy(config)
+        if self._preview_future is not None:
+            self._preview_future.cancel()
+        self._preview_future = self._preview_executor.submit(
+            self._compile_preview,
+            generation,
+            snapshot,
+        )
+
+    def _compile_preview(self, generation: int, config: RemuxConfig) -> None:
         try:
             text = self._workflow.preview_command(config)
-            self._cmd_preview.setPlainText(text)
         except Exception:
-            self._cmd_preview.setPlainText("(erreur de construction de la commande)")
+            text = "(erreur de construction de la commande)"
+        self._preview_compiled.emit(generation, text)
+
+    def _apply_compiled_preview(self, generation: int, text: str) -> None:
+        if self._closing or generation != self._preview_generation:
+            return
+        self._preview_dirty = False
+        self._cmd_preview.setPlainText(text)
+
+    def _refresh_preview_synchronously(self) -> None:
+        """Rafraîchit le preview avant une action explicite qui l'utilise."""
+        self._preview_timer.stop()
+        self._preview_generation += 1
+        config = self._current_config()
+        if config is None:
+            text = ""
+        else:
+            try:
+                text = self._workflow.preview_command(config)
+            except Exception:
+                text = "(erreur de construction de la commande)"
+        self._preview_dirty = False
+        self._cmd_preview.setPlainText(text)
 
     def _on_table_changed(self, _item: QTableWidgetItem | None = None) -> None:
         self._prune_auto_sync_entry_ids()
         self._refresh_audio_sync_buttons()
         self._track_table.refresh_filter()
         self._rebuild_preview()
-        self._emit_signals()
+        if _item is None:
+            # Compatibilité des appels programmatiques qui ne fournissent pas
+            # la cellule modifiée : les deux projections restent sûres.
+            self._emit_signals()
+            return
+        check_item = self._track_table.item(_item.row(), _TrackTable.COL_CHECK)
+        entry = (
+            check_item.data(Qt.ItemDataRole.UserRole)
+            if check_item is not None
+            else None
+        )
+        # EncodePanel maintient des listes vidéo et audio indépendantes. Ne
+        # reconstruire que celle affectée évite une seconde vague de widgets à
+        # chaque clic ; l'ordre global reste synchronisé dans le handler DnD.
+        if isinstance(entry, TrackEntry) and entry.track_type == "video":
+            self._emit_video_tracks()
+        elif isinstance(entry, TrackEntry) and entry.track_type == "audio":
+            self._emit_audio_tracks()
 
     def _on_track_order_changed(self) -> None:
         self._prune_auto_sync_entry_ids()
@@ -1806,11 +1897,21 @@ class RemuxPanel(QWidget):
     def _copy_command(self) -> None:
         from PySide6.QtWidgets import QApplication
 
+        # Le debounce peut laisser le texte précédent pendant quelques
+        # millisecondes. Pour une copie explicite, la justesse prime : ne pas
+        # recopier une commande correspondant à l'ancien ordre des pistes.
+        if self._preview_dirty:
+            self._refresh_preview_synchronously()
         text = self._cmd_preview.toPlainText()
         if text:
             QApplication.clipboard().setText(text)
 
     def closeEvent(self, event) -> None:
+        self._closing = True
+        self._preview_timer.stop()
+        if self._preview_future is not None:
+            self._preview_future.cancel()
+        self._preview_executor.shutdown(wait=True)
         self._executor.shutdown(wait=True)
         super().closeEvent(event)
 

@@ -84,27 +84,22 @@ def encode_native_mux_blockers(config: EncodeConfig, *, pipeline: str) -> tuple[
     reasons: list[str] = []
     if config.output.suffix.lower() != ".mkv":
         reasons.append("le backend natif écrit uniquement des sorties .mkv")
-    if config.track_time_offsets:
-        reasons.append("décalages temporels à matérialiser par FFmpeg (synchronisation)")
     for source in sorted(_copied_container_sources(config, pipeline)):
-        if source.suffix.lower() not in MATROSKA_EXTENSIONS:
+        # L'assembleur encode matérialise maintenant une piste copiée non-MKV
+        # dans un artefact MKV mono-piste avant l'écriture finale native. Les
+        # pistes vidéo COPY multi restent un cas distinct : leur artefact est
+        # produit par le pipeline multi-vidéo, qui ne sait pas encore les
+        # canonicaliser hors Matroska.
+        if (
+            source.suffix.lower() not in MATROSKA_EXTENSIONS
+            and pipeline == PIPELINE_MULTI_VIDEO
+        ):
             reasons.append(
                 f"{source.name}: source non Matroska — pistes copiées à canonicaliser par FFmpeg"
             )
-    if config.attachment_streams:
-        reasons.append("attachments par stream à transposer par FFmpeg")
-    if config.tag_sources and config.tag_overrides is None:
-        reasons.append("copie de tags sources non transposée nativement")
-    for patch in config.track_meta_edits:
-        if any(
-            flag is not None
-            for flag in (
-                patch.flag_default, patch.flag_forced, patch.flag_hearing_impaired,
-                patch.flag_visual_impaired, patch.flag_original, patch.flag_commentary,
-            )
-        ):
-            reasons.append("édition de flags de piste à appliquer via FFmpeg")
-            break
+    # Les tags sont réécrits avec leurs UID de sortie par l'assembleur
+    # partagé ; les flags et les offsets sont écrits dans les TrackEntry et
+    # Clusters natifs par ``compile_assembly_plan``.
     if pipeline == PIPELINE_NVENCC_DIRECT:
         # NVEncC écrit lui-même son MKV : la signalisation DoVi/HDR10+ de cet
         # intermédiaire n'est pas encore vérifiée pour l'assemblage natif.
