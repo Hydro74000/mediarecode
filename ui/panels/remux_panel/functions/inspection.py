@@ -45,7 +45,9 @@ def on_add_files(panel: "RemuxPanel", paths: list[str]) -> None:
         panel.log_message.emit(
             "INFO", translate_text("Inspection de {name} (ffprobe + mediainfo)…", name=path.name)
         )
-        panel._executor.submit(panel._inspect_file, sf.id, path)
+        # L'inspection est indépendante des calculs de synchronisation audio.
+        # Un calcul long ne doit pas mettre les nouveaux drops en attente.
+        panel._inspection_executor.submit(panel._inspect_file, sf.id, path)
 
     panel._sync_tmdb_suggested_title()
 

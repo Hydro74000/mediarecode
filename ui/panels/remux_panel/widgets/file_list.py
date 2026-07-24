@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -17,13 +17,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.bluray import discover_titles
 from core.file_types import ACCEPTED_EXTENSIONS, build_qt_filter
 from core.i18n import translate_text
 from core.inspector import FileInfo
 from ui.panels.remux_panel.models import _FILE_BAR_H, _FILE_PH_H, _FILE_ROW_H, SourceFile
 from ui.panels.remux_panel.theme import _C
 from ui.design_system import font_px as _font_px, scale as _scale
+
+
+_ACCEPTED_EXT = ACCEPTED_EXTENSIONS
 
 
 class _FileRow(QWidget):
@@ -130,9 +132,6 @@ class _FileRow(QWidget):
         """)
 
 
-_ACCEPTED_EXT = ACCEPTED_EXTENSIONS
-
-
 class _FileListWidget(QFrame):
     add_requested = Signal(list)
     remove_requested = Signal(str)
@@ -171,6 +170,13 @@ class _FileListWidget(QFrame):
         self._rows_layout.addStretch()
 
         self._scroll.setWidget(self._rows_container)
+        # Dès qu'une source est présente, le viewport du QScrollArea recouvre
+        # la zone de dépôt. Sans relais explicite, il accepte le drag-enter
+        # mais perd le drop, ce qui empêche d'ajouter une seconde source tant
+        # que la première est affichée dans la liste.
+        for target in (self._scroll, self._scroll.viewport(), self._rows_container):
+            target.setAcceptDrops(True)
+            target.installEventFilter(self)
         root.addWidget(self._scroll, stretch=1)
 
         self._placeholder = QWidget()
@@ -283,28 +289,48 @@ class _FileListWidget(QFrame):
             self.add_requested.emit(paths)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                path = Path(url.toLocalFile())
-                if path.suffix.lower() in _ACCEPTED_EXT or (path.is_dir() and discover_titles(path, min_duration_s=60.0)):
-                    event.acceptProposedAction()
-                    return
-        event.ignore()
+        self._accept_local_drop(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        paths = []
-        for url in event.mimeData().urls():
-            p = Path(url.toLocalFile())
-            if p.suffix.lower() in _ACCEPTED_EXT and p.is_file():
-                paths.append(str(p))
-            elif p.is_dir():
-                if discover_titles(p, min_duration_s=60.0):
-                    paths.append(str(p))
-        if paths:
-            self.add_requested.emit(paths)
+        self._emit_local_drop(event)
+
+    @staticmethod
+    def _local_drop_paths(event) -> list[str]:
+        mime = getattr(event, "mimeData", lambda: None)()
+        if mime is None or not mime.hasUrls():
+            return []
+        return [
+            url.toLocalFile()
+            for url in mime.urls()
+            if url.isLocalFile() and Path(url.toLocalFile()).exists()
+        ]
+
+    def _accept_local_drop(self, event) -> None:
+        if self._local_drop_paths(event):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def _emit_local_drop(self, event) -> None:
+        paths = self._local_drop_paths(event)
+        if not paths:
+            event.ignore()
+            return
+        # La validation détaillée (médias, pièces jointes et dossiers) relève
+        # du RemuxPanel. Ici, ne jamais lancer discover_titles() : cette sonde
+        # peut parcourir un disque Blu-ray et bloquait le glisser-déposer.
+        self.add_requested.emit(paths)
+        event.acceptProposedAction()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched in (self._scroll, self._scroll.viewport(), self._rows_container):
+            if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+                self._accept_local_drop(event)
+                return True
+            if event.type() == QEvent.Type.Drop:
+                self._emit_local_drop(event)
+                return True
+        return super().eventFilter(watched, event)
 
 
 __all__ = ["_FileListWidget"]

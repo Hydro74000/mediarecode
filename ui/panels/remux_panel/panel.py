@@ -164,6 +164,10 @@ class RemuxPanel(QWidget):
         self._config = config
         self._writing_application = writing_application
         self._workflow: RemuxWorkflow = self._make_workflow()
+        # Les inspections de sources et les calculs de synchro audio peuvent
+        # chacun être coûteux. Des pools séparés maintiennent l'admission des
+        # nouveaux fichiers même lorsqu'une synchro est en cours.
+        self._inspection_executor = ThreadPoolExecutor(max_workers=2)
         self._executor = ThreadPoolExecutor(max_workers=2)
         # Le préflight du backend natif peut lire les sources ; il ne doit pas
         # partager le pool d'inspection ni bloquer la boucle Qt.
@@ -766,7 +770,20 @@ class RemuxPanel(QWidget):
         self._prune_auto_sync_entry_ids()
         self._refresh_audio_sync_buttons()
         self._rebuild_preview()
-        self._emit_signals()
+        changed_types = self._track_table.consume_order_changed_track_types()
+        if changed_types is None:
+            # Émission programmée (ou extension externe) : conserver le
+            # comportement historique, sans information sur les projections
+            # effectivement modifiées.
+            self._emit_signals()
+            return
+        # L'EncodePanel ne connaît que les ordres internes vidéo et audio.
+        # Déplacer une piste audio devant une vidéo change bien le remux, mais
+        # ne justifie pas de reconstruire deux tableaux d'encodage identiques.
+        if "video" in changed_types:
+            self._emit_video_tracks()
+        if "audio" in changed_types:
+            self._emit_audio_tracks()
 
     def _emit_signals(self) -> None:
         signals.emit_signals(self)
@@ -1912,6 +1929,7 @@ class RemuxPanel(QWidget):
         if self._preview_future is not None:
             self._preview_future.cancel()
         self._preview_executor.shutdown(wait=True)
+        self._inspection_executor.shutdown(wait=True)
         self._executor.shutdown(wait=True)
         super().closeEvent(event)
 

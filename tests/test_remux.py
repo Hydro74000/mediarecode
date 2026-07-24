@@ -131,9 +131,9 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QDialog, QPushButton
+from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from core.config import AppConfig
 from core.i18n import current_language, set_current_language, translate_text
@@ -690,6 +690,82 @@ class TestTrackTable:
         _fill_table(table, 2, file_id="A")
         _fill_table(table, 3, file_id="B")
         assert table.rowCount() == 5
+
+    def test_drop_moves_only_the_selected_row(self, table, monkeypatch):
+        tracks = _fill_table(table, 3)
+        second_row_actions = table.cellWidget(1, _TrackTable.COL_EDIT)
+        assert second_row_actions is not None
+        table.selectRow(0)
+
+        class _DropEvent:
+            accepted = False
+
+            @staticmethod
+            def source():
+                return table
+
+            @staticmethod
+            def position():
+                return QPointF(0, 0)
+
+            def setDropAction(self, _action):
+                pass
+
+            def accept(self):
+                self.accepted = True
+
+            def ignore(self):
+                raise AssertionError("Le drop interne ne doit pas être ignoré")
+
+        monkeypatch.setattr(table, "_drop_target_row", lambda _event: 3)
+        event = _DropEvent()
+        table.dropEvent(event)
+
+        assert [entry.entry_id for entry in table.current_tracks()] == [
+            tracks[1].entry_id,
+            tracks[2].entry_id,
+            tracks[0].entry_id,
+        ]
+        assert table.cellWidget(0, _TrackTable.COL_EDIT) is second_row_actions
+        assert table.cellWidget(2, _TrackTable.COL_EDIT) is not None
+        assert table.consume_order_changed_track_types() == frozenset({"audio"})
+        assert event.accepted is True
+
+    def test_drop_across_track_types_skips_unchanged_encode_projections(self, table, monkeypatch):
+        video = _track(0, "video")
+        audio = _track(1, "audio")
+        table.append_tracks(_COLOR_A, [video, audio])
+        table.selectRow(1)
+
+        class _DropEvent:
+            @staticmethod
+            def source():
+                return table
+
+            @staticmethod
+            def position():
+                return QPointF(0, 0)
+
+            @staticmethod
+            def setDropAction(_action):
+                pass
+
+            @staticmethod
+            def accept():
+                pass
+
+            @staticmethod
+            def ignore():
+                raise AssertionError("Le drop interne ne doit pas être ignoré")
+
+        monkeypatch.setattr(table, "_drop_target_row", lambda _event: 0)
+        table.dropEvent(_DropEvent())
+
+        assert [entry.entry_id for entry in table.current_tracks()] == [
+            audio.entry_id,
+            video.entry_id,
+        ]
+        assert table.consume_order_changed_track_types() == frozenset()
 
     def test_remove_tracks_by_file_id_removes_only_target(self, table):
         _fill_table(table, 2, file_id="A")
@@ -1257,6 +1333,38 @@ class TestFileListWidgetSize:
         file_list.remove_file(sf0.id)
         expected = 1 * _FILE_ROW_H + _FILE_BAR_H
         assert file_list.maximumHeight() == expected
+
+    def test_drop_on_visible_scroll_viewport_is_forwarded(self, file_list, tmp_path):
+        """Le viewport recouvre la zone après la première source."""
+        file_list.add_file(_make_sf(0))
+        source = tmp_path / "second.mkv"
+        source.touch()
+        received: list[list[str]] = []
+        file_list.add_requested.connect(received.append)
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(source))])
+        viewport = file_list._scroll.viewport()
+        enter = QDragEnterEvent(
+            QPoint(4, 4),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(viewport, enter)
+        drop = QDropEvent(
+            QPoint(4, 4),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(viewport, drop)
+
+        assert enter.isAccepted()
+        assert drop.isAccepted()
+        assert received == [[str(source)]]
 
     def test_remove_last_restores_placeholder_height(self, file_list):
         sf = _make_sf(0)
@@ -1911,6 +2019,65 @@ class TestRemuxPanelNewAudioTracks:
             source.entry_id,
             new_track.entry_id,
         ]
+        panel.close()
+
+
+class TestRemuxPanelTrackOrderProjections:
+
+    def test_cross_type_reorder_keeps_encode_projections_untouched(self, qt_app, tmp_path, monkeypatch):
+        cfg = AppConfig()
+        panel = RemuxPanel(cfg)
+        source_path = tmp_path / "source.mkv"
+        source_path.touch()
+        video = _track(0, "video", file_id="fid", codec="HEVC")
+        audio = _track(1, "audio", file_id="fid")
+        info = _file_info(
+            path=source_path,
+            videos=[_video(index=0)],
+            audios=[_audio(index=1)],
+        )
+        panel._source_files = [
+            SourceFile(id="fid", path=source_path, color=_COLOR_A, info=info, tracks=[video, audio])
+        ]
+        panel._source_colors = {"fid": _COLOR_A}
+        panel._source_names = {"fid": source_path.name}
+        panel._track_table.append_tracks(_COLOR_A, [video, audio])
+        video_emissions: list = []
+        audio_emissions: list = []
+        panel.video_tracks_changed.connect(video_emissions.append)
+        panel.audio_tracks_changed.connect(audio_emissions.append)
+        panel._track_table.selectRow(1)
+
+        class _DropEvent:
+            @staticmethod
+            def source():
+                return panel._track_table
+
+            @staticmethod
+            def position():
+                return QPointF(0, 0)
+
+            @staticmethod
+            def setDropAction(_action):
+                pass
+
+            @staticmethod
+            def accept():
+                pass
+
+            @staticmethod
+            def ignore():
+                raise AssertionError("Le drop interne ne doit pas être ignoré")
+
+        monkeypatch.setattr(panel._track_table, "_drop_target_row", lambda _event: 0)
+        panel._track_table.dropEvent(_DropEvent())
+
+        assert [entry.entry_id for entry in panel._track_table.current_tracks()] == [
+            audio.entry_id,
+            video.entry_id,
+        ]
+        assert video_emissions == []
+        assert audio_emissions == []
         panel.close()
 
 
@@ -2611,6 +2778,32 @@ def test_inspect_file_routes_verbose_inspector_output_to_panel_signal(tmp_path):
     assert verbose_lines == [("inspector", "Inspection démarrée : /tmp/movie.mkv")]
     panel._inspection_done.emit.assert_called_once_with("fid-1", info)
     panel._inspection_error.emit.assert_not_called()
+
+
+def test_add_files_uses_dedicated_inspection_executor(tmp_path):
+    first = tmp_path / "first.mkv"
+    second = tmp_path / "second.mkv"
+    inspection_executor = MagicMock()
+    audio_sync_executor = MagicMock()
+    panel = SimpleNamespace(
+        _source_files=[],
+        _source_names={},
+        _source_colors={},
+        _color_index=0,
+        _file_list=MagicMock(),
+        _inspection_executor=inspection_executor,
+        _executor=audio_sync_executor,
+        _inspect_file=MagicMock(),
+        _sync_tmdb_suggested_title=MagicMock(),
+        log_message=SimpleNamespace(emit=MagicMock()),
+    )
+
+    inspection_functions.on_add_files(cast(Any, panel), [str(first), str(second)])
+
+    assert inspection_executor.submit.call_count == 2
+    assert audio_sync_executor.submit.call_count == 0
+    assert [call.args[2] for call in inspection_executor.submit.call_args_list] == [first, second]
+    assert len(panel._source_files) == 2
 
 
 # ===========================================================================

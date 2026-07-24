@@ -81,6 +81,7 @@ class EncodePanel(QWidget):
     audio_track_remove_requested = Signal(object)  # (entry_id)
     video_tracks_encoding_changed = Signal(object)
     _hw_detected             = Signal(object, object, object)   # (hw: set[str], sw: set[str], hw_ffmpeg: str)
+    _hdr_meta_frame_probe_ready = Signal(int, str, str)
     _VIDEO_ENCODER_BADGES = VIDEO_ENCODER_BADGES
     _VIDEO_HDR_BADGE_ORDER = VIDEO_HDR_BADGE_ORDER
     _MAX_VISIBLE_VIDEO_SOURCE_ROWS = 10
@@ -115,6 +116,10 @@ class EncodePanel(QWidget):
         )
         self._profiles  = ProfileManager(config.app_data_dir / "encode_profiles")
         self._executor  = ThreadPoolExecutor(max_workers=1)
+        # Le fallback HDR peut attendre un stockage lent. Il ne doit ni
+        # retarder la détection matérielle, ni rendre la fermeture de la GUI
+        # bloquante.
+        self._hdr_meta_executor = ThreadPoolExecutor(max_workers=1)
         self._file_info: FileInfo | None = None
         self._video_tracks: list[tuple[FileInfo, TrackEntry, str]] = []
         self._video_settings_by_entry_id: dict[str, dict[str, object]] = {}
@@ -151,10 +156,17 @@ class EncodePanel(QWidget):
         self._preview_zoom_percent: int = 100
         self._preview_current_pixmap: QPixmap | None = None
         self._static_hdr_estimate_prompted: set[str] = set()
+        self._hdr_meta_probe_generation = 0
+        self._hdr_meta_probe_expected: tuple[int, str, str] | None = None
+        self._closing = False
 
         self._sw_encoders: set[str] = {codec_id for codec_id, _ in SOFTWARE_VIDEO_CODECS}
         self._workflow.log_message.connect(self.log_message, Qt.ConnectionType.QueuedConnection)
         self._hw_detected.connect(self._on_hw_detected, Qt.ConnectionType.QueuedConnection)
+        self._hdr_meta_frame_probe_ready.connect(
+            self._on_hdr_meta_frame_probe_ready,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._workflow.static_hdr_estimate_ready.connect(
             self._on_static_hdr_estimate_ready,
             Qt.ConnectionType.QueuedConnection,
@@ -716,6 +728,9 @@ class EncodePanel(QWidget):
 
     def _apply_file_info(self, info: FileInfo, track: TrackEntry | None = None) -> None:
         """Applique les infos d'un FileInfo sélectionné comme source d'encodage."""
+        # Un éventuel fallback ffprobe de la piste précédemment sélectionnée
+        # ne doit jamais mettre à jour les champs HDR de la nouvelle piste.
+        self._invalidate_hdr_meta_frame_probe()
         self._file_info  = info
         self._duration_s = info.duration_s
 
@@ -730,7 +745,12 @@ class EncodePanel(QWidget):
             else None
         )
         if settings is None and selected_video:
-            self._prefill_hdr_meta(selected_video.raw, info.path, info.mediainfo_json)
+            self._prefill_hdr_meta(
+                selected_video.raw,
+                info.path,
+                info.mediainfo_json,
+                probe_frames=selected_video.hdr_type != HDRType.NONE,
+            )
 
         pass  # Fichier de sortie géré par RemuxPanel
 
@@ -1567,15 +1587,59 @@ class EncodePanel(QWidget):
         raw: dict,
         source_path: Path | None = None,
         mediainfo_json: dict | None = None,
+        *,
+        probe_frames: bool = False,
     ) -> None:
-        """Pré-remplit master_display et max_cll (mediainfo > ffprobe)."""
+        """Pré-remplit master_display et max_cll sans bloquer le thread Qt."""
         master_display, max_cll = self._extract_hdr_meta_fields(
             raw,
             source_path,
             mediainfo_json=mediainfo_json,
+            include_frame_probe=False,
         )
         self._master_display.setText(master_display)
         self._max_cll.setText(max_cll)
+        if (
+            not probe_frames
+            or source_path is None
+            or not source_path.is_file()
+            or (master_display and max_cll)
+        ):
+            return
+
+        generation = self._hdr_meta_probe_generation
+        self._hdr_meta_probe_expected = (generation, master_display, max_cll)
+        self._hdr_meta_executor.submit(self._probe_hdr_meta_from_frames, generation, source_path)
+
+    def _invalidate_hdr_meta_frame_probe(self) -> None:
+        self._hdr_meta_probe_generation += 1
+        self._hdr_meta_probe_expected = None
+
+    def _probe_hdr_meta_from_frames(self, generation: int, source_path: Path) -> None:
+        try:
+            master_display, max_cll = self._extract_hdr_meta_from_ffprobe_frames(source_path)
+        except Exception:
+            master_display, max_cll = "", ""
+        self._hdr_meta_frame_probe_ready.emit(generation, master_display, max_cll)
+
+    def _on_hdr_meta_frame_probe_ready(
+        self,
+        generation: int,
+        master_display: str,
+        max_cll: str,
+    ) -> None:
+        if self._closing:
+            return
+        expected = self._hdr_meta_probe_expected
+        if expected is None or generation != expected[0]:
+            return
+        self._hdr_meta_probe_expected = None
+        expected_master_display, expected_max_cll = expected[1:]
+        # Ne pas écraser une valeur saisie par l'utilisateur pendant le probe.
+        if master_display and self._master_display.text() == expected_master_display:
+            self._master_display.setText(master_display)
+        if max_cll and self._max_cll.text() == expected_max_cll:
+            self._max_cll.setText(max_cll)
 
     def _extract_hdr_meta_fields(
         self,
@@ -1583,6 +1647,7 @@ class EncodePanel(QWidget):
         source_path: Path | None = None,
         *,
         mediainfo_json: dict | None = None,
+        include_frame_probe: bool = True,
     ) -> tuple[str, str]:
         # 1. Priorité mediainfo (parse de tous les SEI HEVC d'un coup).
         master_display, max_cll = "", ""
@@ -1605,7 +1670,7 @@ class EncodePanel(QWidget):
         #    dans les frames HEVC (cas typique : mediainfo absent et stream-
         #    level n'expose pas les side_data). Indispensable quand
         #    `WARN Outils manquants : mediainfo` au démarrage.
-        if source_path is not None:
+        if include_frame_probe and source_path is not None:
             ff2_md, ff2_cll = self._extract_hdr_meta_from_ffprobe_frames(source_path)
             master_display = master_display or ff2_md
             max_cll = max_cll or ff2_cll
@@ -4130,8 +4195,10 @@ class EncodePanel(QWidget):
             QApplication.clipboard().setText(text)
 
     def closeEvent(self, event) -> None:
+        self._closing = True
         if self._preview_signals is not None:
             self._preview_signals.cancel()
+        self._hdr_meta_executor.shutdown(wait=False, cancel_futures=True)
         self._executor.shutdown(wait=True)
         try:
             EncodeWorkflow.cleanup_preview_dir(self._config.work_dir)

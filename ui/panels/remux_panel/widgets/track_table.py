@@ -203,6 +203,7 @@ class _TrackTable(QTableWidget):
         self._sync_rewrite_enabled = False
         self._sync_rewrite_advanced_audio_enabled = False
         self._prev_lang: dict[int, str] = {}
+        self._last_order_changed_track_types: frozenset[str] | None = None
         self._setup_ui()
         self._adjust_height()
         self.itemChanged.connect(self._on_item_changed)
@@ -291,15 +292,25 @@ class _TrackTable(QTableWidget):
         """)
 
     def append_tracks(self, source_color: str, tracks: list[TrackEntry]) -> None:
+        existing_ids = {
+            entry.entry_id
+            for entry in self.current_tracks()
+        }
+        updates_enabled = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
         self.blockSignals(True)
-        for entry in tracks:
-            if self.has_entry_id(entry.entry_id):
-                continue
-            order = {"video": 0, "audio": 1, "subtitle": 2}.get(entry.track_type, 2)
-            pos = self._find_insert_position(order)
-            self.insertRow(pos)
-            self._fill_row(pos, entry, source_color)
-        self.blockSignals(False)
+        try:
+            for entry in tracks:
+                if entry.entry_id in existing_ids:
+                    continue
+                existing_ids.add(entry.entry_id)
+                order = {"video": 0, "audio": 1, "subtitle": 2}.get(entry.track_type, 2)
+                pos = self._find_insert_position(order)
+                self.insertRow(pos)
+                self._fill_row(pos, entry, source_color)
+        finally:
+            self.blockSignals(False)
+            self.setUpdatesEnabled(updates_enabled)
         self._adjust_height()
 
     def has_entry_id(self, entry_id: str) -> bool:
@@ -935,6 +946,16 @@ class _TrackTable(QTableWidget):
             hidden = self._filter_selected and item.checkState() != Qt.CheckState.Checked
             self.setRowHidden(row, hidden)
 
+    def consume_order_changed_track_types(self) -> frozenset[str] | None:
+        """Retourne les projections Encode modifiées par le dernier drop.
+
+        ``None`` représente une émission externe de ``order_changed`` dont
+        l'origine n'est pas un glisser-déposer du tableau.
+        """
+        changed_types = self._last_order_changed_track_types
+        self._last_order_changed_track_types = None
+        return changed_types
+
     def dropEvent(self, event) -> None:
         if event.source() is not self:
             event.ignore()
@@ -945,43 +966,59 @@ class _TrackTable(QTableWidget):
             event.ignore()
             return
 
+        # La sélection est volontairement limitée à une ligne (voir
+        # _setup_ui). Réutiliser ses items au lieu de reconstruire toutes les
+        # lignes préserve les widgets d'action des autres pistes et évite un
+        # coût proportionnel au nombre total de pistes à chaque drop.
+        source_row = src_rows[0]
         all_entries = self.current_tracks()
         drop_row = self._drop_target_row(event)
+        adjusted = drop_row - (1 if source_row < drop_row else 0)
+        adjusted = max(0, min(adjusted, self.rowCount() - 1))
+        if adjusted == source_row:
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.accept()
+            return
 
-        moving = [all_entries[r] for r in src_rows]
-        remaining = [e for i, e in enumerate(all_entries) if i not in src_rows]
+        source_entry = all_entries[source_row]
+        previous_type_order = [
+            entry.entry_id
+            for entry in all_entries
+            if entry.track_type == source_entry.track_type
+        ]
 
-        adjusted = drop_row
-        for r in src_rows:
-            if r < drop_row:
-                adjusted -= 1
-        adjusted = max(0, min(adjusted, len(remaining)))
-
-        for i, entry in enumerate(moving):
-            remaining.insert(adjusted + i, entry)
-
-        color_by_file_id: dict[str, str] = {}
-        for r in range(self.rowCount()):
-            item_chk = self.item(r, self.COL_CHECK)
-            item_src = self.item(r, self.COL_SOURCE)
-            if item_chk and item_src:
-                e = item_chk.data(Qt.ItemDataRole.UserRole)
-                if isinstance(e, TrackEntry):
-                    color_by_file_id[e.file_id] = item_src.data(Qt.ItemDataRole.UserRole) or _C.BORDER
-
+        updates_enabled = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
         self.blockSignals(True)
-        self.setRowCount(0)
-        for entry in remaining:
-            row = self.rowCount()
-            self.insertRow(row)
-            src_color = color_by_file_id.get(entry.file_id, _C.BORDER)
-            self._fill_row(row, entry, src_color)
-        self.blockSignals(False)
+        try:
+            row_items = [self.takeItem(source_row, column) for column in range(self.columnCount())]
+            self.removeCellWidget(source_row, self.COL_EDIT)
+            self.removeRow(source_row)
+            self.insertRow(adjusted)
+            for column, item in enumerate(row_items):
+                if item is not None:
+                    self.setItem(adjusted, column, item)
+            # Le widget de la cellule d'action est recréé uniquement pour la
+            # ligne déplacée. Les widgets des autres lignes restent intacts.
+            self._set_action_cell(adjusted, source_entry)
+        finally:
+            self.blockSignals(False)
+            self.setUpdatesEnabled(updates_enabled)
 
+        self._rebuild_prev_lang()
         self.selectRow(adjusted)
         event.setDropAction(Qt.DropAction.IgnoreAction)
         event.accept()
-        self._adjust_height()
+        current_type_order = [
+            entry.entry_id
+            for entry in self.current_tracks()
+            if entry.track_type == source_entry.track_type
+        ]
+        self._last_order_changed_track_types = frozenset(
+            {source_entry.track_type}
+            if current_type_order != previous_type_order
+            else set()
+        )
         self.order_changed.emit()
 
     def _drop_target_row(self, event) -> int:

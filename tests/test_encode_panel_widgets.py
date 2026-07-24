@@ -60,6 +60,7 @@ from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtCore import Qt
@@ -563,6 +564,36 @@ class TestEncodePanelNewTrackSources:
 
 
 class TestEncodePanelDynamicHdrDefaults:
+
+    def test_sdr_source_never_runs_hdr_frame_probe_on_ui_thread(self, qt_app, tmp_path, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        source = tmp_path / "sdr.mkv"
+        source.touch()
+        info = _file_info(source, [_video_track(0, HDRType.NONE)])
+        frame_probe = MagicMock()
+        monkeypatch.setattr(panel, "_extract_hdr_meta_from_ffprobe_frames", frame_probe)
+
+        panel.set_video_tracks([(info, _video_entry(0), _COLOR)])
+
+        frame_probe.assert_not_called()
+        panel.close()
+
+    def test_hdr_frame_probe_is_queued_and_preserves_user_edits(self, qt_app, tmp_path, monkeypatch):
+        panel = EncodePanel(AppConfig())
+        source = tmp_path / "hdr.mkv"
+        source.touch()
+        submit = MagicMock()
+        monkeypatch.setattr(panel._hdr_meta_executor, "submit", submit)
+
+        panel._prefill_hdr_meta({}, source, probe_frames=True)
+
+        submit.assert_called_once_with(panel._probe_hdr_meta_from_frames, 0, source)
+        panel._master_display.setText("manual")
+        panel._on_hdr_meta_frame_probe_ready(0, "auto-master", "1000,400")
+
+        assert panel._master_display.text() == "manual"
+        assert panel._max_cll.text() == "1000,400"
+        panel.close()
 
     def test_selected_video_track_drives_dolby_vision_default(self, qt_app):
         panel = EncodePanel(AppConfig())
