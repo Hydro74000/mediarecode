@@ -25,7 +25,7 @@ from core.matroska.assembly import (
     compile_assembly_plan,
 )
 from core.matroska.mux_plan import deterministic_source_identity
-from core.matroska.validation import validate_matroska_output
+from core.matroska.validation import MatroskaPacketValidation, validate_matroska_output
 from core.matroska.reader import MatroskaReader
 from core.matroska.writer import (
     MatroskaWriteCancelled,
@@ -485,8 +485,10 @@ def assemble_encode_output_native(
         assembly = replace(assembly, expected_output_contract=contract)
         mux_plan = compile_assembly_plan(assembly)
 
-        def _validate(path: Path) -> None:
-            errors = validate_matroska_output(path, contract)
+        def _validate(path: Path, packet_validation: MatroskaPacketValidation) -> None:
+            errors = validate_matroska_output(
+                path, contract, packet_validation=packet_validation,
+            )
             if errors:
                 raise EncodeError(
                     "Validation sémantique de la sortie native échouée : "

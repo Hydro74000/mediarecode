@@ -37,6 +37,7 @@ from .native_muxer import (
 )
 from .reader import read_element
 from .reader import MatroskaAttachment
+from .validation import MatroskaPacketValidation
 
 
 #: Charge utile maximale d'un Cluster (octets). Borne le pic mémoire du
@@ -440,7 +441,7 @@ class MatroskaWriter:
         self,
         plan: MatroskaMuxPlan,
         *,
-        external_validator: Callable[[Path], None] | None = None,
+        external_validator: Callable[[Path, MatroskaPacketValidation], None] | None = None,
         cancel_cb: Callable[[], bool] | None = None,
         progress_cb: Callable[[MatroskaWriteProgress], None] | None = None,
     ) -> Path:
@@ -493,15 +494,24 @@ class MatroskaWriter:
         last_timestamp_by_track: dict[int, int] = {}
         last_delta_by_track: dict[int, int] = {}
         observed_end_ns = 0
+        validation_max_packet_timestamp_ns: int | None = None
 
         def _note_packet_end(packet: MatroskaMuxPacket) -> None:
-            nonlocal observed_end_ns
+            nonlocal observed_end_ns, validation_max_packet_timestamp_ns
             track_number = packet.output_track_number
             timestamp = _timestamp_ns(packet)
             previous = last_timestamp_by_track.get(track_number)
             if previous is not None and timestamp > previous:
                 last_delta_by_track[track_number] = timestamp - previous
             last_timestamp_by_track[track_number] = timestamp
+            # Même calcul que validate_matroska_output : seules les durées
+            # explicites des blocks interviennent dans la borne supérieure.
+            validation_duration = _explicit_duration_ns(packet) or 0
+            validation_packet_end = timestamp + validation_duration
+            validation_max_packet_timestamp_ns = max(
+                validation_max_packet_timestamp_ns or validation_packet_end,
+                validation_packet_end,
+            )
             duration = _explicit_duration_ns(packet)
             if duration is None:
                 default_duration = default_duration_by_track.get(track_number, 0)
@@ -664,7 +674,14 @@ class MatroskaWriter:
                     + ", ".join(f"#{number}" for number in missing_media)
                 )
             if external_validator is not None:
-                external_validator(partial)
+                external_validator(
+                    partial,
+                    MatroskaPacketValidation(
+                        track_numbers=frozenset(packet_counts),
+                        max_packet_timestamp_ns=validation_max_packet_timestamp_ns,
+                        last_delta_by_track=dict(last_delta_by_track),
+                    ),
+                )
             _check_cancel("commit")
             _notify("commit", partial.stat().st_size)
             partial.replace(destination)

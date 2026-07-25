@@ -43,6 +43,7 @@ from ..native_muxer import (
 )
 from ..reader import MatroskaReader, payload_children
 from ..writer import MatroskaWriteProgress, MatroskaWriter
+from ..validation import MatroskaPacketValidation
 
 
 #: Types NAL des parameter sets stockés dans le CodecPrivate hvcC.
@@ -159,7 +160,7 @@ class MatroskaHevcPayloadRewriter:
         dovi_record: DolbyVisionConfigRecord | None = None,
         cancel_cb: Callable[[], bool] | None = None,
         progress_cb: Callable[[MatroskaWriteProgress], None] | None = None,
-        external_validator: Callable[[Path], None] | None = None,
+        external_validator: Callable[[Path, MatroskaPacketValidation], None] | None = None,
     ) -> HevcPayloadRewriteResult:
         """Écrit ``output`` : blocs du MKV encodé, payloads du flux injecté.
 

@@ -8,6 +8,7 @@ la source unique de vérité.
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import contract as _contract
@@ -21,6 +22,21 @@ TRACK_TYPE_LABELS: dict[int, str] = {1: "video", 2: "audio", 17: "subtitle"}
 
 #: Types de piste considérés comme média (au moins un paquet exigé).
 _MEDIA_TRACK_TYPES = frozenset({1, 2})
+
+
+@dataclass(frozen=True)
+class MatroskaPacketValidation:
+    """Résumé des blocs effectivement écrits par :class:`MatroskaWriter`.
+
+    Le writer construit ce résumé pendant son unique parcours des paquets.
+    Le réutiliser évite de relire et décoder chaque bloc du fichier juste
+    après son écriture, tout en préservant les contrôles de présence des
+    paquets et de cohérence de durée.
+    """
+
+    track_numbers: frozenset[int]
+    max_packet_timestamp_ns: int | None
+    last_delta_by_track: dict[int, int]
 
 
 def _normalized_language(value: str) -> str:
@@ -98,6 +114,7 @@ def validate_matroska_output(
     contract: _contract.MatroskaOutputContract | None = None,
     *,
     check_packets: bool = True,
+    packet_validation: MatroskaPacketValidation | None = None,
 ) -> list[str]:
     """Vérifie le contrat minimal de succès sur ``path``. Retourne les erreurs.
 
@@ -256,26 +273,31 @@ def validate_matroska_output(
                 for position, track in enumerate(tracks, start=1)
                 if track.track_type in _MEDIA_TRACK_TYPES
             }
-        max_packet_timestamp_ns: int | None = None
-        last_timestamp_by_track: dict[int, int] = {}
-        last_delta_by_track: dict[int, int] = {}
-        try:
-            for block in reader.blocks():
-                media_numbers.discard(block.track_number)
-                timestamp_ns = (
-                    block.timestamp_ns
-                    if block.timestamp_ns is not None
-                    else block.timestamp_ms * 1_000_000
-                )
-                previous = last_timestamp_by_track.get(block.track_number)
-                if previous is not None and timestamp_ns > previous:
-                    last_delta_by_track[block.track_number] = timestamp_ns - previous
-                last_timestamp_by_track[block.track_number] = timestamp_ns
-                duration = block.duration_ns or ((block.duration_ms or 0) * 1_000_000)
-                packet_end = timestamp_ns + duration
-                max_packet_timestamp_ns = max(max_packet_timestamp_ns or packet_end, packet_end)
-        except (OSError, ValueError) as exc:
-            errors.append(f"Blocs Matroska illisibles : {exc}")
+        if packet_validation is not None:
+            media_numbers.difference_update(packet_validation.track_numbers)
+            max_packet_timestamp_ns = packet_validation.max_packet_timestamp_ns
+            last_delta_by_track = packet_validation.last_delta_by_track
+        else:
+            max_packet_timestamp_ns = None
+            last_timestamp_by_track: dict[int, int] = {}
+            last_delta_by_track: dict[int, int] = {}
+            try:
+                for block in reader.blocks():
+                    media_numbers.discard(block.track_number)
+                    timestamp_ns = (
+                        block.timestamp_ns
+                        if block.timestamp_ns is not None
+                        else block.timestamp_ms * 1_000_000
+                    )
+                    previous = last_timestamp_by_track.get(block.track_number)
+                    if previous is not None and timestamp_ns > previous:
+                        last_delta_by_track[block.track_number] = timestamp_ns - previous
+                    last_timestamp_by_track[block.track_number] = timestamp_ns
+                    duration = block.duration_ns or ((block.duration_ms or 0) * 1_000_000)
+                    packet_end = timestamp_ns + duration
+                    max_packet_timestamp_ns = max(max_packet_timestamp_ns or packet_end, packet_end)
+            except (OSError, ValueError) as exc:
+                errors.append(f"Blocs Matroska illisibles : {exc}")
         if check_packets and media_numbers:
             errors.append(
                 "Aucun paquet écrit pour les pistes média : "
@@ -381,6 +403,7 @@ def validate_matroska_output(
 
 
 __all__ = [
+    "MatroskaPacketValidation",
     "TRACK_TYPE_LABELS",
     "validate_matroska_output",
 ]

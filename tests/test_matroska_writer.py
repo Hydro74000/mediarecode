@@ -12,6 +12,8 @@ from core.matroska.ids import (
 )
 from core.matroska.mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack, deterministic_uid
 from core.matroska.reader import MatroskaBlock, MatroskaReader, MatroskaTrack
+from core.matroska.contract import ExpectedMatroskaTrack, MatroskaOutputContract
+from core.matroska.validation import MatroskaPacketValidation, validate_matroska_output
 from core.matroska.writer import (
     MatroskaWriter,
     build_track_statistics_tags_element,
@@ -45,6 +47,50 @@ def test_writer_roundtrips_multiple_tracks_and_packets(tmp_path: Path) -> None:
     top_level_ids = [item.element_id for item in reader.top_level()]
     assert top_level_ids[0] == SEEK_HEAD_ID
     assert INFO_ID in top_level_ids and TRACKS_ID in top_level_ids and CUES_ID in top_level_ids
+
+
+def test_writer_validation_reuses_written_packet_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """La validation native ne relit pas les blocs déjà comptés par le writer."""
+    video = source_track(7, 70, "V_MPEG4/ISO/AVC", 1)
+    audio = source_track(7, 71, "A_AAC", 2)
+    tracks = (
+        MatroskaMuxTrack(Path("v.mkv"), video, 1, deterministic_uid("v")),
+        MatroskaMuxTrack(Path("a.mkv"), audio, 2, deterministic_uid("a")),
+    )
+    plan = MatroskaMuxPlan(
+        tmp_path / "summary.mkv",
+        tracks,
+        (
+            MatroskaMuxPacket(1, MatroskaBlock(7, 0, 0x80, b"video")),
+            MatroskaMuxPacket(2, MatroskaBlock(7, 5, 0x80, b"audio", duration_ms=20)),
+        ),
+        duration_ms=25,
+    )
+    contract = MatroskaOutputContract(
+        track_types=("video", "audio"),
+        expected_tracks=(
+            ExpectedMatroskaTrack("video", require_packets=True),
+            ExpectedMatroskaTrack("audio", require_packets=True),
+        ),
+    )
+    received: list[MatroskaPacketValidation] = []
+
+    def validate_without_block_scan(path: Path, summary: MatroskaPacketValidation) -> None:
+        received.append(summary)
+        monkeypatch.setattr(
+            MatroskaReader,
+            "blocks",
+            lambda _reader: (_ for _ in ()).throw(AssertionError("scan des blocs inattendu")),
+        )
+        assert validate_matroska_output(path, contract, packet_validation=summary) == []
+
+    MatroskaWriter().write(plan, external_validator=validate_without_block_scan)
+
+    assert received == [MatroskaPacketValidation(
+        track_numbers=frozenset({1, 2}),
+        max_packet_timestamp_ns=25_000_000,
+        last_delta_by_track={},
+    )]
 
 
 def test_streaming_packets_match_tuple_output_and_patch_duration(tmp_path: Path) -> None:
@@ -190,7 +236,7 @@ def test_validation_failure_removes_partial_and_preserves_existing_output(tmp_pa
         (MatroskaMuxPacket(1, MatroskaBlock(1, 0, 0x80, b"audio")),),
     )
 
-    def reject(_path: Path) -> None:
+    def reject(_path: Path, _packet_validation: object) -> None:
         raise RuntimeError("invalid")
 
     with pytest.raises(RuntimeError, match="invalid"):

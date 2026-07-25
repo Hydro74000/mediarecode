@@ -35,7 +35,7 @@ from core.matroska.mux_plan import (
 )
 from core.matroska.assembly import canonical_attachment_output_name
 from core.matroska.contract import without_expected_attachment
-from core.matroska.validation import validate_matroska_output
+from core.matroska.validation import MatroskaPacketValidation, validate_matroska_output
 from core.matroska.writer import (
     MatroskaWriteCancelled, MatroskaWriteProgress, MatroskaWriter,
 )
@@ -450,8 +450,10 @@ def run_native_remux(
             )
             log_step(4, "Écriture Matroska native multi-pistes")
 
-            def validate_partial(path: Path) -> None:
-                errors = validate_matroska_output(path, output_contract)
+            def validate_partial(path: Path, packet_validation: MatroskaPacketValidation) -> None:
+                errors = validate_matroska_output(
+                    path, output_contract, packet_validation=packet_validation,
+                )
                 if errors:
                     raise RuntimeError(
                         "Validation sémantique de la sortie native échouée : "
