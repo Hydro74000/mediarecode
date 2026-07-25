@@ -488,6 +488,11 @@ def compile_assembly_plan(plan: MatroskaAssemblyPlan) -> MatroskaMuxPlan:
                 item["duration_ns"] = max(
                     item["duration_ns"], shifted_timestamp_ns + duration_ns,
                 )
+    # La date de génération des statistiques varie à chaque muxage. Elle ne
+    # doit pas rendre le SegmentUID instable pour un plan sémantiquement
+    # identique ; les données de piste et les autres métadonnées sont déjà
+    # couvertes par ce digest.
+    opaque_digest = hashlib.sha256(b"".join(opaque)).hexdigest()
     statistics_tags = build_track_statistics_tags_element({
         output_uid: (
             values["frame_count"],
@@ -495,7 +500,7 @@ def compile_assembly_plan(plan: MatroskaAssemblyPlan) -> MatroskaMuxPlan:
             values["duration_ns"],
         )
         for output_uid, values in statistics.items()
-    })
+    }, writing_app=f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}")
     if statistics_tags:
         opaque.append(statistics_tags)
 
@@ -510,7 +515,6 @@ def compile_assembly_plan(plan: MatroskaAssemblyPlan) -> MatroskaMuxPlan:
     # pistes (UID/numéros déjà dérivés du contenu source), titre, digest des
     # top-level opaques (chapitres/tags/attachments) et TimestampScale. Deux
     # plans distincts ne partagent jamais un UID ; un même plan reste stable.
-    opaque_digest = hashlib.sha256(b"".join(opaque)).hexdigest()
     segment_uid = deterministic_uid128(
         "segment",
         tuple((track.output_uid, track.output_number) for track in output_tracks),

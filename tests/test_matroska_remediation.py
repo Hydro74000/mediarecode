@@ -26,7 +26,7 @@ from core.matroska.ids import (
     CUE_TRACK_POSITIONS_ID, DEFAULT_DURATION_ID, EDITION_ENTRY_ID,
     INFO_ID, LANGUAGE_BCP47_ID, LANGUAGE_ID, SEEK_HEAD_ID, SEEK_ID,
     SEEK_ID_FIELD_ID, SEEK_POSITION_ID, TRACKS_ID, TRACK_NUMBER_ID,
-    TRACK_TYPE_ID, TRACK_UID_ID,
+    TAGS_ID, TRACK_TYPE_ID, TRACK_UID_ID,
 )
 from core.matroska.mux_plan import MatroskaMuxPacket, MatroskaMuxPlan, MatroskaMuxTrack
 from core.matroska.reader import (
@@ -34,7 +34,7 @@ from core.matroska.reader import (
     payload_children, read_element,
 )
 from core.matroska.writer import MatroskaWriter
-from core.version import WRITING_APPLICATION_TAG
+from core.version import APP_VERSION_LABEL, WRITING_APPLICATION_TAG
 
 
 def _track(number: int, uid: int, codec: str, kind: int, *, extra: bytes = b"") -> MatroskaTrack:
@@ -419,6 +419,22 @@ def test_writing_app_is_muxiveo_tag(tmp_path: Path) -> None:
     MatroskaWriter().write(plan)
     _muxing, writing = MatroskaReader(output).segment_info_apps()
     assert writing == WRITING_APPLICATION_TAG
+
+
+def test_native_statistics_are_validated_as_muxiveo_statistics(tmp_path: Path) -> None:
+    """MediaInfo reconnaît les compteurs seulement avec les tags sentinelles."""
+    source = tmp_path / "src.mkv"
+    _write_source_with_bcp47(source)
+    plan = _compiled_plan(source, tmp_path / "out.mkv", language_value=None)
+    output = tmp_path / "out.mkv"
+    MatroskaWriter().write(plan)
+
+    tags = b"".join(MatroskaReader(output).raw_top_level(TAGS_ID))
+    assert b"_STATISTICS_TAGS" in tags
+    assert b"_STATISTICS_WRITING_APP" in tags
+    assert f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}".encode() in tags
+    assert b"_STATISTICS_WRITING_DATE_UTC" in tags
+    assert b"NUMBER_OF_FRAMES" in tags
 
 
 def test_segment_uid_covers_opaque_metadata(tmp_path: Path) -> None:

@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
@@ -16,6 +17,7 @@ from core.matroska.writer import (
     build_track_statistics_tags_element,
     rewrite_tag_target_uids,
 )
+from core.version import APP_VERSION_LABEL
 
 
 def source_track(number: int, uid: int, codec: str, kind: int) -> MatroskaTrack:
@@ -87,14 +89,19 @@ def test_writer_emits_segment_title(tmp_path: Path) -> None:
 
 
 def test_track_statistics_tag_exposes_subtitle_element_count() -> None:
-    """Track statistics remain visible to MediaInfo after native remux."""
+    """Les statistiques natives ont le contrat de validation MediaInfo."""
     tags = build_track_statistics_tags_element({
         1234: (2, 29, 550_000_000),
         5678: (0, 0, 0),
-    })
+    }, writing_app=f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}", written_at_utc=datetime(2026, 7, 25, 12, 34, 56, tzinfo=timezone.utc))
 
     for name in (b"BPS", b"DURATION", b"NUMBER_OF_FRAMES", b"NUMBER_OF_BYTES"):
         assert name in tags
+    assert b"_STATISTICS_TAGS" in tags
+    assert b"_STATISTICS_WRITING_APP" in tags
+    assert f"Muxiveo {APP_VERSION_LABEL.removeprefix('v')}".encode() in tags
+    assert b"_STATISTICS_WRITING_DATE_UTC" in tags
+    assert b"2026-07-25 12:34:56 UTC" in tags
     assert b"00:00:00.550000000" in tags
     assert b"421" in tags
     assert uint_element(TAG_TRACK_UID_ID, 1234) in tags

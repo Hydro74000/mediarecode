@@ -5,6 +5,7 @@ from __future__ import annotations
 import heapq
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Callable
@@ -53,6 +54,9 @@ _TRACK_STATISTICS_TAGS = frozenset({
     "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC",
     "_STATISTICS_TAGS",
 })
+_STATISTICS_TAG_NAMES = (
+    "BPS", "DURATION", "NUMBER_OF_FRAMES", "NUMBER_OF_BYTES",
+)
 
 
 def _raw_children(payload: bytes) -> list[tuple[bytes, bytes]]:
@@ -359,13 +363,22 @@ def _format_statistics_duration(duration_ns: int) -> str:
 
 def build_track_statistics_tags_element(
     statistics: dict[int, tuple[int, int, int]],
+    *,
+    writing_app: str = "Muxiveo",
+    written_at_utc: datetime | None = None,
 ) -> bytes:
-    """Build stable, interoperable per-track statistics.
+    """Build per-track statistics recognized by MediaInfo.
 
     Each value is ``(frame_count, payload_bytes, duration_ns)``.  These are
-    ordinary Matroska tags rather than EBML fields; MediaInfo uses
-    ``NUMBER_OF_FRAMES`` as the text-subtitle element count.
+    ordinary Matroska tags rather than EBML fields.  MediaInfo only promotes
+    ``NUMBER_OF_FRAMES`` to the text-subtitle ``ElementCount`` when the
+    mkvmerge-compatible ``_STATISTICS_*`` companion tags are present.
     """
+    written_at = written_at_utc or datetime.now(timezone.utc)
+    if written_at.tzinfo is None:
+        raise ValueError("La date des statistiques doit être exprimée en UTC")
+    written_at = written_at.astimezone(timezone.utc)
+    written_at_text = written_at.strftime("%Y-%m-%d %H:%M:%S UTC")
     tags: list[bytes] = []
     for track_uid, (frame_count, payload_bytes, duration_ns) in sorted(statistics.items()):
         if frame_count <= 0:
@@ -379,6 +392,9 @@ def build_track_statistics_tags_element(
             "DURATION": _format_statistics_duration(statistics_duration_ns),
             "NUMBER_OF_FRAMES": str(frame_count),
             "NUMBER_OF_BYTES": str(payload_bytes),
+            "_STATISTICS_WRITING_APP": writing_app,
+            "_STATISTICS_WRITING_DATE_UTC": written_at_text,
+            "_STATISTICS_TAGS": " ".join(_STATISTICS_TAG_NAMES),
         }
         simple = b"".join(
             element(
