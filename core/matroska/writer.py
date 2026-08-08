@@ -411,6 +411,60 @@ def build_track_statistics_tags_element(
     return element(TAGS_ID, b"".join(tags)) if tags else b""
 
 
+def _tag_target_track_uids(raw_tag: bytes) -> set[int]:
+    """UID de pistes ciblés par un Tag (vide quand la cible est globale)."""
+    uids: set[int] = set()
+    for child_id, child_raw in _raw_children(_element_payload(raw_tag)):
+        if child_id != TARGETS_ID:
+            continue
+        for target_id, target_raw in _raw_children(_element_payload(child_raw)):
+            if target_id == TAG_TRACK_UID_ID:
+                uid = int.from_bytes(_element_payload(target_raw), "big")
+                if uid:
+                    uids.add(uid)
+    return uids
+
+
+def merge_track_statistics_tags(
+    existing_tags: Iterable[bytes],
+    statistics: dict[int, tuple[int, int, int]],
+    *,
+    writing_app: str = "Muxiveo",
+    written_at_utc: datetime | None = None,
+) -> bytes:
+    """Fusionne des Tags existants avec des statistiques de pistes fraîches.
+
+    Les statistiques héritées des pistes recalculées sont retirées (valeurs
+    obsolètes après sélection, remap ou décalage), les autres tags — globaux
+    comme par piste — sont conservés tels quels.  Retourne un unique élément
+    ``Tags``, ou ``b""`` quand il ne reste rien à écrire.
+    """
+    rebuilt: list[bytes] = []
+    for raw_tags in existing_tags:
+        for child_id, child_raw in _raw_children(_element_payload(raw_tags)):
+            if child_id != TAG_ID or not (_tag_target_track_uids(child_raw) & statistics.keys()):
+                rebuilt.append(child_raw)
+                continue
+            kept: list[bytes] = []
+            has_value = False
+            for tag_child_id, tag_child_raw in _raw_children(_element_payload(child_raw)):
+                if (
+                    tag_child_id == SIMPLE_TAG_ID
+                    and _simple_tag_name(tag_child_raw).upper() in _TRACK_STATISTICS_TAGS
+                ):
+                    continue
+                kept.append(tag_child_raw)
+                has_value = has_value or tag_child_id == SIMPLE_TAG_ID
+            if has_value:
+                rebuilt.append(element(TAG_ID, b"".join(kept)))
+    fresh = build_track_statistics_tags_element(
+        statistics, writing_app=writing_app, written_at_utc=written_at_utc,
+    )
+    if fresh:
+        rebuilt.extend(raw for _child_id, raw in _raw_children(_element_payload(fresh)))
+    return element(TAGS_ID, b"".join(rebuilt)) if rebuilt else b""
+
+
 def _plan_info(plan: MatroskaMuxPlan, duration_ns: int) -> bytes:
     return element(INFO_ID, b"".join((
         uint_element(TIMESTAMP_SCALE_ID, plan.timestamp_scale_ns),
@@ -695,5 +749,5 @@ __all__ = [
     "MatroskaWriteCancelled", "MatroskaWriteProgress", "MatroskaWriter",
     "build_attachments_element", "build_chapters_element",
     "build_tags_element", "build_track_statistics_tags_element",
-    "rewrite_tag_target_uids",
+    "merge_track_statistics_tags", "rewrite_tag_target_uids",
 ]

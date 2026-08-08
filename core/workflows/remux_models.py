@@ -21,6 +21,9 @@ from core.inspector import AttachmentInfo, FileInfo, HDRType
 
 MUX_BACKENDS = frozenset({"auto", "native", "ffmpeg"})
 
+#: Conteneurs dont les TrackEntry portent un FlagEnabled lisible nativement.
+_MATROSKA_SOURCE_EXTENSIONS = frozenset({".mkv", ".webm", ".mka", ".mks", ".mk3d"})
+
 
 def normalize_mux_backend(value: str | None) -> str:
     """Return a stable public backend name, rejecting unknown contracts."""
@@ -94,12 +97,15 @@ class TrackEntry:
         if not self.orig_display_info:
             self.orig_display_info = self.display_info
 
+    #: Libellé de piste désactivée, mis en évidence en rouge dans la colonne Info.
+    DISABLED_LABEL = "disabled"
+
     @property
     def flags_label(self) -> str:
         """Résumé court des flags actifs (pour la colonne Info du tableau)."""
         parts: list[str] = []
         if not self.flag_enabled:
-            parts.append("désact.")
+            parts.append(self.DISABLED_LABEL)
         if self.flag_default:
             parts.append("défaut")
         if self.flag_forced:
@@ -263,6 +269,25 @@ class RemuxError(RuntimeError):
 # Fabrique depuis FileInfo
 # =============================================================================
 
+def _native_enabled_flags(info: FileInfo) -> dict[int, bool]:
+    """FlagEnabled par index de piste d'une source Matroska.
+
+    ``ffprobe`` n'expose pas cet élément (aucune disposition ne lui
+    correspond) : sans cette lecture, une piste désactivée en source
+    apparaîtrait activée dans le panneau.
+    """
+    path = Path(info.path)
+    if path.suffix.lower() not in _MATROSKA_SOURCE_EXTENSIONS or not path.is_file():
+        return {}
+    try:
+        from core.matroska.reader import MatroskaReader
+
+        tracks = MatroskaReader(path).tracks()
+    except (OSError, ValueError):
+        return {}
+    return {index: track.flag_enabled for index, track in enumerate(tracks)}
+
+
 def tracks_from_file_info(info: FileInfo, file_id: str = "") -> list[TrackEntry]:
     """
     Construit la liste des TrackEntry depuis un FileInfo inspecté.
@@ -271,16 +296,23 @@ def tracks_from_file_info(info: FileInfo, file_id: str = "") -> list[TrackEntry]
     file_id permet d'associer chaque piste à un SourceFile de l'UI.
     """
     entries: list[TrackEntry] = []
+    # FlagEnabled n'est exposé ni par ffprobe ni par ses dispositions : il est
+    # lu directement dans le TrackEntry Matroska pour que l'UI montre — et
+    # que le mux respecte — l'état réel de la source.
+    enabled_by_index = _native_enabled_flags(info)
 
-    def _flags_from_disp(raw: dict) -> dict:
+    def _flags_from_disp(raw: dict, stream_index: int) -> dict:
         disp = raw.get("disposition", {})
+        enabled = enabled_by_index.get(int(stream_index), True)
         return dict(
+            flag_enabled          = enabled,
             flag_default          = bool(disp.get("default",          0)),
             flag_forced           = bool(disp.get("forced",           0)),
             flag_hearing_impaired = bool(disp.get("hearing_impaired", 0)),
             flag_visual_impaired  = bool(disp.get("visual_impaired",  0)),
             flag_original         = bool(disp.get("original",         0)),
             flag_commentary       = bool(disp.get("comment",          0)),
+            orig_flag_enabled          = enabled,
             orig_flag_default          = bool(disp.get("default",          0)),
             orig_flag_forced           = bool(disp.get("forced",           0)),
             orig_flag_hearing_impaired = bool(disp.get("hearing_impaired", 0)),
@@ -315,7 +347,7 @@ def tracks_from_file_info(info: FileInfo, file_id: str = "") -> list[TrackEntry]
             orig_language=v.language or "",
             orig_title=v.title or "",
             file_id=file_id,
-            **_flags_from_disp(v.raw),
+            **_flags_from_disp(v.raw, v.index),
         ))
 
     for a in info.audio_tracks:
@@ -336,11 +368,11 @@ def tracks_from_file_info(info: FileInfo, file_id: str = "") -> list[TrackEntry]
             orig_language=a.language or "",
             orig_title=a.title or "",
             file_id=file_id,
-            **_flags_from_disp(a.raw),
+            **_flags_from_disp(a.raw, a.index),
         ))
 
     for s in info.subtitle_tracks:
-        disp_flags = _flags_from_disp(s.raw)
+        disp_flags = _flags_from_disp(s.raw, s.index)
         # SubtitleTrack.forced / .default are the authoritative source;
         # override whatever raw["disposition"] may (or may not) contain.
         disp_flags["flag_forced"]      = s.forced

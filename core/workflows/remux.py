@@ -11,6 +11,8 @@ from core.runner import TaskSignals, ToolRunner
 from core.version import APP_VERSION_LABEL
 from core.workflows.common.matroska_finalize import MatroskaMuxingAppPostAction
 from core.workflows.common.matroska_finalize import MatroskaLanguagePostAction
+from core.workflows.common.matroska_finalize import MatroskaTrackEnabledPostAction
+from core.workflows.common.matroska_finalize import MatroskaTrackStatisticsPostAction
 from core.workflows.common.chapters import (
     probe_media_duration_seconds,
     write_ffmetadata_chapters,
@@ -118,6 +120,13 @@ class RemuxWorkflow(QObject):
             log_cb=self.log_message.emit,
         )
         self._language_post_action = MatroskaLanguagePostAction(
+            log_cb=self.log_message.emit,
+        )
+        self._track_enabled_post_action = MatroskaTrackEnabledPostAction(
+            log_cb=self.log_message.emit,
+        )
+        self._statistics_post_action = MatroskaTrackStatisticsPostAction(
+            writing_app=MatroskaMuxingAppPostAction.default_prefix(APP_VERSION_LABEL),
             log_cb=self.log_message.emit,
         )
 
@@ -336,6 +345,8 @@ class RemuxWorkflow(QObject):
                 ),
                 apply_muxing_post_action=self._muxing_post_action.apply_if_mkv,
                 apply_language_post_action=self._language_post_action.apply_if_mkv,
+                apply_track_enabled_post_action=self._track_enabled_post_action.apply_for_contract,
+                apply_statistics_post_action=self._statistics_post_action.apply_if_mkv,
                 write_nfo=self._write_nfo,
                 sync_rewrite_enabled=lambda: self._sync_rewrite_enabled,
                 sync_advanced_audio_rewrite_enabled=lambda: self._sync_advanced_audio_rewrite_enabled,

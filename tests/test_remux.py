@@ -408,6 +408,15 @@ class TestTrackEntryProperties:
         assert t.is_new is True
         assert t.full_info_label.startswith("NEW")
 
+    def test_disabled_track_is_flagged_in_info_column(self):
+        """Le libellé 'disabled' est le marqueur mis en rouge par le delegate."""
+        t = _track(1, track_type="audio")
+        assert TrackEntry.DISABLED_LABEL not in t.full_info_label
+
+        t.flag_enabled = False
+        assert TrackEntry.DISABLED_LABEL in t.full_info_label
+        assert t.flags_label.startswith(TrackEntry.DISABLED_LABEL)
+
 
 # ===========================================================================
 # tracks_from_file_info

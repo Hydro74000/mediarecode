@@ -9,6 +9,7 @@ from core.matroska.ids import (
     CODEC_ID_ID,
     EBML_HEADER_ID,
     FLAG_DEFAULT_ID,
+    FLAG_ENABLED_ID,
     FLAG_FORCED_ID,
     LANGUAGE_BCP47_ID,
     NAME_ID,
@@ -45,6 +46,7 @@ def _entry(
     language: str = "und",
     default: bool = False,
     forced: bool = False,
+    enabled: bool | None = None,
 ) -> bytes:
     payload = b"".join((
         uint_element(TRACK_NUMBER_ID, number),
@@ -55,6 +57,7 @@ def _entry(
         ascii_element(LANGUAGE_BCP47_ID, language),
         uint_element(FLAG_DEFAULT_ID, int(default)),
         uint_element(FLAG_FORCED_ID, int(forced)),
+        *(() if enabled is None else (uint_element(FLAG_ENABLED_ID, int(enabled)),)),
     ))
     return element(TRACK_ENTRY_ID, payload)
 
@@ -209,3 +212,94 @@ def test_packet_diagnostic_rejects_empty_audio_not_empty_subtitle(tmp_path: Path
     assert len(errors) == 1
     assert "#2 (audio, position de sortie #2)" in errors[0]
     assert "subtitle" not in errors[0]
+
+
+def _disabled_source(tmp_path: Path) -> Path:
+    return _mkv(tmp_path / "source.mkv", [
+        _entry(1, 1, "V_MPEGH/ISO/HEVC", enabled=True),
+        _entry(2, 2, "A_EAC3", enabled=False),
+        _entry(3, 17, "S_TEXT/UTF8", enabled=False),
+    ])
+
+
+def test_source_disabled_tracks_are_carried_to_the_plan(tmp_path: Path) -> None:
+    """Une piste désactivée en source reste désactivée dans le plan de sortie."""
+    source = _disabled_source(tmp_path)
+    config = _config(
+        source,
+        tmp_path / "out.mkv",
+        audio_tracks=[AudioTrackSettings(stream_index=1, codec="copy")],
+    )
+
+    metadata = resolve_track_metadata(
+        config,
+        video_refs=[(source, 0)],
+        subtitle_refs=[(source, 2)],
+    )
+
+    assert [item.flags.enabled for item in metadata] == [True, False, False]
+
+
+def test_panel_enabled_flag_overrides_the_source_value(tmp_path: Path) -> None:
+    """Le choix du panneau prime : réactivation comme désactivation."""
+    source = _disabled_source(tmp_path)
+    config = _config(
+        source,
+        tmp_path / "out.mkv",
+        audio_tracks=[AudioTrackSettings(stream_index=1, codec="copy")],
+        track_meta_edits=[
+            TrackMetaPatch(track_order=1, flag_enabled=False),
+            TrackMetaPatch(track_order=2, flag_enabled=True),
+        ],
+    )
+
+    metadata = resolve_track_metadata(
+        config,
+        video_refs=[(source, 0)],
+        subtitle_refs=[(source, 2)],
+    )
+
+    assert [item.flags.enabled for item in metadata] == [False, True, False]
+    contract = build_encode_output_contract(config, SimpleNamespace(
+        track_metadata=metadata,
+        resolved_subtitle_tracks=((source, 2),),
+        subtitles_resolved=True,
+    ))
+    assert [track.flags.enabled for track in contract.expected_tracks] == [False, True, False]
+
+
+def test_disabled_flag_reaches_the_ffmpeg_transaction_contract(tmp_path: Path) -> None:
+    """La transaction FFmpeg applique le FlagEnabled du contrat.
+
+    ``ffmpeg -dispositions`` n'expose aucun flag « enabled » : sans ce
+    patch, une piste désactivée ressortirait activée.
+    """
+    from core.matroska.contract import ExpectedMatroskaTrack, ExpectedTrackFlags, MatroskaOutputContract
+    from core.workflows.common.matroska_finalize import MatroskaTrackEnabledPostAction
+
+    contract = MatroskaOutputContract(
+        track_types=("video", "audio"),
+        expected_tracks=(
+            ExpectedMatroskaTrack(track_type="video", flags=ExpectedTrackFlags(enabled=True)),
+            ExpectedMatroskaTrack(track_type="audio", flags=ExpectedTrackFlags(enabled=False)),
+        ),
+    )
+
+    assert MatroskaTrackEnabledPostAction.expected_flags(contract) == {0: True, 1: False}
+
+    applied: list[tuple[Path, dict[int, bool]]] = []
+
+    class _Editor:
+        @staticmethod
+        def apply(path: Path, wanted: dict[int, bool]):
+            applied.append((path, wanted))
+            return SimpleNamespace(applied=True, skipped=False, reason="", fixes=())
+
+    output = _mkv(
+        tmp_path / "out.mkv",
+        [_entry(1, 1, "V_MPEG4/ISO/AVC"), _entry(2, 2, "A_AAC")],
+        _cluster(1) + _cluster(2),
+    )
+    MatroskaTrackEnabledPostAction(editor=_Editor()).apply_for_contract(output, contract)
+
+    assert applied == [(output, {0: True, 1: False})]

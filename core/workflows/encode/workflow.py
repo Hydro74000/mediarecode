@@ -368,11 +368,20 @@ class EncodeWorkflow(QObject):
         )
         from core.workflows.common.matroska_finalize import MatroskaMuxingAppPostAction
         from core.workflows.common.matroska_finalize import MatroskaLanguagePostAction
+        from core.workflows.common.matroska_finalize import MatroskaTrackEnabledPostAction
+        from core.workflows.common.matroska_finalize import MatroskaTrackStatisticsPostAction
         self._muxing_post_action = MatroskaMuxingAppPostAction(
             app_prefix=MatroskaMuxingAppPostAction.default_prefix(APP_VERSION_LABEL),
             log_cb=self.log_message.emit,
         )
         self._language_post_action = MatroskaLanguagePostAction(
+            log_cb=self.log_message.emit,
+        )
+        self._track_enabled_post_action = MatroskaTrackEnabledPostAction(
+            log_cb=self.log_message.emit,
+        )
+        self._statistics_post_action = MatroskaTrackStatisticsPostAction(
+            writing_app=MatroskaMuxingAppPostAction.default_prefix(APP_VERSION_LABEL),
             log_cb=self.log_message.emit,
         )
         self._signal_binding_service = _SignalBindingService(
@@ -2947,9 +2956,11 @@ class EncodeWorkflow(QObject):
             post_actions=(
                 self._muxing_post_action.apply_if_mkv,
                 self._language_post_action.apply_if_mkv,
+                self._statistics_post_action.apply_if_mkv,
             ),
             write_nfo=self._write_nfo_after_commit if self._generate_nfo else None,
             warn=lambda message: self.log_message.emit("WARN", message),
+            track_enabled_post_action=self._track_enabled_post_action,
         )
         return transaction.execute(
             command,

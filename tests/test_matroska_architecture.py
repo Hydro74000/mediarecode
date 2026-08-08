@@ -40,6 +40,8 @@ MATROSKA_MODULES = (
     "core.matroska.timestamps",
     "core.matroska.editors.segment_info",
     "core.matroska.editors.language",
+    "core.matroska.editors.statistics",
+    "core.matroska.editors.track_flags",
     "core.matroska.editors.dovi",
     "core.matroska.editors.video_timecodes",
     "core.matroska.hevc.access_units",

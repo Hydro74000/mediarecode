@@ -16,7 +16,16 @@ from core.matroska.editors.segment_info import (
     MatroskaSegmentInfoHeaderEditorOptions,
     MatroskaSegmentInfoPatchResult,
 )
-from core.matroska.validation import validate_matroska_output
+from core.matroska.editors.statistics import (
+    MatroskaStatisticsPatchResult,
+    MatroskaTrackStatisticsEditor,
+)
+from core.matroska.editors.track_flags import (
+    MatroskaTrackEnabledEditor,
+    MatroskaTrackEnabledPatchResult,
+)
+from core.matroska.reader import MatroskaReader
+from core.matroska.validation import MatroskaPacketValidation, validate_matroska_output
 from core.runner import TaskCancelledError, TaskSignals
 
 
@@ -130,6 +139,129 @@ class MatroskaMuxingAppPostAction:
         return result
 
 
+class MatroskaTrackEnabledPostAction:
+    """Workflow adapter applying the Matroska FlagEnabled of a contract.
+
+    FFmpeg ne sait pas écrire ``FlagEnabled`` : les pistes que l'utilisateur
+    a désactivées (ou qui l'étaient déjà en source) sortiraient activées sans
+    ce patch. Le backend natif, lui, écrit la valeur directement.
+    """
+
+    def __init__(
+        self,
+        *,
+        editor: MatroskaTrackEnabledEditor | None = None,
+        log_cb: Callable[[str, str], None] | None = None,
+    ) -> None:
+        self._editor = editor or MatroskaTrackEnabledEditor()
+        self._log_cb = log_cb
+
+    @staticmethod
+    def expected_flags(contract: MatroskaOutputContract) -> dict[int, bool]:
+        """FlagEnabled attendu par position de piste de sortie."""
+        return {
+            position: bool(track.flags.enabled)
+            for position, track in enumerate(contract.expected_tracks)
+            if track.flags is not None and track.flags.enabled is not None
+        }
+
+    def apply_for_contract(
+        self,
+        output_path: Path,
+        contract: MatroskaOutputContract,
+        *,
+        log_cb: Callable[[str, str], None] | None = None,
+    ) -> MatroskaTrackEnabledPatchResult | None:
+        cb = log_cb or self._log_cb
+        name = output_path.name.lower()
+        if output_path.suffix.lower() != ".mkv" and not name.endswith(".mkv.partial"):
+            return None
+        if not output_path.is_file():
+            return None
+        wanted = self.expected_flags(contract)
+        if not wanted:
+            return None
+
+        try:
+            observed_count = len(MatroskaReader(output_path).tracks())
+        except (OSError, ValueError) as exc:
+            if cb is not None:
+                cb("WARN", f"Post-action FlagEnabled ignorée: pistes illisibles ({exc})")
+            return None
+        if observed_count != len(contract.expected_tracks):
+            # Pistes de sortie non prévisibles (copie de sous-titres par
+            # mapping optionnel) : l'appariement par position ne serait pas
+            # fiable, aucun flag n'est forcé.
+            if cb is not None and any(not value for value in wanted.values()):
+                cb(
+                    "WARN",
+                    "Post-action FlagEnabled ignorée : "
+                    f"{observed_count} piste(s) écrite(s) pour "
+                    f"{len(contract.expected_tracks)} attendue(s).",
+                )
+            return None
+
+        result = self._editor.apply(output_path, wanted)
+        if cb is not None:
+            if result.applied:
+                details = ", ".join(
+                    f"#{fix.track_position + 1}→"
+                    + ("activée" if fix.enabled_after else "désactivée")
+                    for fix in result.fixes
+                )
+                cb("INFO", f"FlagEnabled Matroska appliqué ({len(result.fixes)} piste(s)): {details}")
+            elif result.skipped and result.reason:
+                cb("WARN", f"Post-action FlagEnabled ignorée: {result.reason}")
+        return result
+
+
+class MatroskaTrackStatisticsPostAction:
+    """Workflow adapter regenerating Matroska per-track statistics."""
+
+    def __init__(
+        self,
+        *,
+        editor: MatroskaTrackStatisticsEditor | None = None,
+        writing_app: str | None = None,
+        log_cb: Callable[[str, str], None] | None = None,
+    ) -> None:
+        self._editor = editor or MatroskaTrackStatisticsEditor()
+        self._writing_app = writing_app
+        self._log_cb = log_cb
+
+    def apply_if_mkv(
+        self,
+        output_path: Path,
+        *,
+        writing_app: str | None = None,
+        log_cb: Callable[[str, str], None] | None = None,
+    ) -> MatroskaStatisticsPatchResult | None:
+        cb = log_cb or self._log_cb
+        name = output_path.name.lower()
+        if output_path.suffix.lower() != ".mkv" and not name.endswith(".mkv.partial"):
+            return None
+        if not output_path.is_file():
+            return None
+
+        result = self._editor.apply(
+            output_path,
+            writing_app=writing_app or self._writing_app or "Muxiveo",
+        )
+        if cb is not None:
+            if result.applied:
+                cb(
+                    "INFO",
+                    "Statistiques Matroska régénérées "
+                    f"({result.track_count} piste(s)) : BPS, DURATION, "
+                    "NUMBER_OF_FRAMES, NUMBER_OF_BYTES.",
+                )
+            elif result.skipped and result.reason:
+                cb("WARN", f"Post-action statistiques ignorée: {result.reason}")
+            elif result.reason:
+                cb("INFO", f"Post-action statistiques: {result.reason}")
+        return result
+
+
 @dataclass
 class MatroskaOutputTransaction:
     output: Path
@@ -139,6 +271,8 @@ class MatroskaOutputTransaction:
     post_actions: tuple[PostAction, ...] = ()
     write_nfo: Callable[[Path], None] | None = None
     warn: Callable[[str], None] | None = None
+    #: Applique le FlagEnabled du contrat, que FFmpeg ne sait pas écrire.
+    track_enabled_post_action: MatroskaTrackEnabledPostAction | None = None
 
     @property
     def candidate(self) -> Path:
@@ -178,11 +312,22 @@ class MatroskaOutputTransaction:
                 signals,
             )
             self._check_cancelled(signals)
+            if self.track_enabled_post_action is not None:
+                self.track_enabled_post_action.apply_for_contract(candidate, self.contract)
+                self._check_cancelled(signals)
+            packet_validation: MatroskaPacketValidation | None = None
             for action in (*self.post_actions, *tuple(extra_post_actions)):
-                action(candidate)
+                result = action(candidate)
+                # Une post-action qui a déjà parcouru les paquets transmet son
+                # résumé : la validation n'a pas à relire la sortie entière.
+                summary = getattr(result, "packet_validation", None)
+                if isinstance(summary, MatroskaPacketValidation):
+                    packet_validation = summary
                 self._check_cancelled(signals)
 
-            errors = validate_matroska_output(candidate, self.contract)
+            errors = validate_matroska_output(
+                candidate, self.contract, packet_validation=packet_validation,
+            )
             if errors:
                 raise RuntimeError(
                     "Validation sémantique de la sortie candidate échouée : "
@@ -219,6 +364,8 @@ __all__ = [
     "MatroskaLanguagePostAction",
     "MatroskaMuxingAppPostAction",
     "MatroskaOutputTransaction",
+    "MatroskaTrackEnabledPostAction",
+    "MatroskaTrackStatisticsPostAction",
     "PostAction",
     "RunCommand",
 ]

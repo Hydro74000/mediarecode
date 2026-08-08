@@ -28,7 +28,7 @@ from core.workflows.common.sync_rewrite import (
     sync_rewrite_forced_offset,
 )
 from core.matroska.contract import without_expected_attachment
-from core.matroska.validation import validate_matroska_output
+from core.matroska.validation import MatroskaPacketValidation, validate_matroska_output
 from core.workflows.common.attachments import canonical_attachment_output_name
 from core.workflows.remux_attachments import extract_attached_pics as _extract_attached_pics_helper
 from core.workflows.remux_mapping import (
@@ -63,6 +63,10 @@ class RemuxRuntimeRunnerCallbacks:
     apply_muxing_post_action: Callable[[Path], object]
     apply_language_post_action: Callable[[Path], object]
     write_nfo: Callable[[Path], None]
+    apply_statistics_post_action: Callable[[Path], object] = lambda _path: None
+    apply_track_enabled_post_action: Callable[[Path, object], object] = (
+        lambda _path, _contract: None
+    )
     sync_rewrite_enabled: Callable[[], bool] = lambda: False
     sync_advanced_audio_rewrite_enabled: Callable[[], bool] = lambda: False
     sync_rewrite_audio_bitrates: Callable[[], dict[str, int]] = lambda: {}
@@ -327,8 +331,23 @@ class RemuxRuntimeRunner:
                 cb.log_step(9, "Post-actions sur le candidat (patchs conteneur)")
                 cb.apply_muxing_post_action(candidate)
                 cb.apply_language_post_action(candidate)
+                # FlagEnabled : aucune disposition FFmpeg ne l'exprime, il est
+                # écrit ici d'après le contrat (pistes désactivées demandées).
+                cb.apply_track_enabled_post_action(candidate, output_contract)
+                statistics_result = cb.apply_statistics_post_action(candidate)
                 cb.log_step(10, "Validation du candidat puis commit atomique")
-                validation_errors = validate_matroska_output(candidate, output_contract)
+                # Le patch de statistiques a déjà parcouru les paquets : son
+                # résumé évite une seconde lecture intégrale du candidat.
+                packet_validation = getattr(statistics_result, "packet_validation", None)
+                validation_errors = validate_matroska_output(
+                    candidate,
+                    output_contract,
+                    packet_validation=(
+                        packet_validation
+                        if isinstance(packet_validation, MatroskaPacketValidation)
+                        else None
+                    ),
+                )
                 if validation_errors:
                     raise RemuxError(
                         "Validation de la sortie remux échouée : " + " ; ".join(validation_errors)

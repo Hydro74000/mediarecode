@@ -29,6 +29,7 @@ from core.workflows.common.sync_rewrite import (
 )
 from core.workflows.remux_models import TrackEntry
 from ui.panels.remux_panel.models import (
+    _TRACK_INFO_DISABLED_LABEL_ROLE,
     _TRACK_INFO_OFFSET_NEG_COLOR,
     _TRACK_INFO_OFFSET_POS_COLOR,
     _TRACK_INFO_OFFSET_VALUE_ROLE,
@@ -39,6 +40,7 @@ from ui.panels.track_edit_dialog import TrackEditDialog
 
 class _TrackInfoDelegate(QStyledItemDelegate):
     _SYNC_LABEL_COLOR = QColor(_C.ACCENT)
+    _DISABLED_LABEL_COLOR = QColor(_C.ERROR)
 
     @staticmethod
     def _offset_color(offset_value: str) -> QColor:
@@ -66,10 +68,13 @@ class _TrackInfoDelegate(QStyledItemDelegate):
         offset_value = str(value).strip() if value is not None else ""
         sync_value = index.data(_TRACK_INFO_SYNC_LABEL_ROLE)
         sync_label = str(sync_value).strip() if sync_value is not None else ""
+        disabled_value = index.data(_TRACK_INFO_DISABLED_LABEL_ROLE)
+        disabled_label = str(disabled_value).strip() if disabled_value is not None else ""
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         markers = {
             "offset": offset_value if offset_value and offset_value in text else "",
             "sync": sync_label if sync_label and sync_label in text else "",
+            "disabled": disabled_label if disabled_label and disabled_label in text else "",
         }
         if not text or not any(markers.values()):
             super().paint(painter, option, index)
@@ -132,6 +137,11 @@ class _TrackInfoDelegate(QStyledItemDelegate):
             if kind == "offset":
                 painter.setFont(opt.font)
                 painter.setPen(self._offset_color(marker_text))
+            elif kind == "disabled":
+                # Police inchangée : les avances de texte restent calculées
+                # avec ``metrics`` pour les fragments suivants.
+                painter.setFont(opt.font)
+                painter.setPen(self._DISABLED_LABEL_COLOR)
             else:
                 sync_font = QFont(opt.font)
                 sync_font.setUnderline(True)
@@ -450,6 +460,10 @@ class _TrackTable(QTableWidget):
             _TRACK_INFO_SYNC_LABEL_ROLE,
             entry.sync_rewrite_label if self._can_toggle_sync_rewrite(entry) else "",
         )
+        info_item.setData(
+            _TRACK_INFO_DISABLED_LABEL_ROLE,
+            "" if entry.flag_enabled else TrackEntry.DISABLED_LABEL,
+        )
         self.setItem(row, self.COL_INFO, info_item)
         self._update_info_tooltip(row, entry)
 
@@ -583,6 +597,10 @@ class _TrackTable(QTableWidget):
             info_item.setData(
                 _TRACK_INFO_SYNC_LABEL_ROLE,
                 entry.sync_rewrite_label if self._can_toggle_sync_rewrite(entry) else "",
+            )
+            info_item.setData(
+                _TRACK_INFO_DISABLED_LABEL_ROLE,
+                "" if entry.flag_enabled else TrackEntry.DISABLED_LABEL,
             )
         self._update_info_tooltip(row, entry)
 

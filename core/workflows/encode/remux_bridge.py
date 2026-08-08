@@ -67,6 +67,7 @@ def merge_remux_into_encode_config(
         if not lang and orig_lang and lang != orig_lang:
             lang = "und"
         has_flag_state = any((
+            not track.flag_enabled,
             track.flag_default,
             track.flag_forced,
             track.flag_hearing_impaired,
@@ -75,6 +76,7 @@ def merge_remux_into_encode_config(
             track.flag_commentary,
         ))
         has_flag_change = any((
+            track.flag_enabled != track.orig_flag_enabled,
             track.flag_default != track.orig_flag_default,
             track.flag_forced != track.orig_flag_forced,
             track.flag_hearing_impaired != track.orig_flag_hearing_impaired,
@@ -88,6 +90,7 @@ def merge_remux_into_encode_config(
             track_order=track_order,
             language=lang,
             title=title if title else None,
+            flag_enabled=track.flag_enabled,
             flag_default=track.flag_default,
             flag_forced=track.flag_forced,
             flag_hearing_impaired=track.flag_hearing_impaired,

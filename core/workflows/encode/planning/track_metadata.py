@@ -96,6 +96,7 @@ def resolve_track_metadata(
         flags = current.flags or PlannedTrackFlags()
         patched_flags = replace(
             flags,
+            enabled=patch.flag_enabled if patch.flag_enabled is not None else flags.enabled,
             default=patch.flag_default if patch.flag_default is not None else flags.default,
             forced=patch.flag_forced if patch.flag_forced is not None else flags.forced,
             hearing_impaired=(

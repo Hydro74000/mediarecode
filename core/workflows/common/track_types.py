@@ -39,6 +39,9 @@ class TrackMetaPatch:
     track_order: int
     language: str = ""
     title: str | None = None
+    #: FlagEnabled Matroska — aucune disposition FFmpeg ne lui correspond,
+    #: il est appliqué par patch EBML après le mux.
+    flag_enabled: bool | None = None
     flag_default: bool | None = None
     flag_forced: bool | None = None
     flag_hearing_impaired: bool | None = None

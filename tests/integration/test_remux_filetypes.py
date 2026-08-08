@@ -16,11 +16,17 @@ import pytest
 
 from core.inspector import FileInspector
 from core.workflows.remux import RemuxWorkflow
-from core.workflows.remux_models import RemuxConfig, SourceInput, tracks_from_file_info
+from core.workflows.remux_models import (
+    RemuxConfig,
+    SourceInput,
+    TrackEntry,
+    tracks_from_file_info,
+)
 
 from tests.integration._synth import (
     ffprobe_json,
     make_av_container,
+    make_mkv_with_srt,
     streams_of_type,
     wait_task,
 )
@@ -138,3 +144,145 @@ def test_native_backend_materializes_audio_variant_before_final_mux(tmp_path: Pa
     assert state["failed"] is None, state["failed"]
     probe = ffprobe_json(out)
     assert [stream.get("codec_name") for stream in streams_of_type(probe, "audio")] == ["ac3"]
+
+
+@pytest.mark.parametrize("backend", ["auto", "ffmpeg", "native"])
+def test_every_mux_backend_writes_track_statistics(tmp_path: Path, backend: str) -> None:
+    """Les trois backends écrivent les mêmes statistiques par piste.
+
+    FFmpeg n'émet qu'un ``DURATION`` par piste (et perd les autres tags de
+    stream dès qu'un ``-map_metadata:s`` est utilisé) : sans régénération,
+    MediaInfo n'affiche plus le « Count of elements » des sous-titres. Le
+    backend natif les calcule à l'écriture ; ``auto`` suit sa résolution.
+    """
+    src = tmp_path / "src.mkv"
+    make_mkv_with_srt(src, duration=2.0)
+    info = FileInspector().inspect(src)
+    tracks = tracks_from_file_info(info, file_id="src-0")
+
+    out = tmp_path / f"stats_{backend}.mkv"
+    cfg = RemuxConfig(
+        sources=[SourceInput(path=src, file_index=0, tracks=tracks)],
+        output=out,
+        track_order=[(0, track.mkv_tid, track.entry_id) for track in tracks],
+        keep_chapters=False,
+        mux_backend=backend,
+    )
+    state = wait_task(
+        RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe").run(cfg),
+        timeout=90.0,
+    )
+
+    assert state["failed"] is None, state["failed"]
+    probe = ffprobe_json(out)
+    for stream in probe.get("streams", []):
+        stream_tags = stream.get("tags", {})
+        assert stream_tags.get("NUMBER_OF_FRAMES", "").isdigit(), stream_tags
+        assert stream_tags.get("NUMBER_OF_BYTES", "").isdigit(), stream_tags
+        assert stream_tags.get("_STATISTICS_TAGS")
+        assert stream_tags.get("_STATISTICS_WRITING_APP", "").startswith("Muxiveo")
+    # Le compte d'éléments du sous-titre est celui réellement écrit.
+    subtitle = streams_of_type(probe, "subtitle")[0]
+    assert int(subtitle["tags"]["NUMBER_OF_FRAMES"]) == 1
+
+
+def test_statistics_patch_preserves_the_rest_of_the_container(tmp_path: Path) -> None:
+    """Le patch de statistiques ne touche qu'aux Tags : paquets et structure intacts."""
+    from core.matroska.editors.statistics import MatroskaTrackStatisticsEditor
+    from core.matroska.ids import ATTACHMENTS_ID, CHAPTERS_ID, CUES_ID
+    from core.matroska.reader import MatroskaReader
+
+    src = tmp_path / "src.mkv"
+    make_mkv_with_srt(src, duration=2.0)
+
+    def snapshot(path: Path) -> dict:
+        reader = MatroskaReader(path)
+        reader.segment()
+        return {
+            "tracks": [
+                (track.number, track.uid, track.codec_id, track.language, track.name)
+                for track in reader.tracks()
+            ],
+            "duration_ns": reader.segment_duration_ns(),
+            "timestamp_scale": reader.timestamp_scale_ns(),
+            "title": reader.segment_title(),
+            "chapters": [raw for raw in reader.raw_top_level(CHAPTERS_ID)],
+            "attachments": [raw for raw in reader.raw_top_level(ATTACHMENTS_ID)],
+            "cues_sizes": [len(raw) for raw in reader.raw_top_level(CUES_ID)],
+            "packets": [
+                (block.track_number, block.timestamp_ms, block.payload)
+                for block in reader.blocks()
+            ],
+        }
+
+    before = snapshot(src)
+    result = MatroskaTrackStatisticsEditor().apply(src, writing_app="Muxiveo test")
+
+    assert result.applied
+    assert snapshot(src) == before
+
+
+@pytest.mark.parametrize("backend", ["auto", "ffmpeg", "native"])
+def test_disabled_track_stays_disabled_in_output(tmp_path: Path, backend: str) -> None:
+    """Une piste décochée dans le panneau est muxée avec FlagEnabled=0.
+
+    Aucune disposition FFmpeg n'exprime ``FlagEnabled`` : la valeur est
+    appliquée par patch EBML après le mux, le backend natif l'écrit
+    directement.
+    """
+    from core.matroska.reader import MatroskaReader
+
+    src = tmp_path / "src.mkv"
+    make_mkv_with_srt(src, duration=2.0)
+    info = FileInspector().inspect(src)
+    tracks = tracks_from_file_info(info, file_id="src-0")
+    for track in tracks:
+        if track.track_type == "audio":
+            track.flag_enabled = False
+
+    out = tmp_path / f"disabled_{backend}.mkv"
+    cfg = RemuxConfig(
+        sources=[SourceInput(path=src, file_index=0, tracks=tracks)],
+        output=out,
+        track_order=[(0, track.mkv_tid, track.entry_id) for track in tracks],
+        keep_chapters=False,
+        mux_backend=backend,
+    )
+    state = wait_task(
+        RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe").run(cfg),
+        timeout=90.0,
+    )
+
+    assert state["failed"] is None, state["failed"]
+    assert [track.flag_enabled for track in MatroskaReader(out).tracks()] == [True, False, True]
+
+
+def test_source_disabled_track_is_reported_and_preserved(tmp_path: Path) -> None:
+    """Une source déjà désactivée est visible dans le panneau et préservée."""
+    from core.matroska.editors.track_flags import MatroskaTrackEnabledEditor
+    from core.matroska.reader import MatroskaReader
+
+    src = tmp_path / "src.mkv"
+    make_mkv_with_srt(src, duration=2.0)
+    MatroskaTrackEnabledEditor().apply(src, {1: False})
+
+    tracks = tracks_from_file_info(FileInspector().inspect(src), file_id="src-0")
+    audio = next(track for track in tracks if track.track_type == "audio")
+    assert audio.flag_enabled is False
+    assert TrackEntry.DISABLED_LABEL in audio.full_info_label
+
+    out = tmp_path / "preserved.mkv"
+    cfg = RemuxConfig(
+        sources=[SourceInput(path=src, file_index=0, tracks=tracks)],
+        output=out,
+        track_order=[(0, track.mkv_tid, track.entry_id) for track in tracks],
+        keep_chapters=False,
+        mux_backend="ffmpeg",
+    )
+    state = wait_task(
+        RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe").run(cfg),
+        timeout=90.0,
+    )
+
+    assert state["failed"] is None, state["failed"]
+    assert [track.flag_enabled for track in MatroskaReader(out).tracks()] == [True, False, True]
