@@ -390,6 +390,39 @@ def build_canonicalization_command(
 # Variantes audio natives
 # =============================================================================
 
+def passthrough_source_refs(
+    mapped_tracks: list[MappedTrack],
+) -> list[tuple[Path, int]] | None:
+    """Sources des pistes de sortie quand rien ne transforme leurs frames.
+
+    Retourne ``None`` dès qu'une piste est réencodée, décalée, resynchronisée,
+    convertie ou nouvellement créée : les compteurs de la source ne
+    décriraient alors plus la piste écrite.
+    """
+    refs: list[tuple[Path, int]] = []
+    for item in mapped_tracks:
+        track = item.track
+        if getattr(track, "is_new", False):
+            return None
+        if int(getattr(track, "time_shift_ms", 0) or 0):
+            return None
+        if str(getattr(track, "sync_rewrite_mode", "") or "").strip():
+            return None
+        target = normalized_rewrite_codec(track.codec)
+        source_codec = normalized_rewrite_codec(track.orig_codec or track.codec)
+        if target != source_codec:
+            return None
+        if track.track_type == "subtitle":
+            try:
+                codec_arg, _warning = plan_subtitle_codec(track.codec)
+            except ValueError:
+                return None
+            if codec_arg != "copy":
+                return None
+        refs.append((Path(item.source_path), int(item.stream_index)))
+    return refs or None
+
+
 @dataclass(frozen=True)
 class NativeAudioVariantPlan:
     """Variante audio à matérialiser avant l'assemblage natif."""
@@ -994,6 +1027,7 @@ __all__ = [
     "SelectedTrackRef",
     "SourceParticipation",
     "build_audio_variant_command",
+    "passthrough_source_refs",
     "build_canonicalization_command",
     "canonicalization_stream_selection",
     "mux_backend_report",

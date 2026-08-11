@@ -43,6 +43,7 @@ def test_reader_extracts_simple_block_timestamp(tmp_path: Path) -> None:
 
 
 def _blocks_file(tmp_path: Path, block_payload: bytes, *, grouped: bool = False) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     cluster, timestamp = bytes.fromhex("1f43b675"), bytes.fromhex("e7")
     if grouped:
         body = element(bytes.fromhex("a1"), block_payload)
@@ -141,3 +142,80 @@ def test_reader_reports_content_encryption_as_native_blocker(tmp_path: Path) -> 
         + element(bytes.fromhex("1654ae6b"), track)
     )
     assert MatroskaReader(path).content_encoding_capabilities() == (False, True)
+
+
+def _aggregate_from_blocks(reader: MatroskaReader) -> dict:
+    """Compteurs par piste obtenus en matérialisant tous les blocs."""
+    totals: dict[int, list[int]] = {}
+    for block in reader.blocks():
+        item = totals.setdefault(block.track_number, [0, 0, 0])
+        timestamp_ns = (
+            block.timestamp_ns if block.timestamp_ns is not None
+            else block.timestamp_ms * 1_000_000
+        )
+        item[0] += 1
+        item[1] += len(block.payload)
+        item[2] = max(item[2], timestamp_ns + (block.duration_ns or 0))
+    return totals
+
+
+def _aggregate_from_summaries(reader: MatroskaReader) -> dict:
+    totals: dict[int, list[int]] = {}
+    for block in reader.block_summaries():
+        item = totals.setdefault(block.track_number, [0, 0, 0])
+        item[0] += block.frame_count
+        item[1] += block.payload_bytes
+        item[2] = max(item[2], block.timestamp_ns + (block.duration_ns or 0))
+    return totals
+
+
+def test_block_summaries_match_full_scan_for_every_lacing_mode(tmp_path: Path) -> None:
+    """Le parcours en-têtes seuls compte comme le parcours complet."""
+    cases = {
+        "none": _blocks_file(tmp_path / "none", b"\x81\x00\x00\x80payload"),
+        "fixed": _blocks_file(tmp_path / "fixed", b"\x81\x00\x00\x84\x01aabb"),
+        "xiph": _blocks_file(tmp_path / "xiph", b"\x81\x00\x00\x82\x01\x01abb"),
+        "ebml": _blocks_file(tmp_path / "ebml", b"\x81\x00\x00\x86\x01\x81abb"),
+        "group": _blocks_file(tmp_path / "group", b"\x81\x00\x05\x00frame", grouped=True),
+    }
+    for label, path in cases.items():
+        reader = MatroskaReader(path)
+        assert _aggregate_from_summaries(reader) == _aggregate_from_blocks(reader), label
+
+
+def test_block_summaries_handle_long_xiph_lacing_tables(tmp_path: Path) -> None:
+    """Une table de lacing plus longue que la sonde initiale est relue."""
+    frame_count = 40
+    frame = b"x" * 300
+    sizes = b"".join(b"\xff" + bytes([300 - 255]) for _ in range(frame_count - 1))
+    block = b"\x81\x00\x00\x82" + bytes([frame_count - 1]) + sizes + frame * frame_count
+    path = _blocks_file(tmp_path / "long-xiph", block)
+
+    reader = MatroskaReader(path)
+    summaries = list(reader.block_summaries())
+
+    assert len(summaries) == 1
+    assert summaries[0].frame_count == frame_count
+    assert _aggregate_from_summaries(reader) == _aggregate_from_blocks(reader)
+
+
+def test_parallel_block_summaries_match_the_sequential_scan(tmp_path: Path) -> None:
+    """Les tranches parallèles sont émises dans l'ordre du fichier."""
+    cluster, timestamp, block = bytes.fromhex("1f43b675"), bytes.fromhex("e7"), bytes.fromhex("a3")
+    clusters = b"".join(
+        element(
+            cluster,
+            element(timestamp, bytes([index]))
+            + element(block, b"\x81\x00\x00\x80" + b"f" * (index + 1))
+            + element(block, b"\x82\x00\x02\x80" + b"a" * (index + 2)),
+        )
+        for index in range(40)
+    )
+    path = tmp_path / "many-clusters.mkv"
+    path.write_bytes(element(EBML_HEADER_ID, b"") + SEGMENT_ID + b"\xff" + clusters)
+
+    reader = MatroskaReader(path)
+    sequential = list(reader.block_summaries())
+    for workers in (2, 4, 8):
+        assert list(reader.block_summaries(workers=workers)) == sequential, workers
+    assert len(sequential) == 80

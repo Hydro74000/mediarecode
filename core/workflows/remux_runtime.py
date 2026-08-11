@@ -29,6 +29,8 @@ from core.workflows.common.sync_rewrite import (
 )
 from core.matroska.contract import without_expected_attachment
 from core.matroska.validation import MatroskaPacketValidation, validate_matroska_output
+from core.workflows.common.track_statistics import derive_output_statistics
+from core.workflows.remux_plan import passthrough_source_refs
 from core.workflows.common.attachments import canonical_attachment_output_name
 from core.workflows.remux_attachments import extract_attached_pics as _extract_attached_pics_helper
 from core.workflows.remux_mapping import (
@@ -63,7 +65,7 @@ class RemuxRuntimeRunnerCallbacks:
     apply_muxing_post_action: Callable[[Path], object]
     apply_language_post_action: Callable[[Path], object]
     write_nfo: Callable[[Path], None]
-    apply_statistics_post_action: Callable[[Path], object] = lambda _path: None
+    apply_statistics_post_action: Callable[..., object] = lambda _path, **_kwargs: None
     apply_track_enabled_post_action: Callable[[Path, object], object] = (
         lambda _path, _contract: None
     )
@@ -334,7 +336,22 @@ class RemuxRuntimeRunner:
                 # FlagEnabled : aucune disposition FFmpeg ne l'exprime, il est
                 # écrit ici d'après le contrat (pistes désactivées demandées).
                 cb.apply_track_enabled_post_action(candidate, output_contract)
-                statistics_result = cb.apply_statistics_post_action(candidate)
+                # Copie stricte : les compteurs de la sortie sont ceux des
+                # pistes sources, déjà publiés par leurs tags. Les mesurer sur
+                # la sortie relirait le fichier entier pour rien.
+                derived_statistics = None
+                untouched_mapping = (
+                    not sync_prepared
+                    and live_sync_session is None
+                    and mapped_tracks == list(plan.mapped_tracks)
+                )
+                if untouched_mapping:
+                    passthrough_refs = passthrough_source_refs(mapped_tracks)
+                    if passthrough_refs is not None:
+                        derived_statistics = derive_output_statistics(passthrough_refs)
+                statistics_result = cb.apply_statistics_post_action(
+                    candidate, statistics_by_position=derived_statistics,
+                )
                 cb.log_step(10, "Validation du candidat puis commit atomique")
                 # Le patch de statistiques a déjà parcouru les paquets : son
                 # résumé évite une seconde lecture intégrale du candidat.

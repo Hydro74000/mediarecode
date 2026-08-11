@@ -286,3 +286,99 @@ def test_source_disabled_track_is_reported_and_preserved(tmp_path: Path) -> None
 
     assert state["failed"] is None, state["failed"]
     assert [track.flag_enabled for track in MatroskaReader(out).tracks()] == [True, False, True]
+
+
+def test_passthrough_statistics_match_a_direct_measurement(tmp_path: Path) -> None:
+    """Copie stricte : les compteurs repris des sources décrivent bien la sortie."""
+    from core.matroska.editors.statistics import MatroskaTrackStatisticsEditor
+
+    src = tmp_path / "src.mkv"
+    make_mkv_with_srt(src, duration=3.0)
+    # La source publie ses statistiques, comme un MKV produit par un tiers.
+    MatroskaTrackStatisticsEditor().apply(src, writing_app="source-tool")
+
+    out = tmp_path / "passthrough.mkv"
+    tracks = tracks_from_file_info(FileInspector().inspect(src), file_id="src-0")
+    cfg = RemuxConfig(
+        sources=[SourceInput(path=src, file_index=0, tracks=tracks)],
+        output=out,
+        track_order=[(0, track.mkv_tid, track.entry_id) for track in tracks],
+        keep_chapters=False,
+        mux_backend="ffmpeg",
+    )
+    state = wait_task(
+        RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe").run(cfg),
+        timeout=90.0,
+    )
+    assert state["failed"] is None, state["failed"]
+
+    def statistics_of(path: Path) -> dict[int, tuple[str, str, str]]:
+        from core.matroska.reader import MatroskaReader
+
+        reader = MatroskaReader(path)
+        positions = {track.uid: index for index, track in enumerate(reader.tracks())}
+        found: dict[int, tuple[str, str, str]] = {}
+        for tag in reader.tags():
+            uid = tag.targets.get("63c5", 0)
+            values = {name.upper(): text for name, text in tag.values}
+            if uid in positions and "NUMBER_OF_FRAMES" in values:
+                found[positions[uid]] = (
+                    values["NUMBER_OF_FRAMES"], values["NUMBER_OF_BYTES"], values["DURATION"],
+                )
+        return found
+
+    written = statistics_of(out)
+    # Vérité terrain : mesure directe des paquets de la sortie.
+    measured_copy = tmp_path / "measured.mkv"
+    measured_copy.write_bytes(out.read_bytes())
+    MatroskaTrackStatisticsEditor().apply(measured_copy, writing_app="mesure")
+
+    assert written
+    assert written == statistics_of(measured_copy)
+
+
+def test_reencoded_track_falls_back_to_measuring_the_output(tmp_path: Path) -> None:
+    """Une piste transformée interdit la reprise : la sortie est mesurée."""
+    from core.matroska.editors.statistics import MatroskaTrackStatisticsEditor
+    from core.matroska.reader import MatroskaReader
+
+    src = tmp_path / "src.mkv"
+    make_mkv_with_srt(src, duration=3.0)
+    MatroskaTrackStatisticsEditor().apply(src, writing_app="source-tool")
+    tracks = tracks_from_file_info(FileInspector().inspect(src), file_id="src-0")
+    audio = next(track for track in tracks if track.track_type == "audio")
+    audio.codec = "AC3"
+
+    out = tmp_path / "reencoded.mkv"
+    cfg = RemuxConfig(
+        sources=[SourceInput(path=src, file_index=0, tracks=tracks)],
+        output=out,
+        track_order=[(0, track.mkv_tid, track.entry_id) for track in tracks],
+        keep_chapters=False,
+        mux_backend="ffmpeg",
+    )
+    state = wait_task(
+        RemuxWorkflow(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe").run(cfg),
+        timeout=90.0,
+    )
+    assert state["failed"] is None, state["failed"]
+
+    reader = MatroskaReader(out)
+    positions = {track.uid: index for index, track in enumerate(reader.tracks())}
+    frames_by_position = {
+        positions[tag.targets.get("63c5", 0)]: dict(
+            (name.upper(), text) for name, text in tag.values
+        )["NUMBER_OF_FRAMES"]
+        for tag in reader.tags()
+        if tag.targets.get("63c5", 0) in positions
+        and any(name.upper() == "NUMBER_OF_FRAMES" for name, _ in tag.values)
+    }
+    source_audio_frames = next(
+        dict((name.upper(), text) for name, text in tag.values)["NUMBER_OF_FRAMES"]
+        for tag in MatroskaReader(src).tags()
+        if any(name.upper() == "NUMBER_OF_FRAMES" for name, _ in tag.values)
+        and tag.targets.get("63c5", 0)
+        == [track.uid for track in MatroskaReader(src).tracks()][1]
+    )
+    # L'audio AC3 n'a pas le même découpage que l'AAC source.
+    assert frames_by_position[1] != source_audio_frames

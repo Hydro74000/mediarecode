@@ -7,6 +7,7 @@ la source unique de vérité.
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,66 @@ class MatroskaPacketValidation:
     track_numbers: frozenset[int]
     max_packet_timestamp_ns: int | None
     last_delta_by_track: dict[int, int]
+
+
+#: Clusters de fin sondés pour l'horodatage du dernier paquet. Les Clusters
+#: étant ordonnés par horodatage croissant, le paquet le plus tardif est dans
+#: les tout derniers ; la marge couvre l'entrelacement des pistes.
+_TAIL_CLUSTER_PROBE = 8
+
+
+def _probe_packet_validation(
+    reader: MatroskaReader,
+    media_numbers: set[int],
+    *,
+    workers: int,
+) -> MatroskaPacketValidation:
+    """Résume les paquets sans relire l'intégralité du fichier.
+
+    Deux sondages suffisent au contrat : les Clusters de fin donnent
+    l'horodatage du dernier paquet (et l'écart final servant de marge), le
+    parcours depuis le début s'arrête dès que chaque piste média attendue a
+    livré un paquet. Une piste réellement vide fait donc parcourir tout le
+    fichier — la détection reste exacte, seul le cas nominal est raccourci.
+    """
+    clusters = reader.cluster_elements()
+    max_packet_timestamp_ns: int | None = None
+    last_delta_by_track: dict[int, int] = {}
+    last_timestamp_by_track: dict[int, int] = {}
+    seen: set[int] = set()
+
+    def account(block) -> None:
+        nonlocal max_packet_timestamp_ns
+        seen.add(block.track_number)
+        previous = last_timestamp_by_track.get(block.track_number)
+        if previous is not None and block.timestamp_ns > previous:
+            # Marge conservée au maximum des écarts observés : un sondage de
+            # début ne doit jamais réduire la tolérance déduite de la fin.
+            last_delta_by_track[block.track_number] = max(
+                last_delta_by_track.get(block.track_number, 0),
+                block.timestamp_ns - previous,
+            )
+        last_timestamp_by_track[block.track_number] = block.timestamp_ns
+        packet_end = block.timestamp_ns + (block.duration_ns or 0)
+        max_packet_timestamp_ns = max(max_packet_timestamp_ns or packet_end, packet_end)
+
+    for block in reader.block_summaries(clusters=clusters[-_TAIL_CLUSTER_PROBE:], workers=workers):
+        account(block)
+
+    remaining = set(media_numbers) - seen
+    if remaining:
+        last_timestamp_by_track.clear()
+        for block in reader.block_summaries(clusters=clusters, workers=workers):
+            account(block)
+            remaining.discard(block.track_number)
+            if not remaining:
+                break
+
+    return MatroskaPacketValidation(
+        track_numbers=frozenset(seen),
+        max_packet_timestamp_ns=max_packet_timestamp_ns,
+        last_delta_by_track=last_delta_by_track,
+    )
 
 
 def _normalized_language(value: str) -> str:
@@ -115,13 +176,19 @@ def validate_matroska_output(
     *,
     check_packets: bool = True,
     packet_validation: MatroskaPacketValidation | None = None,
+    packet_scan_workers: int | None = None,
 ) -> list[str]:
     """Vérifie le contrat minimal de succès sur ``path``. Retourne les erreurs.
 
     Sans contrat, seule la validité structurelle (EBML lisible, au moins une
     piste, durée non négative) est vérifiée — c'est la validation « légère »
     utilisée par le backend FFmpeg.
+
+    Sans ``packet_validation`` fourni par l'écrivain, les paquets sont sondés
+    (voir :func:`_probe_packet_validation`) plutôt que relus intégralement.
     """
+    if packet_scan_workers is None:
+        packet_scan_workers = max(1, min(8, os.cpu_count() or 1))
     errors: list[str] = []
     if not path.is_file():
         return [f"Sortie candidate absente : {path}"]
@@ -279,23 +346,14 @@ def validate_matroska_output(
             last_delta_by_track = packet_validation.last_delta_by_track
         else:
             max_packet_timestamp_ns = None
-            last_timestamp_by_track: dict[int, int] = {}
             last_delta_by_track: dict[int, int] = {}
             try:
-                for block in reader.blocks():
-                    media_numbers.discard(block.track_number)
-                    timestamp_ns = (
-                        block.timestamp_ns
-                        if block.timestamp_ns is not None
-                        else block.timestamp_ms * 1_000_000
-                    )
-                    previous = last_timestamp_by_track.get(block.track_number)
-                    if previous is not None and timestamp_ns > previous:
-                        last_delta_by_track[block.track_number] = timestamp_ns - previous
-                    last_timestamp_by_track[block.track_number] = timestamp_ns
-                    duration = block.duration_ns or ((block.duration_ms or 0) * 1_000_000)
-                    packet_end = timestamp_ns + duration
-                    max_packet_timestamp_ns = max(max_packet_timestamp_ns or packet_end, packet_end)
+                probe = _probe_packet_validation(
+                    reader, set(media_numbers), workers=packet_scan_workers,
+                )
+                media_numbers.difference_update(probe.track_numbers)
+                max_packet_timestamp_ns = probe.max_packet_timestamp_ns
+                last_delta_by_track = probe.last_delta_by_track
             except (OSError, ValueError) as exc:
                 errors.append(f"Blocs Matroska illisibles : {exc}")
         if check_packets and media_numbers:

@@ -235,6 +235,7 @@ class MatroskaTrackStatisticsPostAction:
         *,
         writing_app: str | None = None,
         log_cb: Callable[[str, str], None] | None = None,
+        statistics_by_position: dict[int, tuple[int, int, int]] | None = None,
     ) -> MatroskaStatisticsPatchResult | None:
         cb = log_cb or self._log_cb
         name = output_path.name.lower()
@@ -246,13 +247,19 @@ class MatroskaTrackStatisticsPostAction:
         result = self._editor.apply(
             output_path,
             writing_app=writing_app or self._writing_app or "Muxiveo",
+            statistics_by_position=statistics_by_position,
         )
         if cb is not None:
             if result.applied:
+                origin = (
+                    "reprises des sources (copie stricte)"
+                    if statistics_by_position is not None
+                    else "mesurées sur la sortie"
+                )
                 cb(
                     "INFO",
                     "Statistiques Matroska régénérées "
-                    f"({result.track_count} piste(s)) : BPS, DURATION, "
+                    f"({result.track_count} piste(s), {origin}) : BPS, DURATION, "
                     "NUMBER_OF_FRAMES, NUMBER_OF_BYTES.",
                 )
             elif result.skipped and result.reason:

@@ -24,6 +24,7 @@ fichier.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,9 +67,16 @@ class MatroskaTrackStatisticsEditor:
         self,
         *,
         editor: MatroskaSegmentInfoHeaderEditor | None = None,
+        scan_workers: int | None = None,
     ) -> None:
         self._editor = editor or MatroskaSegmentInfoHeaderEditor(
             options=MatroskaSegmentInfoHeaderEditorOptions(fallback_mode="skip")
+        )
+        # Le parcours coûte une entrée/sortie par bloc : plusieurs lectures en
+        # vol divisent le temps sur un SSD sans changer le résultat (les
+        # tranches restent consommées dans l'ordre du fichier).
+        self._scan_workers = (
+            max(1, min(8, os.cpu_count() or 1)) if scan_workers is None else max(1, scan_workers)
         )
 
     # ------------------------------------------------------------------
@@ -80,9 +88,19 @@ class MatroskaTrackStatisticsEditor:
         path: Path,
         *,
         writing_app: str = "Muxiveo",
+        statistics_by_position: dict[int, tuple[int, int, int]] | None = None,
     ) -> MatroskaStatisticsPatchResult:
+        """``statistics_by_position`` évite de mesurer : valeurs déjà connues.
+
+        Utilisé quand la sortie recopie les frames de ses sources à
+        l'identique — les compteurs sont alors ceux des pistes sources.
+        """
         try:
-            return self._apply_impl(path, writing_app=writing_app)
+            return self._apply_impl(
+                path,
+                writing_app=writing_app,
+                statistics_by_position=statistics_by_position,
+            )
         except Exception as exc:
             return MatroskaStatisticsPatchResult(
                 applied=False,
@@ -99,6 +117,7 @@ class MatroskaTrackStatisticsEditor:
         path: Path,
         *,
         writing_app: str,
+        statistics_by_position: dict[int, tuple[int, int, int]] | None = None,
     ) -> MatroskaStatisticsPatchResult:
         if not path.is_file():
             raise ValueError(f"Fichier introuvable: {path}")
@@ -113,16 +132,26 @@ class MatroskaTrackStatisticsEditor:
         uid_by_number = {track.number: track.uid for track in tracks if track.uid}
         default_duration_ns = {track.number: track.default_duration_ns for track in tracks}
 
-        accumulators, packet_validation = self._measure(
-            reader, default_duration_ns=default_duration_ns,
-        )
-        statistics = {
-            uid_by_number[number]: (
-                item.frame_count, item.payload_bytes, item.duration_ns,
+        packet_validation: MatroskaPacketValidation | None = None
+        if statistics_by_position is not None and self._supplied_values_fit(
+            reader, tracks, statistics_by_position,
+        ):
+            statistics = {
+                track.uid: statistics_by_position[position]
+                for position, track in enumerate(tracks)
+                if track.uid and statistics_by_position[position][0] > 0
+            }
+        else:
+            accumulators, packet_validation = self._measure(
+                reader, default_duration_ns=default_duration_ns, workers=self._scan_workers,
             )
-            for number, item in accumulators.items()
-            if number in uid_by_number and item.frame_count > 0
-        }
+            statistics = {
+                uid_by_number[number]: (
+                    item.frame_count, item.payload_bytes, item.duration_ns,
+                )
+                for number, item in accumulators.items()
+                if number in uid_by_number and item.frame_count > 0
+            }
         if not statistics:
             return MatroskaStatisticsPatchResult(
                 applied=False,
@@ -158,11 +187,38 @@ class MatroskaTrackStatisticsEditor:
             packet_validation=packet_validation,
         )
 
+    #: Écart toléré entre la durée annoncée par les valeurs fournies et celle
+    #: du segment écrit. Au-delà, la sortie ne correspond plus aux sources
+    #: (troncature, paquets perdus) et doit être mesurée.
+    _SUPPLIED_DURATION_TOLERANCE_NS = 2_000_000_000
+
+    @classmethod
+    def _supplied_values_fit(
+        cls,
+        reader: MatroskaReader,
+        tracks: list,
+        statistics_by_position: dict[int, tuple[int, int, int]],
+    ) -> bool:
+        """Vérifie que des valeurs fournies décrivent bien la sortie écrite."""
+        if len(statistics_by_position) != len(tracks):
+            return False
+        if any(position not in statistics_by_position for position in range(len(tracks))):
+            return False
+        try:
+            segment_duration_ns = reader.segment_duration_ns()
+        except (OSError, ValueError):
+            return False
+        if not segment_duration_ns:
+            return False
+        longest_ns = max(values[2] for values in statistics_by_position.values())
+        return abs(segment_duration_ns - longest_ns) <= cls._SUPPLIED_DURATION_TOLERANCE_NS
+
     @staticmethod
     def _measure(
         reader: MatroskaReader,
         *,
         default_duration_ns: dict[int, int],
+        workers: int = 1,
     ) -> tuple[dict[int, _TrackAccumulator], MatroskaPacketValidation]:
         """Parcourt les paquets une fois : statistiques + résumé de validation.
 
@@ -174,20 +230,12 @@ class MatroskaTrackStatisticsEditor:
         accumulators: dict[int, _TrackAccumulator] = {}
         max_packet_timestamp_ns: int | None = None
         last_delta_by_track: dict[int, int] = {}
-        for block in reader.blocks():
+        for block in reader.block_summaries(workers=workers):
             item = accumulators.setdefault(block.track_number, _TrackAccumulator())
-            timestamp_ns = (
-                block.timestamp_ns
-                if block.timestamp_ns is not None
-                else block.timestamp_ms * 1_000_000
-            )
-            explicit_duration_ns = (
-                block.duration_ns
-                if block.duration_ns is not None
-                else ((block.duration_ms or 0) * 1_000_000 if block.duration_ms is not None else None)
-            )
-            item.frame_count += 1
-            item.payload_bytes += len(block.payload)
+            timestamp_ns = block.timestamp_ns
+            explicit_duration_ns = block.duration_ns
+            item.frame_count += block.frame_count
+            item.payload_bytes += block.payload_bytes
             if timestamp_ns > item.last_timestamp_ns >= 0:
                 item.last_delta_ns = timestamp_ns - item.last_timestamp_ns
                 last_delta_by_track[block.track_number] = item.last_delta_ns
@@ -197,14 +245,12 @@ class MatroskaTrackStatisticsEditor:
             if duration_ns is None:
                 track_default_ns = default_duration_ns.get(block.track_number, 0)
                 if track_default_ns:
-                    duration_ns = track_default_ns * max(1, block.lace_count)
+                    duration_ns = track_default_ns * max(1, block.frame_count)
             if duration_ns is None:
                 duration_ns = item.last_delta_ns
             item.duration_ns = max(item.duration_ns, timestamp_ns + duration_ns)
 
-            packet_end = timestamp_ns + (
-                block.duration_ns or ((block.duration_ms or 0) * 1_000_000)
-            )
+            packet_end = timestamp_ns + (explicit_duration_ns or 0)
             max_packet_timestamp_ns = max(max_packet_timestamp_ns or packet_end, packet_end)
         return accumulators, MatroskaPacketValidation(
             track_numbers=frozenset(accumulators),

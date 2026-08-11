@@ -187,3 +187,45 @@ def test_missing_file_is_reported_as_skipped(tmp_path: Path) -> None:
 
     assert not result.applied and result.skipped
     assert "introuvable" in result.reason
+
+
+def test_validation_probe_detects_an_empty_media_track(tmp_path: Path) -> None:
+    """L'arrêt anticipé ne masque jamais une piste sans paquet."""
+    from core.matroska.contract import ExpectedMatroskaTrack, MatroskaOutputContract
+    from core.matroska.validation import validate_matroska_output
+
+    output = tmp_path / "out.mkv"
+    _write_mkv(output)  # piste 1 : vidéo, piste 2 : sous-titres
+    contract = MatroskaOutputContract(
+        track_types=("video", "audio"),
+        expected_tracks=(
+            ExpectedMatroskaTrack(track_type="video", require_packets=True),
+            # La seconde piste du fichier est un sous-titre : aucun paquet
+            # « audio » n'existe, l'erreur doit être signalée.
+            ExpectedMatroskaTrack(track_type="audio", require_packets=True),
+        ),
+    )
+
+    errors = validate_matroska_output(output, contract)
+
+    assert any("Aucun paquet écrit" in error for error in errors) or any(
+        "Pistes de sortie inattendues" in error for error in errors
+    )
+
+
+def test_validation_probe_reads_the_last_packet_timestamp(tmp_path: Path) -> None:
+    """La durée est validée depuis les Clusters de fin, sans tout relire."""
+    from core.matroska.contract import ExpectedMatroskaTrack, MatroskaOutputContract
+    from core.matroska.validation import validate_matroska_output
+
+    output = tmp_path / "out.mkv"
+    _write_mkv(output)
+    contract = MatroskaOutputContract(
+        track_types=("video", "subtitle"),
+        expected_tracks=(
+            ExpectedMatroskaTrack(track_type="video", require_packets=True),
+            ExpectedMatroskaTrack(track_type="subtitle", require_packets=False),
+        ),
+    )
+
+    assert validate_matroska_output(output, contract) == []

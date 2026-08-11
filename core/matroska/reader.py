@@ -6,6 +6,8 @@ raw payloads so the native remux planner can preserve packet bytes verbatim.
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -187,6 +189,11 @@ class MatroskaReader:
     COLOUR_ID = bytes.fromhex("55b0")
     MASTERING_METADATA_ID = bytes.fromhex("55d0")
     BLOCK_ADDITION_MAPPING_ID = bytes.fromhex("41e4")
+    #: Tampon des parcours qui sautent les payloads (en-têtes seuls). Une page
+    #: mesure le meilleur compromis : au-delà, le gain de temps est marginal
+    #: alors que le volume lu — et l'éviction du cache — croît vite.
+    _SKIPPING_READ_BUFFER = 4096
+
     CLUSTER_ID = bytes.fromhex("1f43b675")
     TIMESTAMP_ID = bytes.fromhex("e7")
     SIMPLE_BLOCK_ID = bytes.fromhex("a3")
@@ -240,6 +247,7 @@ class MatroskaReader:
         # sûr et sans risque de péremption (un fichier modifié => nouveau reader).
         self._segment_cache: EbmlElement | None = None
         self._tracks_cache: tuple["MatroskaTrack", ...] | None = None
+        self._clusters_cache: list[EbmlElement] | None = None
 
     def segment(self) -> EbmlElement:
         if self._segment_cache is not None:
@@ -810,6 +818,177 @@ class MatroskaReader:
         """Compatibility alias for callers predating BlockGroup support."""
         yield from self.blocks()
 
+    @staticmethod
+    def _lacing_overhead(header: bytes, flags: int) -> tuple[int, int]:
+        """``(frame_count, octets d'en-tête de lacing)`` d'un bloc lacé.
+
+        ``header`` commence juste après les flags du bloc. Seules les tailles
+        déclarées sont lues : les frames elles-mêmes ne sont jamais touchées.
+        """
+        mode = (flags >> 1) & 0x03
+        if mode == 0:
+            return 1, 0
+        if not header:
+            raise ValueError("En-tête de lacing absent")
+        count = header[0] + 1
+        cursor = 1
+        if mode == 1:  # Xiph
+            for _ in range(count - 1):
+                while True:
+                    if cursor >= len(header):
+                        raise ValueError("Lacing Xiph tronqué")
+                    byte = header[cursor]
+                    cursor += 1
+                    if byte != 255:
+                        break
+        elif mode == 3:  # EBML
+            for _ in range(count - 1):
+                if cursor >= len(header):
+                    raise ValueError("Lacing EBML tronqué")
+                _value, length = _read_vint_value(header, cursor)
+                cursor += length
+        return count, cursor
+
+    def cluster_elements(self) -> list[EbmlElement]:
+        """Clusters de niveau 1, dans l'ordre du fichier.
+
+        Énumérer le squelette coûte une entrée/sortie par élément : le
+        résultat est mémoïsé, plusieurs sondages d'un même reader ne le
+        repayent pas.
+        """
+        if self._clusters_cache is None:
+            self._clusters_cache = [
+                item for item in self.top_level() if item.element_id == self.CLUSTER_ID
+            ]
+        return list(self._clusters_cache)
+
+    def block_summaries(
+        self,
+        *,
+        workers: int = 1,
+        clusters: list[EbmlElement] | None = None,
+    ) -> Iterator["MatroskaBlockSummary"]:
+        """Mesure chaque bloc sans matérialiser ses frames.
+
+        Équivalent de :meth:`blocks` pour les compteurs (piste, horodatage,
+        durée, nombre de frames, octets), mais seuls les en-têtes sont lus :
+        sur un fichier de plusieurs Go, le parcours ne touche qu'une fraction
+        des octets.
+
+        ``workers`` > 1 répartit les Clusters sur plusieurs descripteurs. Le
+        parcours reste latence-bound (une entrée/sortie par bloc) : plusieurs
+        lectures en vol saturent bien mieux un SSD. Les tranches sont émises
+        dans l'ordre du fichier, la séquence produite est donc identique au
+        mode séquentiel.
+
+        ``clusters`` restreint le parcours à une plage déjà énumérée (sondage
+        de début ou de fin de fichier).
+        """
+        if clusters is None:
+            clusters = self.cluster_elements()
+        if workers <= 1 or len(clusters) < 2:
+            yield from self._scan_clusters(clusters)
+            return
+
+        # Tranches courtes : le pool garde des lectures en vol sans empiler
+        # de longues listes de résultats en mémoire.
+        chunk_size = max(1, min(512, len(clusters) // (workers * 8) or 1))
+        chunks = [clusters[index:index + chunk_size] for index in range(0, len(clusters), chunk_size)]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            pending: deque[Future[list[MatroskaBlockSummary]]] = deque()
+            for chunk in chunks:
+                while len(pending) >= workers * 2:
+                    yield from pending.popleft().result()
+                pending.append(pool.submit(lambda item=chunk: list(self._scan_clusters(item))))
+            while pending:
+                yield from pending.popleft().result()
+
+    def _scan_clusters(
+        self,
+        clusters: list[EbmlElement],
+    ) -> Iterator["MatroskaBlockSummary"]:
+        """Parcours des en-têtes de blocs d'une plage de Clusters."""
+        size = self.path.stat().st_size
+        scale_ns = self.timestamp_scale_ns()
+        # Chaque payload de bloc est sauté : un tampon de lecture large serait
+        # rempli puis jeté à chaque saut. Un petit tampon garde des lectures
+        # complètes (contrairement au mode non tamponné) sans lire les frames.
+        with self.path.open("rb", buffering=self._SKIPPING_READ_BUFFER) as fh:
+
+            def read_at(offset: int, length: int) -> bytes:
+                fh.seek(offset)
+                return fh.read(length)
+
+            def block_summary(
+                element: EbmlElement,
+                cluster_timestamp: int,
+                duration_ns: int | None,
+            ) -> "MatroskaBlockSummary":
+                if element.size is None:
+                    raise ValueError("Block Matroska de taille inconnue")
+                # 8 octets de numéro de piste + 2 d'horodatage + 1 de flags,
+                # puis la table de lacing : 256 octets couvrent les blocs
+                # usuels, la boucle élargit pour les laçages très fragmentés.
+                probe_size = min(element.size, 256)
+                header = read_at(element.payload_offset, probe_size)
+                track_number, vint_length = _read_vint_value(header)
+                if len(header) < vint_length + 3:
+                    raise ValueError("Block Matroska tronqué")
+                relative = int.from_bytes(header[vint_length:vint_length + 2], "big", signed=True)
+                flags = header[vint_length + 2]
+                while True:
+                    try:
+                        frame_count, lacing_bytes = self._lacing_overhead(
+                            header[vint_length + 3:], flags,
+                        )
+                        break
+                    except ValueError:
+                        if probe_size >= element.size:
+                            raise
+                        probe_size = min(element.size, probe_size * 4)
+                        header = read_at(element.payload_offset, probe_size)
+                header_bytes = vint_length + 3 + lacing_bytes
+                return MatroskaBlockSummary(
+                    track_number=track_number,
+                    timestamp_ns=(cluster_timestamp + relative) * scale_ns,
+                    duration_ns=duration_ns,
+                    frame_count=frame_count,
+                    payload_bytes=max(0, element.size - header_bytes),
+                )
+
+            for cluster in clusters:
+                timestamp = 0
+                fh.seek(cluster.payload_offset)
+                for child in iter_children(fh, cluster, file_size=size):
+                    if child.size is None:
+                        continue
+                    if child.element_id == self.TIMESTAMP_ID:
+                        timestamp = int.from_bytes(
+                            read_at(child.payload_offset, child.size), "big",
+                        )
+                    elif child.element_id == self.SIMPLE_BLOCK_ID:
+                        yield block_summary(child, timestamp, None)
+                    elif child.element_id == self.BLOCK_GROUP_ID:
+                        block: EbmlElement | None = None
+                        duration_ticks = 0
+                        fh.seek(child.payload_offset)
+                        for part in iter_children(fh, child, file_size=size):
+                            if part.size is None:
+                                continue
+                            if part.element_id == self.BLOCK_ID:
+                                block = part
+                            elif part.element_id == self.BLOCK_DURATION_ID:
+                                duration_ticks = int.from_bytes(
+                                    read_at(part.payload_offset, part.size), "big",
+                                )
+                        if block is None:
+                            raise ValueError("BlockGroup sans Block")
+                        yield block_summary(
+                            block,
+                            timestamp,
+                            duration_ticks * scale_ns if duration_ticks else None,
+                        )
+
 
 @dataclass(frozen=True)
 class MatroskaTrack:
@@ -834,6 +1013,18 @@ class MatroskaTrack:
     flag_visual_impaired: bool = False
     flag_original: bool = False
     flag_commentary: bool = False
+
+@dataclass(frozen=True)
+class MatroskaBlockSummary:
+    """Compteurs d'un bloc lus sans matérialiser ses frames."""
+
+    track_number: int
+    timestamp_ns: int
+    #: BlockDuration explicite converti en ns, ``None`` quand absent.
+    duration_ns: int | None
+    frame_count: int
+    payload_bytes: int
+
 
 @dataclass(frozen=True)
 class MatroskaBlock:
@@ -898,7 +1089,8 @@ class MatroskaTag:
 
 
 __all__ = [
-    "EbmlElement", "MatroskaAttachment", "MatroskaAttachmentHeader", "MatroskaBlock", "MatroskaChapter",
+    "EbmlElement", "MatroskaAttachment", "MatroskaAttachmentHeader", "MatroskaBlock",
+    "MatroskaBlockSummary", "MatroskaChapter",
     "MatroskaEdition", "MatroskaReader", "MatroskaTag", "MatroskaTrack",
     "iter_children", "payload_children", "read_element",
 ]
