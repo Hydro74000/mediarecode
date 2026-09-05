@@ -72,12 +72,10 @@ class MatroskaTrackStatisticsEditor:
         self._editor = editor or MatroskaSegmentInfoHeaderEditor(
             options=MatroskaSegmentInfoHeaderEditorOptions(fallback_mode="skip")
         )
-        # Le parcours coûte une entrée/sortie par bloc : plusieurs lectures en
-        # vol divisent le temps sur un SSD sans changer le résultat (les
-        # tranches restent consommées dans l'ordre du fichier).
-        self._scan_workers = (
-            max(1, min(8, os.cpu_count() or 1)) if scan_workers is None else max(1, scan_workers)
-        )
+        # Le parcours EBML est principalement CPU-bound en Python : le multithreading
+        # avec le GIL dégrade les performances par rapport au parcours séquentiel
+        # optimisé en mémoire (mmap). Défaut 1 worker.
+        self._scan_workers = 1 if scan_workers is None else max(1, scan_workers)
 
     # ------------------------------------------------------------------
     # Public API

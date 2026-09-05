@@ -240,6 +240,7 @@ class RemuxPanel(QWidget):
             sync_advanced_audio_rewrite_enabled=self._config.sync_advanced_audio_rewrite_enabled,
             aac_bitrate_per_channel_kbps=self._config.aac_bitrate_per_channel_kbps,
             eac3_bitrate_per_channel_kbps=self._config.eac3_bitrate_per_channel_kbps,
+            regenerate_statistics=getattr(self._config, "matroska_regenerate_statistics", True),
         )
 
     def _recreate_workflow(self) -> None:
@@ -1082,6 +1083,7 @@ class RemuxPanel(QWidget):
         self._workflow.set_ffprobe_bin(self._config.tool_ffprobe)
         self._workflow.set_ffmpeg_threads(self._config.ffmpeg_threads)
         self._workflow.set_generate_nfo(self._config.generate_nfo)
+        self._workflow.set_regenerate_statistics(getattr(self._config, "matroska_regenerate_statistics", True))
         self._workflow.set_mediainfo_bin(self._config.tool_mediainfo)
         self._workflow.set_sync_rewrite_enabled(self._config.sync_rewrite_enabled)
         self._workflow.set_sync_advanced_audio_rewrite_enabled(

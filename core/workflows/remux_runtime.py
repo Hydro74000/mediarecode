@@ -340,12 +340,7 @@ class RemuxRuntimeRunner:
                 # pistes sources, déjà publiés par leurs tags. Les mesurer sur
                 # la sortie relirait le fichier entier pour rien.
                 derived_statistics = None
-                untouched_mapping = (
-                    not sync_prepared
-                    and live_sync_session is None
-                    and mapped_tracks == list(plan.mapped_tracks)
-                )
-                if untouched_mapping:
+                if not any(p for p in sync_cleanup_paths if any(m.source_path == p for m in mapped_tracks)):
                     passthrough_refs = passthrough_source_refs(mapped_tracks)
                     if passthrough_refs is not None:
                         derived_statistics = derive_output_statistics(passthrough_refs)

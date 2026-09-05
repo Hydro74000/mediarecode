@@ -333,7 +333,10 @@ class TestMatroskaMuxSetting:
 
     def test_to_dict_exposes_matroska_section(self, tmp_path: Path) -> None:
         config, _settings = _app_config(tmp_path)
-        assert config.to_dict()["matroska"] == {"mux_backend": "ffmpeg"}
+        assert config.to_dict()["matroska"] == {
+            "mux_backend": "ffmpeg",
+            "regenerate_statistics": True,
+        }
 
     def test_ini_field_groups_expose_muxage_matroska_section(self) -> None:
         from core.config import INI_FIELD_GROUPS

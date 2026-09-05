@@ -54,6 +54,7 @@ from core.workflows.common.sync_rewrite import (
 from core.workflows.common.timeline_sync import (
     sync_cleanup_paths as _common_sync_cleanup_paths,
 )
+from core.workflows.common.track_statistics import derive_output_statistics
 from core.workflows.encode.catalog import (
     is_h264_video_codec,
 )
@@ -325,6 +326,7 @@ class EncodeWorkflow(QObject):
         sync_rewrite_enabled:      bool = False,
         aac_bitrate_per_channel_kbps: int = 96,
         eac3_bitrate_per_channel_kbps: int = 96,
+        regenerate_statistics: bool = True,
     ) -> None:
         super().__init__(parent)
         self._ffmpeg = ffmpeg_bin
@@ -383,6 +385,7 @@ class EncodeWorkflow(QObject):
         self._statistics_post_action = MatroskaTrackStatisticsPostAction(
             writing_app=MatroskaMuxingAppPostAction.default_prefix(APP_VERSION_LABEL),
             log_cb=self.log_message.emit,
+            enabled=regenerate_statistics,
         )
         self._signal_binding_service = _SignalBindingService(
             _SignalBindingServiceCallbacks(
@@ -425,6 +428,9 @@ class EncodeWorkflow(QObject):
 
     def set_generate_nfo(self, generate_nfo: bool) -> None:
         self._generate_nfo = generate_nfo
+
+    def set_regenerate_statistics(self, enabled: bool) -> None:
+        self._statistics_post_action.set_enabled(enabled)
 
     def set_sync_rewrite_enabled(self, enabled: bool) -> None:
         self._sync_rewrite_enabled = bool(enabled)
@@ -2948,6 +2954,7 @@ class EncodeWorkflow(QObject):
             attachment_stream_expectations=self._attachment_stream_expectations(config),
             source_has_chapters=self._source_has_chapters_hint(config),
         )
+        derived_statistics = self._derive_passthrough_statistics(config, plan)
         transaction = MatroskaOutputTransaction(
             output=config.output,
             contract=contract,
@@ -2956,7 +2963,9 @@ class EncodeWorkflow(QObject):
             post_actions=(
                 self._muxing_post_action.apply_if_mkv,
                 self._language_post_action.apply_if_mkv,
-                self._statistics_post_action.apply_if_mkv,
+                lambda path: self._statistics_post_action.apply_if_mkv(
+                    path, statistics_by_position=derived_statistics,
+                ),
             ),
             write_nfo=self._write_nfo_after_commit if self._generate_nfo else None,
             warn=lambda message: self.log_message.emit("WARN", message),
@@ -2969,6 +2978,35 @@ class EncodeWorkflow(QObject):
             signals=signals,
             extra_post_actions=extra_post_actions,
         )
+
+    @staticmethod
+    def _derive_passthrough_statistics(
+        config: EncodeConfig, plan: EncodePlan,
+    ) -> dict[int, tuple[int, int, int]] | None:
+        """Dérive les statistiques de pistes si tout est en copie stricte sans transcodage."""
+        video_tracks = getattr(config, "video_tracks", []) or []
+        if not video_tracks and getattr(config, "video", None) is not None:
+            video_tracks = [config.video]
+        if not video_tracks:
+            return None
+        for v in video_tracks:
+            if str(getattr(v, "codec", "") or "").strip().lower() != "copy":
+                return None
+            if bool(getattr(v, "tonemap_to_sdr", False)):
+                return None
+
+        for a in getattr(config, "audio_tracks", []) or []:
+            if str(getattr(a, "codec", "") or "").strip().lower() != "copy":
+                return None
+
+        for offset in getattr(config, "track_time_offsets", []) or []:
+            if int(getattr(offset, "offset_ms", 0) or 0) != 0:
+                return None
+
+        if not plan.track_metadata:
+            return None
+        refs = [(Path(m.source), int(m.stream_index)) for m in plan.track_metadata]
+        return derive_output_statistics(refs)
 
     def _run_transaction_command(
         self,

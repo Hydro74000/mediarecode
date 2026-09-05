@@ -10,6 +10,7 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from io import BytesIO
+import mmap
 from pathlib import Path
 import struct
 from typing import BinaryIO, Iterator
@@ -907,7 +908,143 @@ class MatroskaReader:
         self,
         clusters: list[EbmlElement],
     ) -> Iterator["MatroskaBlockSummary"]:
-        """Parcours des en-têtes de blocs d'une plage de Clusters."""
+        """Parcours des en-têtes de blocs d'une plage de Clusters.
+
+        Tente en priorité un parcours direct via projection mémoire (mmap),
+        qui évite les millions d'appels système tell/seek/read et le recyclage
+        constant du tampon de lecture. Bascule sur le mode flux si mmap échoue.
+        """
+        if not clusters:
+            return
+        try:
+            yield from self._scan_clusters_mmap(clusters)
+            return
+        except (OSError, ValueError):
+            pass
+        yield from self._scan_clusters_stream(clusters)
+
+    def _scan_clusters_mmap(
+        self,
+        clusters: list[EbmlElement],
+    ) -> Iterator["MatroskaBlockSummary"]:
+        size = self.path.stat().st_size
+        if size == 0:
+            return
+        scale_ns = self.timestamp_scale_ns()
+        with self.path.open("rb") as fh:
+            with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                if hasattr(mmap, "MADV_SEQUENTIAL"):
+                    try:
+                        mm.madvise(mmap.MADV_SEQUENTIAL)
+                    except (OSError, ValueError):
+                        pass
+
+                def block_summary_mem(
+                    payload_offset: int,
+                    elem_size: int,
+                    cluster_timestamp: int,
+                    duration_ns: int | None,
+                ) -> "MatroskaBlockSummary":
+                    probe_size = min(elem_size, 256)
+                    header = mm[payload_offset:payload_offset + probe_size]
+                    track_number, vint_length = _read_vint_value(header)
+                    if len(header) < vint_length + 3:
+                        raise ValueError("Block Matroska tronqué")
+                    relative = int.from_bytes(header[vint_length:vint_length + 2], "big", signed=True)
+                    flags = header[vint_length + 2]
+                    while True:
+                        try:
+                            frame_count, lacing_bytes = self._lacing_overhead(
+                                header[vint_length + 3:], flags,
+                            )
+                            break
+                        except ValueError:
+                            if probe_size >= elem_size:
+                                raise
+                            probe_size = min(elem_size, probe_size * 4)
+                            header = mm[payload_offset:payload_offset + probe_size]
+                    header_bytes = vint_length + 3 + lacing_bytes
+                    return MatroskaBlockSummary(
+                        track_number=track_number,
+                        timestamp_ns=(cluster_timestamp + relative) * scale_ns,
+                        duration_ns=duration_ns,
+                        frame_count=frame_count,
+                        payload_bytes=max(0, elem_size - header_bytes),
+                    )
+
+                for cluster in clusters:
+                    cur = cluster.payload_offset
+                    limit = cluster.end if cluster.end is not None else size
+                    cluster_timestamp = 0
+                    while cur < limit:
+                        first = mm[cur]
+                        id_len = _vint_length(first)
+                        elem_id = bytes(mm[cur:cur + id_len])
+                        cur += id_len
+                        if cur >= limit:
+                            break
+                        first_size = mm[cur]
+                        size_len = _vint_length(first_size)
+                        raw_size = mm[cur:cur + size_len]
+                        size_val = raw_size[0] & (0xFF >> size_len)
+                        for b in raw_size[1:]:
+                            size_val = (size_val << 8) | b
+                        unknown = size_val == (1 << (7 * size_len)) - 1
+                        cur += size_len
+                        if unknown:
+                            break
+                        payload_offset = cur
+                        child_end = payload_offset + size_val
+                        cur = child_end
+
+                        if elem_id == self.TIMESTAMP_ID:
+                            cluster_timestamp = int.from_bytes(
+                                mm[payload_offset:child_end], "big",
+                            )
+                        elif elem_id == self.SIMPLE_BLOCK_ID:
+                            yield block_summary_mem(payload_offset, size_val, cluster_timestamp, None)
+                        elif elem_id == self.BLOCK_GROUP_ID:
+                            bg_cur = payload_offset
+                            block_payload_offset = None
+                            block_size_val = None
+                            duration_ticks = 0
+                            while bg_cur < child_end:
+                                p_first = mm[bg_cur]
+                                p_id_len = _vint_length(p_first)
+                                p_id = bytes(mm[bg_cur:bg_cur + p_id_len])
+                                bg_cur += p_id_len
+                                if bg_cur >= child_end:
+                                    break
+                                p_size_first = mm[bg_cur]
+                                p_size_len = _vint_length(p_size_first)
+                                p_raw_size = mm[bg_cur:bg_cur + p_size_len]
+                                p_val = p_raw_size[0] & (0xFF >> p_size_len)
+                                for b in p_raw_size[1:]:
+                                    p_val = (p_val << 8) | b
+                                bg_cur += p_size_len
+                                p_payload = bg_cur
+                                bg_cur += p_val
+                                if p_id == self.BLOCK_ID:
+                                    block_payload_offset = p_payload
+                                    block_size_val = p_val
+                                elif p_id == self.BLOCK_DURATION_ID:
+                                    duration_ticks = int.from_bytes(
+                                        mm[p_payload:p_payload + p_val], "big",
+                                    )
+                            if block_payload_offset is None or block_size_val is None:
+                                raise ValueError("BlockGroup sans Block")
+                            yield block_summary_mem(
+                                block_payload_offset,
+                                block_size_val,
+                                cluster_timestamp,
+                                duration_ticks * scale_ns if duration_ticks else None,
+                            )
+
+    def _scan_clusters_stream(
+        self,
+        clusters: list[EbmlElement],
+    ) -> Iterator["MatroskaBlockSummary"]:
+        """Parcours de secours via descripteur de fichier tamponné."""
         size = self.path.stat().st_size
         scale_ns = self.timestamp_scale_ns()
         # Chaque payload de bloc est sauté : un tampon de lecture large serait

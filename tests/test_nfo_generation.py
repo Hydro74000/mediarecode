@@ -131,8 +131,11 @@ class TestAppConfigGenerateNfo:
         """La section matroska expose le backend de muxage persistant."""
         from core.config import INI_FIELD_GROUPS
         matroska_group = next(g for g in INI_FIELD_GROUPS if g["section"] == "matroska")
-        assert [field["key"] for field in matroska_group["fields"]] == ["mux_backend"]
-        assert matroska_group["fields"][0]["attr"] == "matroska_mux_backend"
+        keys = [field["key"] for field in matroska_group["fields"]]
+        assert "mux_backend" in keys
+        assert "regenerate_statistics" in keys
+        mux_field = next(f for f in matroska_group["fields"] if f["key"] == "mux_backend")
+        assert mux_field["attr"] == "matroska_mux_backend"
 
 
 # ===========================================================================

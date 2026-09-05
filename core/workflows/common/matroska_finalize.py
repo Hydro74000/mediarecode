@@ -224,10 +224,20 @@ class MatroskaTrackStatisticsPostAction:
         editor: MatroskaTrackStatisticsEditor | None = None,
         writing_app: str | None = None,
         log_cb: Callable[[str, str], None] | None = None,
+        enabled: bool = True,
     ) -> None:
         self._editor = editor or MatroskaTrackStatisticsEditor()
         self._writing_app = writing_app
         self._log_cb = log_cb
+        self._enabled = bool(enabled)
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Active ou désactive la régénération des statistiques."""
+        self._enabled = bool(enabled)
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
 
     def apply_if_mkv(
         self,
@@ -237,6 +247,8 @@ class MatroskaTrackStatisticsPostAction:
         log_cb: Callable[[str, str], None] | None = None,
         statistics_by_position: dict[int, tuple[int, int, int]] | None = None,
     ) -> MatroskaStatisticsPatchResult | None:
+        if not self._enabled:
+            return None
         cb = log_cb or self._log_cb
         name = output_path.name.lower()
         if output_path.suffix.lower() != ".mkv" and not name.endswith(".mkv.partial"):

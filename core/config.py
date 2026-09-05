@@ -815,6 +815,7 @@ INI_FIELD_GROUPS: tuple[dict[str, Any], ...] = (
         "title": "Muxage Matroska",
         "fields": (
             {"key": "mux_backend", "attr": "matroska_mux_backend", "kind": "choice", "label": "Backend de muxage", "description": "Assembleur final Matroska des workflows remux et encodage. FFmpeg par défaut ; Auto sélectionne le muxeur natif quand le plan le permet et journalise le repli ; Natif n'autorise aucun repli.", "options": (("ffmpeg", "FFmpeg"), ("native", "Natif Matroska"), ("auto", "Auto"))},
+            {"key": "regenerate_statistics", "attr": "matroska_regenerate_statistics", "kind": "bool", "label": "Régénérer les statistiques de pistes (BPS, frames, octets)", "description": "Calcule et écrit les balises statistiques Matroska (BPS, DURATION, NUMBER_OF_FRAMES, NUMBER_OF_BYTES) par piste pour MediaInfo. Activé par défaut."},
         ),
     },
     {
@@ -1127,6 +1128,12 @@ class AppConfig:
                     f"[matroska] mux_backend invalide ({raw_mux_backend!r}) : retour au défaut 'ffmpeg'."
                 )
             self.matroska_mux_backend = "ffmpeg"
+        self.matroska_regenerate_statistics = self._resolve_bool(
+            "matroska",
+            "regenerate_statistics",
+            "matroska/regenerate_statistics",
+            True,
+        )
         # Alias interne de compatibilité (à supprimer une fois les usages migrés).
         self.remux_mux_backend = self.matroska_mux_backend
 
@@ -1231,6 +1238,10 @@ class AppConfig:
             "true" if self.sync_advanced_audio_rewrite_enabled else "false",
         )
         s.setValue("matroska/mux_backend", self.matroska_mux_backend)
+        s.setValue(
+            "matroska/regenerate_statistics",
+            "true" if self.matroska_regenerate_statistics else "false",
+        )
 
         s.setValue("ui/language", self.language)
         s.setValue("ui/log_max_lines", self.log_max_lines)
@@ -1411,7 +1422,10 @@ class AppConfig:
                 "rewrite_enabled": self.sync_rewrite_enabled,
                 "advanced_audio_rewrite_enabled": self.sync_advanced_audio_rewrite_enabled,
             },
-            "matroska": {"mux_backend": self.matroska_mux_backend},
+            "matroska": {
+                "mux_backend": self.matroska_mux_backend,
+                "regenerate_statistics": self.matroska_regenerate_statistics,
+            },
             "ui": {
                 "language": self.language,
                 "log_max_lines": self.log_max_lines,

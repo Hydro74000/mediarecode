@@ -113,6 +113,7 @@ class EncodePanel(QWidget):
             sync_rewrite_enabled=config.sync_rewrite_enabled,
             aac_bitrate_per_channel_kbps=config.aac_bitrate_per_channel_kbps,
             eac3_bitrate_per_channel_kbps=config.eac3_bitrate_per_channel_kbps,
+            regenerate_statistics=getattr(config, "matroska_regenerate_statistics", True),
         )
         self._profiles  = ProfileManager(config.app_data_dir / "encode_profiles")
         self._executor  = ThreadPoolExecutor(max_workers=1)
@@ -4181,6 +4182,7 @@ class EncodePanel(QWidget):
         self._workflow.set_max_parallel_video_encodes(self._config.max_parallel_video_encodes)
         self._workflow.set_mediainfo_bin(self._config.tool_mediainfo)
         self._workflow.set_generate_nfo(self._config.generate_nfo)
+        self._workflow.set_regenerate_statistics(getattr(self._config, "matroska_regenerate_statistics", True))
         self._workflow.set_sync_rewrite_enabled(self._config.sync_rewrite_enabled)
         self._workflow.set_sync_rewrite_audio_bitrates(
             aac_bitrate_per_channel_kbps=self._config.aac_bitrate_per_channel_kbps,

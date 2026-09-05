@@ -229,3 +229,108 @@ def test_validation_probe_reads_the_last_packet_timestamp(tmp_path: Path) -> Non
     )
 
     assert validate_matroska_output(output, contract) == []
+
+
+def test_track_statistics_post_action_disabled(tmp_path: Path) -> None:
+    """La post-action désactivée retourne None sans modifier le fichier."""
+    from core.workflows.common.matroska_finalize import MatroskaTrackStatisticsPostAction
+
+    output = tmp_path / "out.mkv"
+    _write_mkv(output)
+    action = MatroskaTrackStatisticsPostAction(enabled=False)
+    assert not action.enabled
+    result = action.apply_if_mkv(output)
+    assert result is None
+
+    action.set_enabled(True)
+    assert action.enabled
+    result = action.apply_if_mkv(output)
+    assert result is not None
+    assert result.applied
+
+
+def test_track_statistics_editor_defaults_to_single_worker() -> None:
+    """L'éditeur utilise 1 worker par défaut pour éviter la contention du GIL."""
+    editor = MatroskaTrackStatisticsEditor()
+    assert editor._scan_workers == 1
+
+
+def test_reader_scan_clusters_falls_back_if_mmap_fails(tmp_path: Path, monkeypatch) -> None:
+    """_scan_clusters bascule sur _scan_clusters_stream si mmap échoue."""
+    import mmap
+
+    output = tmp_path / "out.mkv"
+    _write_mkv(output)
+    reader = MatroskaReader(output)
+
+    def failing_mmap(*args, **kwargs):
+        raise OSError("mmap simulated failure")
+
+    monkeypatch.setattr(mmap, "mmap", failing_mmap)
+    summaries = list(reader.block_summaries())
+    assert len(summaries) == 5
+
+
+def test_encode_workflow_derives_passthrough_statistics(tmp_path: Path) -> None:
+    """EncodeWorkflow dérive les statistiques si tout est en copie stricte sans décalage."""
+    from core.workflows.encode.workflow import EncodeWorkflow
+    from core.workflows.encode.models import EncodeConfig, VideoEncodeSettings, AudioTrackSettings, TrackTimeOffset
+    from core.workflows.encode.planning.plan_models import EncodePlan, PlannedTrackMetadata, SyncAnalysisPlan, ContainerMetadataPlan
+    from types import MappingProxyType
+
+    src = tmp_path / "src.mkv"
+    _write_mkv(src)
+    # Tags avec statistiques
+    from core.workflows.common.track_statistics import derive_output_statistics
+    stats = MatroskaTrackStatisticsEditor().apply(src)
+    assert stats.applied
+
+    config_copy = EncodeConfig(
+        source=src,
+        output=tmp_path / "out.mkv",
+        video_tracks=[VideoEncodeSettings(source_path=src, stream_index=0, codec="copy")],
+        audio_tracks=[AudioTrackSettings(source_path=src, stream_index=1, codec="copy")],
+    )
+    plan = EncodePlan(
+        all_sources=(src,),
+        source_idx=MappingProxyType({src: 0}),
+        offset_lookup=MappingProxyType({}),
+        resolved_subtitle_tracks=(),
+        subtitles_resolved=True,
+        video_source=src,
+        video_stream=0,
+        video_key=("video", src, 0),
+        video_input_idx=0,
+        video_default_map=(0, 0),
+        video_tracks=(),
+        track_metadata=(
+            PlannedTrackMetadata("video", src, 0),
+            PlannedTrackMetadata("audio", src, 1),
+        ),
+        sync_analysis=SyncAnalysisPlan(False, (), False, False, False, False, None),
+        container_metadata=ContainerMetadataPlan(None, False, False, False, False, MappingProxyType({})),
+    )
+
+    derived = EncodeWorkflow._derive_passthrough_statistics(config_copy, plan)
+    assert derived is not None
+    assert len(derived) == 2
+
+    # Si la vidéo est transcodée : None
+    config_transcode = EncodeConfig(
+        source=src,
+        output=tmp_path / "out.mkv",
+        video_tracks=[VideoEncodeSettings(source_path=src, stream_index=0, codec="hevc_nvenc")],
+        audio_tracks=[AudioTrackSettings(source_path=src, stream_index=1, codec="copy")],
+    )
+    assert EncodeWorkflow._derive_passthrough_statistics(config_transcode, plan) is None
+
+    # Si un décalage temporel non nul existe : None
+    config_offset = EncodeConfig(
+        source=src,
+        output=tmp_path / "out.mkv",
+        video_tracks=[VideoEncodeSettings(source_path=src, stream_index=0, codec="copy")],
+        audio_tracks=[AudioTrackSettings(source_path=src, stream_index=1, codec="copy")],
+        track_time_offsets=[TrackTimeOffset(track_type="audio", source_path=src, stream_index=1, offset_ms=250)],
+    )
+    assert EncodeWorkflow._derive_passthrough_statistics(config_offset, plan) is None
+

@@ -99,6 +99,7 @@ class RemuxWorkflow(QObject):
         sync_advanced_audio_rewrite_enabled: bool = False,
         aac_bitrate_per_channel_kbps: int = 96,
         eac3_bitrate_per_channel_kbps: int = 96,
+        regenerate_statistics: bool = True,
     ) -> None:
         super().__init__(parent)
         self._ffmpeg = ffmpeg_bin
@@ -128,6 +129,7 @@ class RemuxWorkflow(QObject):
         self._statistics_post_action = MatroskaTrackStatisticsPostAction(
             writing_app=MatroskaMuxingAppPostAction.default_prefix(APP_VERSION_LABEL),
             log_cb=self.log_message.emit,
+            enabled=regenerate_statistics,
         )
 
     def set_ffmpeg_bin(self, ffmpeg_bin: str) -> None:
@@ -144,6 +146,9 @@ class RemuxWorkflow(QObject):
 
     def set_generate_nfo(self, generate_nfo: bool) -> None:
         self._generate_nfo = generate_nfo
+
+    def set_regenerate_statistics(self, enabled: bool) -> None:
+        self._statistics_post_action.set_enabled(enabled)
 
     def set_mediainfo_bin(self, mediainfo_bin: str) -> None:
         self._mediainfo_bin = mediainfo_bin

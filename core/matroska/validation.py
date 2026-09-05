@@ -188,7 +188,7 @@ def validate_matroska_output(
     (voir :func:`_probe_packet_validation`) plutôt que relus intégralement.
     """
     if packet_scan_workers is None:
-        packet_scan_workers = max(1, min(8, os.cpu_count() or 1))
+        packet_scan_workers = 1
     errors: list[str] = []
     if not path.is_file():
         return [f"Sortie candidate absente : {path}"]
